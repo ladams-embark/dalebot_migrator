@@ -1,18 +1,41 @@
 # Start Here — Workday Migration Tool
 
-Everything you need to know is in `CLAUDE.md`. This file is the immediate action plan.
+Everything you need to know is in `../CLAUDE.md`. This file is the immediate action plan.
+
+All module paths below are relative to `src/wdmigrator/` — so `auth/client.py`
+means `src/wdmigrator/auth/client.py`, imported as `wdmigrator.auth.client`.
 
 ---
 
 ## Before you write any code
 
-1. **Set up `.env`** — copy `.env.example` to `.env` and fill in real credentials
-2. **Install dependencies** — `pip install -r requirements.txt`
-3. **Verify the WSDL is reachable**:
+1. **Activate the venv** — it already exists at the project root:
+   ```powershell
+   .\.venv\Scripts\Activate.ps1
+   ```
+   If it's missing: `python -m venv .venv` then `pip install -r requirements.txt`.
+
+2. **Verify the environment offline** — no credentials or network needed:
+   ```powershell
+   python scripts/selfcheck.py
+   pytest
+   ```
+   Both should pass. This confirms the package imports, the bundled WSDL loads,
+   a zeep client builds offline, and all four SOAP operations resolve.
+
+3. **Set up `.env`** — copy `.env.example` to `.env` and fill in real credentials.
+   Only needed once you're ready for live tenant calls. `.env` is gitignored;
+   never commit it.
+
+4. **Verify the live WSDL is reachable** (only when moving to live calls):
    ```bash
    curl -s "https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Report_Metadata/v47.0?wsdl" | head -5
    ```
    Should return XML starting with `<wsdl:definitions`. If not, check services host in `.env`.
+
+   Note: you do **not** need this to develop. The WSDL is bundled at
+   `src/wdmigrator/assets/report_metadata_wsdl.xml` and reachable via
+   `from wdmigrator import DEFAULT_WSDL_PATH`.
 
 ---
 
@@ -25,7 +48,8 @@ Functions to implement:
 - `make_client(services_host, tenant, isu_username, isu_password, service, version) → zeep.Client`
 - `verify_connection(client) → bool`
 
-Test: `pytest tests/test_auth.py` — must pass against live source tenant before moving on.
+Test: `pytest -m live tests/test_auth.py` — mark these `@pytest.mark.live`; they
+must pass against the live source tenant before moving on.
 
 See `CLAUDE.md` for the exact zeep initialization pattern.
 
@@ -41,7 +65,9 @@ Functions to implement:
 Uses pagination (Page/Count). Always set `Include_Calculated_Field_Data=True`.
 See `CLAUDE.md` for the pagination pattern.
 
-Test: `pytest tests/test_discovery.py` — asserts non-empty list from source tenant.
+Test: `pytest -m live tests/test_discovery.py` — mark `@pytest.mark.live`; asserts
+non-empty list from source tenant. Save a sanitized response into
+`tests/fixtures/` so step 3 can be tested offline.
 
 ---
 
@@ -54,7 +80,9 @@ Functions to implement:
 - `topological_sort(dag, fields) → list[dict]`
 - `substitute_wids(obj, wid_map) → dict`
 
-Test: `pytest tests/test_ordering.py` — pure unit tests with fixture data. No `.env` needed.
+Test: `pytest tests/test_ordering.py` — pure unit tests with fixture data. No
+marker, no `.env`, no network. This is the fast inner loop and it covers the
+highest-risk logic in the project — invest in it.
 
 Key insight: walk the serialized field dict recursively looking for any key named `WID`.
 If that WID is in `custom_wids`, it's a dependency. Global/delivered WIDs won't be in `custom_wids`.
@@ -72,6 +100,7 @@ Functions to implement:
 In dry-run mode, log exactly what would be sent.
 
 Test: `pytest tests/test_writer.py` — always dry_run=True, zero destination calls.
+Use a mock transport so this needs no marker and stays in the offline suite.
 
 ---
 
@@ -90,12 +119,18 @@ Returns pass/fail per object.
 ### Step 6 — `cli.py`
 Depends on: all modules above
 
+Lives at `src/wdmigrator/cli.py`. `pyproject.toml` already declares the console
+script `wdmigrator = "wdmigrator.cli:cli"`, so it works as `wdmigrator ...` the
+moment the file exists (the venv install is editable — no reinstall needed).
+
 Commands:
 ```
-python cli.py discover          # list all fields + reports in source tenant
-python cli.py migrate --dry-run # show what would be migrated (default)
-python cli.py migrate           # real migration (prompts for confirmation)
-python cli.py verify            # check destination matches source
+wdmigrator discover          # list all fields + reports in source tenant
+wdmigrator migrate --dry-run # show what would be migrated (default)
+wdmigrator migrate           # real migration (prompts for confirmation)
+wdmigrator verify            # check destination matches source
+
+python -m wdmigrator.cli discover    # equivalent, no console script needed
 ```
 
 Use `click` for CLI. All commands read from `.env`. `migrate` command defaults to dry-run

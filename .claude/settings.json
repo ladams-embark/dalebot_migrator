@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python scripts/selfcheck.py)",
+      "PowerShell(.\\.venv\\Scripts\\python.exe scripts/selfcheck.py)",
+      "PowerShell(pytest:*)",
+      "PowerShell(.\\.venv\\Scripts\\python.exe -m pytest:*)",
+      "PowerShell(python -m pytest:*)",
+      "PowerShell(git status:*)",
+      "PowerShell(git diff:*)",
+      "PowerShell(git log:*)",
+      "PowerShell(git add:*)",
+      "Bash(pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)"
+    ]
+  }
+}

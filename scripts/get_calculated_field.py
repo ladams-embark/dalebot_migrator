@@ -22,24 +22,32 @@ All specifics below are CONFIRMED against the local WSDL
 
 This script READS from the source tenant only. It performs no writes.
 
-Environment variables (never hardcode — see workday-migrator/.env.example):
+Run it:
+  python scripts/get_calculated_field.py                 # all fields, page 1
+  python scripts/get_calculated_field.py <id> [id_type]   # one field
+
+Environment variables (never hardcode — see .env.example):
   WD_SOURCE_SERVICES_HOST — e.g. impl-services1.wd12.myworkday.com
   WD_SOURCE_TENANT        — e.g. commitconsulting_dpt1
   WD_SOURCE_ISU_USERNAME  — Integration System User (usually ISU_name@tenant)
   WD_SOURCE_ISU_PASSWORD  — ISU password
   WD_WWS_VERSION          — defaults to v47.0 (matches the WSDL)
-  WD_WSDL_PATH            — optional; defaults to the local report_metadata_wsdl.xml
-                            next to this script. Set to a live "...?wsdl" URL to
-                            fetch the WSDL from the tenant instead.
+  WD_WSDL_PATH            — optional; defaults to the WSDL bundled with the
+                            wdmigrator package (src/wdmigrator/assets/). Set to
+                            a live "...?wsdl" URL to fetch from the tenant.
 """
 
 import os
-from pathlib import Path
 
+from dotenv import load_dotenv
 from zeep import Client, Settings
 from zeep.transports import Transport
 from requests import Session
 from requests.auth import HTTPBasicAuth
+
+from wdmigrator import DEFAULT_WSDL_PATH
+
+load_dotenv()
 
 
 # ── Config from environment ──────────────────────────────────────────────────
@@ -50,8 +58,7 @@ API_VERSION  = os.environ.get("WD_WWS_VERSION", "v47.0")  # WSDL fixes this at v
 # Build the client from the local WSDL by default (no tenant round-trip needed
 # just to construct the client). The WSDL embeds the service address, so actual
 # operation calls still go to the tenant endpoint over HTTPS.
-_DEFAULT_WSDL = Path(__file__).with_name("report_metadata_wsdl.xml")
-WSDL_SOURCE = os.environ.get("WD_WSDL_PATH", str(_DEFAULT_WSDL))
+WSDL_SOURCE = os.environ.get("WD_WSDL_PATH", str(DEFAULT_WSDL_PATH))
 
 
 def _require_env(name: str) -> str:

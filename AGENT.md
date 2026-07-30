@@ -24,7 +24,7 @@ under "Project map" — read them before writing code in a given area.
    Warn loudly before anything could touch Production.
 4. **Verify, don't invent.** Never invent Workday endpoints, operation names,
    payload shapes, or field names. Confirm against the local WSDL
-   (`workday_client/report_metadata_wsdl.xml`) or official Workday docs. If you
+   (`src/wdmigrator/assets/report_metadata_wsdl.xml`) or official Workday docs. If you
    can't confirm a capability, say so and propose how to verify it — don't guess.
 5. **Stay in scope.** Only make changes directly requested. No unrequested
    features, abstractions, or refactors. Never modify files outside the project
@@ -39,28 +39,52 @@ under "Project map" — read them before writing code in a given area.
 
 ## Project map
 
-Root: `Dale Bot/`
+Root: `C:\dev\dalebot_migrator` (deliberately outside OneDrive — see README.md).
 
-- `AGENT.md` — this file.
-- `HANDOFF.md` — session-by-session status log. **Read first each session**;
-  update it at the end of a session.
-- `CLAUDE.md` (root) — original project charter.
-- `workday-migrator/` — the real tool (scaffold only so far):
-  - `CLAUDE.md` — detailed domain knowledge + hard rules.
-  - `START_HERE.md` — the authoritative 6-step build plan. Follow this order.
-  - `WSDL_NOTES.md` — full WSDL breakdown: operations, field lists, gotchas.
-  - `.env.example` — copy to `.env` and fill in; canonical env var names.
-  - `requirements.txt` — dependencies.
-  - `auth/  discovery/  migrate/  validation/  tests/` — **currently EMPTY.**
-- `workday_client/` — working prototype + assets:
-  - `report_metadata_wsdl.xml` — local copy of the tenant WSDL (v47.0). Point
-    `zeep` at this to build a client **offline**.
-  - `get_calculated_field.py` — verified `Get_Calculated_Fields` read prototype;
-    the model for `discovery/inventory.py`.
+```
+CLAUDE.md              Detailed domain knowledge + hard rules. The deep reference.
+AGENT.md               This file — the operating manual.
+HANDOFF.md             Session-by-session status log. Read first, update last.
+README.md              Setup + the run commands for the dev loop.
+pyproject.toml         Deps, package config, pytest config (single source of truth).
+requirements.txt       Thin shim: `-e .[dev]`.
+.env.example           Copy to `.env` and fill in. Canonical env var names.
+
+docs/
+  START_HERE.md        The authoritative 6-step build plan. Follow this order.
+  WSDL_NOTES.md        Full WSDL breakdown: operations, field lists, gotchas.
+  PROJECT_CHARTER.md   Original charter (historical; superseded by CLAUDE.md).
+
+src/wdmigrator/        The installed package (`import wdmigrator`).
+  __init__.py          Exposes DEFAULT_WSDL_PATH — always use this for the WSDL.
+  assets/
+    report_metadata_wsdl.xml   Local tenant WSDL (v47.0). Build zeep clients OFFLINE.
+  auth/                Step 1 — client.py. NOT YET IMPLEMENTED.
+  discovery/           Step 2 — inventory.py. NOT YET IMPLEMENTED.
+  migrate/             Steps 3-4 — ordering.py, writer.py. NOT YET IMPLEMENTED.
+  validation/          Step 5 — verify.py. NOT YET IMPLEMENTED.
+  cli.py               Step 6. NOT YET CREATED.
+
+scripts/
+  selfcheck.py         Offline env verification. Run this first, always.
+  get_calculated_field.py   Verified Get_Calculated_Fields read prototype;
+                            the model for discovery/inventory.py.
+
+tests/
+  conftest.py          Fixtures: `offline_client` (no creds, no network), `wsdl_path`.
+  test_wsdl_contract.py     Offline guards on documented WSDL facts.
+  fixtures/            Recorded/mock API responses for offline tests.
+```
+
+The four subpackages contain only `__init__.py` docstrings so far. They exist as
+real packages (not bare empty dirs) so git tracks them and imports resolve.
 
 ---
 
-## Build order (from `workday-migrator/START_HERE.md`)
+## Build order (from `docs/START_HERE.md`)
+
+Modules live under `src/wdmigrator/`, so `auth/client.py` below means
+`src/wdmigrator/auth/client.py` and is imported as `wdmigrator.auth.client`.
 
 1. `auth/client.py` — build + verify a zeep client. **Start here.**
 2. `discovery/inventory.py` — `get_all_calculated_fields`, `get_all_report_definitions` (paginated).
@@ -72,33 +96,45 @@ Root: `Dale Bot/`
 Write a test (or a dry-run against recorded/mock responses) alongside every module
 that talks to a tenant, so the destination is never hit during normal testing.
 
+**Test marker discipline** — this is how the destination stays safe:
+- Offline tests (pure logic, fixtures, schema shape): no marker. `pytest` runs these.
+- Anything needing a real tenant: `@pytest.mark.live`. Deselected by default.
+- Anything touching the destination: `@pytest.mark.live` **and** `@pytest.mark.dest`,
+  and `dry_run=True` always.
+
 ---
 
 ## Environment & setup
 
-Set these in `.env` (see `workday-migrator/.env.example` for exact names):
+Set these in `.env` (see `.env.example` for exact names):
 `WD_SOURCE_SERVICES_HOST`, `WD_SOURCE_TENANT`, `WD_SOURCE_ISU_USERNAME`,
 `WD_SOURCE_ISU_PASSWORD`, the `WD_DEST_*` equivalents, `WD_WWS_VERSION` (v47.0),
 `WD_OX_SERVICE_NAME` (Report_Metadata), and `DRY_RUN` (default true).
 
-```bash
-cd workday-migrator
-pip install -r requirements.txt          # zeep, requests, click, pytest, python-dotenv
-cp .env.example .env                      # then fill in real credentials
-pytest                                    # tests that need no tenant must pass offline
+A `.venv` already exists at the project root. Activate it, then:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python scripts/selfcheck.py    # offline: proves env is wired up. Run this first.
+pytest                         # offline suite only — no .env, no network needed
+pytest -m live                 # opt in to real source-tenant calls (needs .env)
 ```
 
-Stack: Python + `zeep` (SOAP) + `requests` (HTTP Basic auth with the ISU) +
-`.env` for config + `pytest`. A thin CLI first; add a UI only if asked.
+`pytest` with no args NEVER touches a tenant — `addopts = -m 'not live'` in
+pyproject.toml enforces it. Keep it that way.
+
+Stack: Python 3.12 + `zeep` 4.3.3 (SOAP) + `requests` (HTTP Basic auth with the
+ISU) + `.env` for config + `pytest`. A thin CLI first; add a UI only if asked.
 
 ---
 
 ## Working with the Report_Metadata SOAP service
 
-- Build the zeep client from the **local WSDL** (`workday_client/report_metadata_wsdl.xml`)
-  so construction needs no tenant round-trip. The WSDL embeds the service address,
-  so real operation calls still go to the tenant over HTTPS. Allow a `WD_WSDL_PATH`
-  override pointing at a live `...?wsdl` URL.
+- Build the zeep client from the **local WSDL** so construction needs no tenant
+  round-trip. Get its path from the package, never hardcode it:
+  `from wdmigrator import DEFAULT_WSDL_PATH`. The WSDL embeds the service
+  address, so real operation calls still go to the tenant over HTTPS. Allow a
+  `WD_WSDL_PATH` override pointing at a live `...?wsdl` URL.
 - Service is `Report_Metadata`, version `v47.0` (fixed in schema). Endpoint pattern:
   `https://{services_host}/ccx/service/{tenant}/Report_Metadata/{version}`.
 - Read ops are `Get_*` (plural for lists); write ops are `Put_*` (singular).
@@ -109,9 +145,9 @@ Stack: Python + `zeep` (SOAP) + `requests` (HTTP Basic auth with the ISU) +
   use the stable `Calculated_Field_Reference_ID`, **not** the tenant-specific WID.
 
 ### The WSDL file is large
-`report_metadata_wsdl.xml` is ~767 KB minified onto 4 lines. Do not Read it whole —
-`grep` it, or slice by character range with Python, to extract specific type
-definitions.
+`src/wdmigrator/assets/report_metadata_wsdl.xml` is ~767 KB minified onto 4 lines.
+Do not Read it whole — `grep` it, or slice by character range with Python, to
+extract specific type definitions.
 
 ---
 
@@ -129,9 +165,11 @@ definitions.
 
 ---
 
-## Current status (2026-07-29)
+## Current status (2026-07-30)
 
-Read side (`Get_Calculated_Fields`) prototype is built and verified offline. Next
-step is the write side, `Put_Calculated_Field` (shape: optional
+Repo restructured into a single installable `wdmigrator` package with a working
+offline dev loop (`scripts/selfcheck.py` + `pytest`, both green, neither touching
+a tenant). Read side (`Get_Calculated_Fields`) prototype is built and verified
+offline. Next step is the write side, `Put_Calculated_Field` (shape: optional
 `Calculated_Field_Reference` + required `Calculated_Field_Data`), dry-run first.
 See `HANDOFF.md` for the latest detail and update it when you finish a session.
