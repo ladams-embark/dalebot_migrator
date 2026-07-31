@@ -22,6 +22,8 @@ from wdmigrator.discovery import (
     iter_calculated_field_index,
     load_index,
     lookup_calculated_field,
+    lookup_report,
+    lookup_report_by_name,
     save_index,
 )
 
@@ -160,6 +162,111 @@ class TestLookup:
     def test_requires_exactly_one_identifier(self, kwargs):
         with pytest.raises(ValueError):
             lookup_calculated_field(FakeConnection(), **kwargs)
+
+
+def _report_search_response(items):
+    return {
+        "Response_Results": {"Total_Results": len(items)},
+        "Response_Data": {"Tenanted_Report_Definition": items},
+    }
+
+
+def _report_reference(wid, custom_report_id):
+    return {
+        "ID": [
+            {"type": "WID", "_value_1": wid},
+            {"type": "Custom_Report_ID", "_value_1": custom_report_id},
+        ]
+    }
+
+
+class _FakeReportLookupConnection:
+    """Distinguishes a name search (`Request_Criteria`) from a targeted
+    fetch (`Request_References`) — the two-call sequence a caller needs to
+    go from 'a report named X' to its full definition. The shared
+    `FakeConnection` above doesn't discriminate between them, since nothing
+    before this needed it to."""
+
+    def __init__(self, search_response, fetch_response):
+        self._search_response = search_response
+        self._fetch_response = fetch_response
+        self.target = SimpleNamespace(tenant="test_tenant")
+        self.limiter = SimpleNamespace(wait=lambda: 0.0)
+        self.service = SimpleNamespace(Get_Tenanted_Report_Definitions=self._get)
+        self.calls = []
+
+    def _get(self, **kwargs):
+        self.calls.append(kwargs)
+        if "Request_References" in kwargs:
+            return self._fetch_response
+        return self._search_response
+
+    def redact(self, text):
+        return text
+
+
+class TestReportLookupByNameThenFullFetch:
+    """`lookup_report_by_name` deliberately returns no report data — it's the
+    cheap existence probe `probe_node` uses for destination conflict
+    checks, not a way to pull a report to migrate. A caller that wants the
+    full definition (name, columns, filters, everything the resolver needs)
+    has to follow up with `lookup_report(wid=...)`. This pins that the two
+    compose correctly, since a UI bug once used the name-only result
+    directly and silently produced report nodes with no `Name` at all."""
+
+    def test_name_search_alone_carries_no_report_data(self):
+        """Realistic shape: the real request sets
+        Include_Tenanted_Report_Definition_Data=False, so a real item from
+        this call never has the Data block — there is no Name to read."""
+        conn = _FakeReportLookupConnection(
+            _report_search_response([{"Tenanted_Report_Definition_Reference": _report_reference("W1", "CR1")}]),
+            fetch_response=None,
+        )
+        result = lookup_report_by_name(conn, "PLNF - All Workers")
+        assert result.outcome is LookupOutcome.FOUND
+        assert result.wid == "W1"
+        assert "Tenanted_Report_Definition_Data" not in (result.data or {})
+
+    def test_full_fetch_by_the_resolved_wid_yields_the_name(self):
+        conn = _FakeReportLookupConnection(
+            _report_search_response([{"Tenanted_Report_Definition_Reference": _report_reference("W1", "CR1")}]),
+            fetch_response={
+                "Response_Data": {
+                    "Tenanted_Report_Definition": [
+                        {
+                            "Tenanted_Report_Definition_Reference": _report_reference("W1", "CR1"),
+                            "Tenanted_Report_Definition_Data": {"Name": "PLNF - All Workers"},
+                        }
+                    ]
+                }
+            },
+        )
+        search_result = lookup_report_by_name(conn, "PLNF - All Workers")
+        full = lookup_report(conn, wid=search_result.wid)
+
+        assert full.outcome is LookupOutcome.FOUND
+        assert full.data["Tenanted_Report_Definition_Data"]["Name"] == "PLNF - All Workers"
+        # The search call carried no Request_References; the fetch call did.
+        assert "Request_Criteria" in conn.calls[0]
+        assert "Request_References" in conn.calls[1]
+
+    def test_ambiguous_name_reports_unknown_not_a_guess(self):
+        conn = _FakeReportLookupConnection(
+            _report_search_response(
+                [
+                    {"Tenanted_Report_Definition_Reference": _report_reference("W1", "CR1")},
+                    {"Tenanted_Report_Definition_Reference": _report_reference("W2", "CR2")},
+                ]
+            ),
+            fetch_response=None,
+        )
+        result = lookup_report_by_name(conn, "Duplicated Name")
+        assert result.outcome is LookupOutcome.UNKNOWN
+
+    def test_missing_name_reports_not_found(self):
+        conn = _FakeReportLookupConnection(_report_search_response([]), fetch_response=None)
+        result = lookup_report_by_name(conn, "Does Not Exist")
+        assert result.outcome is LookupOutcome.NOT_FOUND
 
 
 class TestIndexSweep:

@@ -1,0 +1,135 @@
+"""Step 1: Connect — source and destination tenant credentials.
+
+Nothing downstream can start until both sides have a green connection test.
+Same-tenant source/destination is *allowed* to pass this step — the engine
+still hard-blocks a live write against it later (``safety.py``, no
+override), and blocking it here too would make dry-running against a single
+tenant impossible, which is the only way to exercise the whole flow before a
+real destination tenant exists.
+"""
+
+from __future__ import annotations
+
+import streamlit as st
+
+from wdmigrator.api import (
+    AuthError,
+    Blocker,
+    Role,
+    TenantURLError,
+    connect,
+    install_redacting_log_filter,
+    parse_tenant_url,
+    verify_connection,
+)
+from wdmigrator.ui import secrets as secrets_ui
+from wdmigrator.ui.components import render_connection_status, render_target_card
+from wdmigrator.ui.state import ConnectionState, WizardState, reset_downstream
+
+STEP_ID = "connect"
+
+
+def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, label: str) -> None:
+    # Installed before anything else touches the tenant, so even an auth
+    # failure's error text — which can echo back parts of the request — gets
+    # redacted rather than risking a cleartext password in a traceback.
+    install_redacting_log_filter(state.source.password, state.dest.password)
+
+    try:
+        target = parse_tenant_url(side.target_raw)
+    except TenantURLError as exc:
+        st.error(f"Could not parse the {label} tenant URL: {exc}")
+        side.target = None
+        return
+
+    side.target = target
+
+    if not side.username or not side.password:
+        st.error(f"{label}: username and password are both required.")
+        return
+
+    try:
+        connection = connect(target, side.username, side.password, role=role)
+    except AuthError as exc:
+        st.error(f"{label}: could not build a connection: {exc}")
+        return
+
+    status = verify_connection(connection)
+
+    if status.ok and side.verified_fingerprint and status.fingerprint != side.verified_fingerprint:
+        # A previously-verified side just reconnected as a different
+        # tenant/user. Everything built from it (indexes, closure, plan,
+        # dry run, guard) may no longer be valid.
+        reset_downstream(state, from_step="select")
+        st.info(f"{label} credentials changed — downstream selections and plan were cleared.")
+
+    side.status = status
+    if status.ok:
+        side.connection = connection
+        side.verified_fingerprint = status.fingerprint
+    else:
+        side.connection = None
+
+
+def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
+    st.subheader(label)
+    side.target_raw = st.text_input(
+        f"{label} tenant URL",
+        value=side.target_raw,
+        key=f"{key}_target",
+        placeholder="https://impl.wd12.myworkday.com/commitconsulting_dpt1/...",
+        help="A pasted browser URL, or a bare tenant name.",
+    )
+    side.username = secrets_ui.username_input(f"{label} ISU username", key=f"{key}_user", value=side.username)
+    side.password = secrets_ui.password_input(f"{label} ISU password", key=f"{key}_pass")
+
+    if st.button(f"Test {label.lower()} connection", key=f"{key}_test"):
+        _attempt_connect(state, side, role, label)
+
+    render_target_card(label, side.target)
+    render_connection_status(side.status)
+
+
+def render(state: WizardState) -> None:
+    st.header("Connect")
+    st.caption(
+        "Both sides need a verified connection before you can pick anything to migrate. "
+        "The destination ISU needs Put permission on Special OX Web Services; the source ISU needs Get."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        _render_side(state, state.source, Role.SOURCE, "Source", "src")
+    with col2:
+        _render_side(state, state.dest, Role.DESTINATION, "Destination", "dst")
+
+    if state.source.target is not None and state.dest.target is not None:
+        if state.source.target.identity() == state.dest.target.identity():
+            st.warning(
+                "Source and destination are the same tenant. Dry runs work fine; "
+                "a live migration will be blocked with no override.",
+                icon="⚠️",
+            )
+
+
+def gate(state: WizardState) -> list[Blocker]:
+    blockers = []
+    if not state.source.verified:
+        blockers.append(
+            Blocker(
+                node_id=None,
+                title="Source not connected",
+                detail="The source tenant connection has not been tested successfully.",
+                remedy="Enter source credentials and click Test source connection.",
+            )
+        )
+    if not state.dest.verified:
+        blockers.append(
+            Blocker(
+                node_id=None,
+                title="Destination not connected",
+                detail="The destination tenant connection has not been tested successfully.",
+                remedy="Enter destination credentials and click Test destination connection.",
+            )
+        )
+    return blockers

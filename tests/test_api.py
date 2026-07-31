@@ -150,12 +150,32 @@ class TestNoUIDependencies:
         assert not forbidden, f"{module_name} imports {forbidden}"
 
     def test_importing_the_facade_never_pulls_in_streamlit(self):
+        """Must run in a fresh subprocess, not check `sys.modules` in-process.
+
+        Once `wdmigrator.ui` existed and got its own tests (which legitimately
+        import streamlit), pytest's single process ends up with streamlit in
+        `sys.modules` well before this test runs, regardless of what `api.py`
+        itself imports — collection order, not `api.py`'s behavior, would
+        decide the result. A clean-room subprocess that imports only
+        `wdmigrator.api` is the only way to keep testing what this test claims
+        to test.
+        """
+        import subprocess
         import sys
 
-        # api was already imported by this test module; if streamlit had been
-        # pulled in transitively, it would already be in sys.modules.
-        assert "streamlit" not in sys.modules
-        assert "pandas" not in sys.modules
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; import wdmigrator.api; "
+                "assert 'streamlit' not in sys.modules, 'streamlit was pulled in'; "
+                "assert 'pandas' not in sys.modules, 'pandas was pulled in'",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
 
     def test_engine_modules_import_successfully_even_if_streamlit_is_unavailable(self):
         """Simulates a streamlit-less environment (e.g. a bare CLI install)."""

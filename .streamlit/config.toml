@@ -1,0 +1,9 @@
+[client]
+# A zeep fault can carry the request envelope, and the envelope can carry a
+# WS-Security password in cleartext. Never let Streamlit's own traceback
+# view render one — this is on top of the app's own redacting try/except in
+# ui/app.py, not instead of it.
+showErrorDetails = "none"
+
+[browser]
+gatherUsageStats = false

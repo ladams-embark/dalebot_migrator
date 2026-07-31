@@ -23,6 +23,10 @@ dev = [
     "pytest>=8.2.2",
     "pytest-dotenv>=0.5.2",
 ]
+ui = [
+    "streamlit>=1.40",
+    "pandas>=2.2",
+]
 
 [project.scripts]
 # Available as `wdmigrator ...` once cli.py exists (build plan step 6).
