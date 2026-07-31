@@ -40,8 +40,11 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 installed on this machine, so the PR has to be opened in the browser:
 `https://github.com/ladams-embark/dalebot_migrator/compare/master...core-implementation-service-migration`
 
-**State:** engine steps 1–6 of 10 are built and green. **Nothing has ever been
-written to a tenant.** All live testing has been read-only.
+**State:** engine steps 1–7 of 10 are built and green. **Nothing has ever been
+written to a tenant.** All live testing has been read-only, and
+`tests/test_writer.py` is offline-only by design — it has a test asserting no
+test in it carries a `live`/`dest` marker, because a test that writes leaves
+permanent residue in a tenant with no delete operation.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -50,23 +53,18 @@ pytest -m live      # 9 read-only source-tenant tests, ~50s
 python scripts/selfcheck.py
 ```
 
-**Next step: `migrate/writer.py` (build order step 7).** Requirements, all
-non-negotiable:
-- `dry_run=True` default; call `safety.assert_write_allowed()` immediately
-  before *every* write, not once per run.
-- **Inspect `Exceptions_Response_Data` on every `Put_Calculated_Field`.** A
-  HTTP 200 with no SOAP fault can still have failed. `Put_Tenanted_Report_Definition`
-  has no such block — the two writers are asymmetric.
-- Sequential PUT loop in topological order; each response WID feeds
-  `plan.wid_map` for the next payload.
-- Remap the report owner (`Tenanted_Report_Definition_System_User_Reference`).
-- Tests use a mock transport and assert **zero** destination calls. Never write
-  to a tenant in any test, marked or not.
-- `ExecutionRecord.status` needs an `indeterminate` value: a timeout on a PUT
-  may have succeeded server-side. Never auto-retry those — re-probe first.
+**Next step: `api.py` (build order step 8)** — the generator-based facade that
+the UI imports, and the *only* engine module it may import. Then step 9 (`ui/`
+Streamlit wizard) and step 10 (`validation/verify.py`, `cli.py`).
 
-Then steps 8–10: `api.py` facade (generators, the only module the UI imports),
-`ui/` Streamlit wizard, `validation/verify.py`, `cli.py`.
+Before building the UI, re-read the Streamlit section of the plan file: the
+chunked-runner pattern, the "no network at render time" rule, and the ban on
+putting credentials or clients in `st.cache_data`/`st.cache_resource` are the
+parts that are easy to get wrong and expensive to retrofit.
+
+`writer.py` is built but **has never executed against a tenant**. Its first
+real run must be: a distinct sandbox destination, dry run first, a handful of
+objects — not a full migration.
 
 ### Blockers and open questions
 
@@ -96,7 +94,7 @@ holds the full architecture, the Streamlit design, and the safety model.
 
 ---
 
-## Done this session (2026-07-31, session 3) — engine steps 1-6
+## Done this session (2026-07-31, session 3) — engine steps 1-7
 
 Built the migration engine bottom-up, safety first. Commits `d68e230`
 (steps 1-5) and `cde04c3` (step 6).
@@ -112,6 +110,17 @@ Built the migration engine bottom-up, safety first. Commits `d68e230`
 - `migrate/ordering.py` — Kahn topological sort, `substitute_wids()`.
 - `migrate/resolver.py` — dependency closure. Pure, no tenant calls.
 - `migrate/planner.py` — destination probing, CREATE/UPDATE/SKIP.
+- `migrate/writer.py` — the only module that mutates. Dry run serializes the
+  real envelope through zeep's binding without sending it (so schema errors
+  surface cheaply); live writes re-check the guard per object, inspect
+  `Exceptions_Response_Data`, and refuse to run through a non-DESTINATION
+  connection. Failure or indeterminate halts the run, and every remaining
+  object is still reported rather than silently dropped.
+
+**The writer's safety tests were mutation-tested, not just run.** Removing the
+per-object guard failed 3 tests; ignoring `Exceptions_Response_Data` failed 2.
+Both mutations were reverted and verified. Worth repeating if that logic is
+ever refactored — a green suite that cannot fail is worse than no suite.
 
 **Two bugs found by testing that unit tests alone would have missed:**
 
