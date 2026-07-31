@@ -36,31 +36,45 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 ## PICK UP HERE — next session
 
 **Branch:** `core-implementation-service-migration`, pushed through commit
-`cde04c3`. **Not merged to master, and no PR exists** — `gh` CLI is not
+`a1a2b65` at the start of this update (see below for the api.py commit that
+follows it). **Not merged to master, and no PR exists** — `gh` CLI is not
 installed on this machine, so the PR has to be opened in the browser:
 `https://github.com/ladams-embark/dalebot_migrator/compare/master...core-implementation-service-migration`
 
-**State:** engine steps 1–7 of 10 are built and green. **Nothing has ever been
-written to a tenant.** All live testing has been read-only, and
-`tests/test_writer.py` is offline-only by design — it has a test asserting no
-test in it carries a `live`/`dest` marker, because a test that writes leaves
-permanent residue in a tenant with no delete operation.
+**State:** engine steps 1–8 of 10 are built and green — the engine is
+*complete*. **Nothing has ever been written to a tenant.** All live testing
+has been read-only, and `tests/test_writer.py` is offline-only by design — it
+has a test asserting no test in it carries a `live`/`dest` marker, because a
+test that writes leaves permanent residue in a tenant with no delete
+operation.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-pytest              # 206 offline, ~12s, no .env or network needed
-pytest -m live      # 9 read-only source-tenant tests, ~50s
+pytest              # 316 offline, ~20s, no .env or network needed
+pytest -m live      # 9 read-only source-tenant tests, ~80s
 python scripts/selfcheck.py
 ```
 
-**Next step: `api.py` (build order step 8)** — the generator-based facade that
-the UI imports, and the *only* engine module it may import. Then step 9 (`ui/`
-Streamlit wizard) and step 10 (`validation/verify.py`, `cli.py`).
+**Next step: `ui/` — the Streamlit wizard (build order step 9).** `api.py`
+(step 8) is the single import surface it should use — everything the UI needs
+(`connect`, `iter_calculated_field_index`, `iter_report_index`, `resolve`,
+`iter_check_existence`, `build_plan`, `validate_plan`, `iter_execute`,
+`WriteGuard`/`evaluate_guards`, `Secret`/`redact_envelope`) is already
+re-exported from `wdmigrator.api`. Do not import `wdmigrator.auth`,
+`.discovery`, `.migrate`, `.config`, `.safety`, or `.secrets` directly from
+`ui/` code — `tests/test_api.py::TestNoUIDependencies` enforces the reverse
+direction (engine never imports streamlit/pandas), but there's nothing yet
+enforcing that the UI only imports `api`. Consider adding that check when
+`ui/` exists.
 
 Before building the UI, re-read the Streamlit section of the plan file: the
 chunked-runner pattern, the "no network at render time" rule, and the ban on
 putting credentials or clients in `st.cache_data`/`st.cache_resource` are the
-parts that are easy to get wrong and expensive to retrofit.
+parts that are easy to get wrong and expensive to retrofit. Also add
+`ui = ["streamlit>=1.40", "pandas>=2.2"]` to `pyproject.toml`'s optional
+dependencies — not done yet, since no UI code exists to need it.
+
+After `ui/`, step 10 is `validation/verify.py` and `cli.py`.
 
 `writer.py` is built but **has never executed against a tenant**. Its first
 real run must be: a distinct sandbox destination, dry run first, a handful of
@@ -93,6 +107,61 @@ instantly. Delete it if the source tenant's fields change.
 holds the full architecture, the Streamlit design, and the safety model.
 
 ---
+
+## Done this session (2026-07-31, session 3, continued on Sonnet) — step 8: api.py
+
+Built `src/wdmigrator/api.py`, the last engine module — the facade `ui/` (step
+9) will import instead of reaching into `auth`/`discovery`/`migrate`/`config`/
+`safety`/`secrets` directly. Mostly a curated re-export of ~60 names under
+their existing names (renaming an already-well-named function would just be a
+second name for the same thing); two functions are genuinely new:
+
+- `connect(target, username, password, role=...)` — takes plain strings and
+  wraps the password in `Secret` internally, so `ui/` code never has to import
+  `wdmigrator.secrets` just to authenticate.
+- `resolve(cf_index, ...)` — a documented alias for `resolve_closure`. Kept as
+  a separate name because the plan originally specified it as
+  `iter_resolve_plan`, a generator; the resolver turned out to need zero
+  tenant calls (session 3's earlier work), so there's nothing to report
+  progress on and it stayed synchronous. `tests/test_api.py` pins that it is
+  *not* a generator function, so a future change that makes it slow again is
+  forced to reconsider the API shape rather than silently blocking a UI rerun.
+
+`tests/test_api.py` (74 tests) checks three things beyond normal correctness:
+1. Every re-exported name is the *actual* object from its source module
+   (`is`, not just present) — catches a typo'd re-export shadowing the real
+   symbol.
+2. Every engine module (`api` plus everything under `auth`/`discovery`/
+   `migrate`/`config`/`safety`/`secrets`/`validation`) parses via `ast` with no
+   `import streamlit`/`import pandas` anywhere, and all of them still import
+   successfully with `streamlit` import-blocked at the builtin level (simulates
+   a bare CLI install with no `ui` extra).
+3. The four long-running facade functions declare an `Iterator[...]` return
+   annotation (checking the annotation, not `inspect.isgeneratorfunction` —
+   these are thin wrappers that `return` a generator built elsewhere, so the
+   function's own body has no `yield` and that check reports a false negative).
+
+**Found two bugs in my own first draft of the streamlit-ban test**, both from
+naive string matching rather than parsing: the substring check
+`"import streamlit" in source` matched this very module's docstring ("must not
+import streamlit or pandas"), and `inspect.isgeneratorfunction` on the
+wrapper functions returned False even though calling them produces a real
+generator. Fixed with `ast`-based import parsing and return-annotation
+checking respectively — both are in the code now, not just noted here.
+
+**Mutation-tested the streamlit ban**, and it's worth understanding the result:
+injecting a real `import streamlit` into `planner.py` broke collection
+immediately with `ModuleNotFoundError`, because streamlit isn't installed in
+this venv at all — a stronger signal than my specific test firing, but it also
+means the AST-based test hasn't yet been *positively* proven to fire in an
+environment where streamlit *is* installed (i.e. after the `ui` extra is
+added). Verified the AST logic directly against synthetic source strings
+instead (plain import, from-import, and the docstring-mention false-positive
+case) — all classified correctly. Re-check this test once streamlit is an
+installed dependency in step 9, since that changes which failure mode you'd
+actually hit.
+
+316 offline tests total, 9 live read-only, `selfcheck.py` green.
 
 ## Done this session (2026-07-31, session 3) — engine steps 1-7
 
