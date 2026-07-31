@@ -89,7 +89,13 @@ marker, no `.env`, no network. This is the fast inner loop and it covers the
 highest-risk logic in the project — invest in it.
 
 Key insight: walk the serialized field dict recursively looking for any key named `WID`.
-If that WID is in `custom_wids`, it's a dependency. Global/delivered WIDs won't be in `custom_wids`.
+
+`custom_wids` is **not** "every WID from the source" — that older idea was wrong and is corrected in
+`CLAUDE.md`. `Get_Calculated_Fields` returns ~9,652 fields that are mostly Workday-delivered, with
+nothing in the payload distinguishing them. Custom-vs-delivered is determined per object by probing
+the **destination** (`migrate/planner.py`, step 6): resolves there → delivered or already migrated;
+specific not-found fault → custom and must be created. Ordering takes the resulting set as input and
+stays pure.
 
 ---
 
@@ -149,5 +155,5 @@ and requires `--no-dry-run` flag plus interactive confirmation before real write
 3. **ISU username format** — `username@tenant`, not just `username`
 4. **Activate Pending Security Policy Changes** — must be run in Workday UI after ISU permission changes or the ISU silently returns empty data
 5. **PUT loop is sequential** — cannot parallelize because each PUT's response WID feeds the next field's payload
-6. **Global WIDs pass through unchanged** — only remap WIDs that appear in `custom_source_wids`
+6. **Global WIDs pass through unchanged** — only remap WIDs identified as custom. Custom-vs-delivered is decided by probing the destination per object, NOT by enumerating the source (see `CLAUDE.md` → "WID handling")
 7. **Always dry_run=True by default** — never flip this without user confirmation

@@ -1,8 +1,39 @@
-"""Dependency ordering and destination writes.
+"""Dependency resolution, ordering, planning, and destination writes.
 
-Steps 3-4 of the build plan (docs/START_HERE.md) — not yet implemented.
-Planned: ordering.build_dag(), ordering.topological_sort(),
-         ordering.substitute_wids(), writer.put_calculated_field()
+`ordering.py` and `resolver.py` are pure — no tenant calls — so the
+highest-risk logic in the project is testable offline in the fast inner loop.
 
 Every writer function defaults to dry_run=True.
 """
+
+from wdmigrator.migrate.ordering import (
+    CycleError,
+    build_dag,
+    extract_wid_refs,
+    substitute_wids,
+    topological_sort,
+    unmapped_wids,
+)
+from wdmigrator.migrate.resolver import (
+    Closure,
+    Node,
+    NodeKind,
+    PartialIndexError,
+    node_id_for,
+    resolve_closure,
+)
+
+__all__ = [
+    "Closure",
+    "CycleError",
+    "Node",
+    "NodeKind",
+    "PartialIndexError",
+    "build_dag",
+    "extract_wid_refs",
+    "node_id_for",
+    "resolve_closure",
+    "substitute_wids",
+    "topological_sort",
+    "unmapped_wids",
+]
