@@ -1,11 +1,13 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-07-30_
+_Last updated: 2026-07-31_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields + custom report
 definitions) from a SOURCE Workday tenant to a DESTINATION tenant via the
-**Report_Metadata** SOAP web service. Authoritative context lives in:
+**Core_Implementation_Service** SOAP web service. (`Report_Metadata` exposes
+the same operations but is rejected live on this tenant regardless of domain
+security — see `docs/WSDL_NOTES.md`.) Authoritative context lives in:
 
 - `AGENT.md` — operating manual: rules, project map, build order, setup. **Start here.**
 - `CLAUDE.md` — detailed domain knowledge, module interfaces, zeep patterns.
@@ -21,14 +23,50 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 - `src/wdmigrator/` — `auth/`, `discovery/`, `migrate/`, `validation/`. Each is a
   real package with an `__init__.py` docstring; **the modules themselves are not
   yet written.** Build order is in `docs/START_HERE.md`.
-- `src/wdmigrator/assets/report_metadata_wsdl.xml` — local copy of the tenant
-  WSDL (Report_MetadataService, v47.0). Point `zeep` at this to build a client
-  OFFLINE (no tenant round-trip needed just to construct the client). Get its
-  path via `from wdmigrator import DEFAULT_WSDL_PATH` — never hardcode it.
+- `src/wdmigrator/assets/core_implementation_service_wsdl.xml` — local copy of
+  the tenant WSDL (Core_Implementation_Service, v47.0). Point `zeep` at this to
+  build a client OFFLINE (no tenant round-trip needed just to construct the
+  client). Get its path via `from wdmigrator import DEFAULT_WSDL_PATH` — never
+  hardcode it.
 - `scripts/get_calculated_field.py` — verified prototype of the
   `Get_Calculated_Fields` read call. Effectively an early version of what
   `discovery/inventory.py` will formalize.
 - `scripts/selfcheck.py` — offline environment verification.
+
+## Done this session (2026-07-31) — live tenant testing, service switch
+
+First live tenant calls, using credentials the user supplied for a demo
+Implementation tenant (`commitconsulting_dpt1`). Found and fixed several
+issues before landing on a working configuration:
+
+- **Auth bug**: the read prototype was using plain HTTP Basic Auth instead of
+  the documented WS-Security `UsernameToken` (`isu_user@tenant`). Fixed in
+  `scripts/get_calculated_field.py`.
+- **Stray credential file**: the user's `.env` was created as `auth.env`,
+  which is NOT covered by `.gitignore`'s `.env`/`.env.*` patterns — a real risk
+  of committing credentials. Renamed to `.env`; confirmed it's now ignored.
+- **`Report_Metadata` doesn't work on this tenant**: every call (`Get_Calculated_Fields`,
+  `Get_Tenanted_Report_Definitions`) failed with `SOAP-ENV:Client.validationError`
+  — "The web service or version is invalid for the requested operation" — even
+  after confirming the account is a proper ISU with both **Special OX Web
+  Services** and **Custom Reports and Fields** domain access granted and
+  activated. Isolated via elimination: the same ISU/tenant/version succeeded
+  calling `Staffing.Get_Workers` (ruling out auth/OAuth/IP/tenant-version
+  issues), and succeeded calling the *identical* `Get_Calculated_Fields`
+  operation via **`Core_Implementation_Service`** instead — which also exposes
+  `Put_Calculated_Field`, `Get_Tenanted_Report_Definitions`,
+  `Put_Tenanted_Report_Definition`, and `Put_Tenanted_Report_Definition_Base`.
+- **Switched the whole project** to `Core_Implementation_Service`: `CLAUDE.md`,
+  `docs/WSDL_NOTES.md`, `AGENT.md`, `README.md`, `pyproject.toml`, the
+  DaleBotHelper agent description, `scripts/get_calculated_field.py`,
+  `scripts/selfcheck.py`, `tests/conftest.py`, `tests/test_wsdl_contract.py`,
+  and `src/wdmigrator/__init__.py`. Fetched and bundled a fresh live WSDL as
+  the new offline asset (`src/wdmigrator/assets/core_implementation_service_wsdl.xml`,
+  replacing `report_metadata_wsdl.xml` as `DEFAULT_WSDL_PATH`).
+- Read side (`Get_Calculated_Fields`) is now **verified live**: successfully
+  pulled all 9,652 calculated fields from the source tenant.
+- Write side (`Put_Calculated_Field`) has NOT been tested — per the hard
+  rules, that needs explicit user confirmation and dry-run first.
 
 ## Done this session (2026-07-30) — repo restructure
 Consolidated the old two-tree layout (`workday-migrator/` scaffold +
@@ -90,13 +128,17 @@ Two open threads — the build plan says do step 1 first:
    `dry_run=false` AND explicit user confirmation. In the migrator proper this
    lands as `src/wdmigrator/migrate/writer.py` (START_HERE step 4).
 
-Nothing has been verified against a live tenant yet — `.env` has never been
-populated, so no real credentials exist in this workspace. Creating `.env` from
-`.env.example` and running `pytest -m live` is the first thing that needs a human.
+Read side is now verified live against the source tenant via
+`Core_Implementation_Service` (see above). `.env` is populated in this
+workspace with source-tenant credentials only — destination tenant vars are
+still blank.
 
 ## Reminders that bite (from docs/START_HERE.md)
 - Services host `impl-services1.wd12.myworkday.com` ≠ UI host `impl.wd12.myworkday.com`.
-- Version goes in the URL path (`.../Report_Metadata/v47.0`).
+- Version goes in the URL path (`.../Core_Implementation_Service/v47.0`).
+- Use `Core_Implementation_Service`, not `Report_Metadata` — the latter is
+  rejected live on this tenant regardless of domain security (see
+  `docs/WSDL_NOTES.md`).
 - ISU username format is `username@tenant`.
 - Cross-tenant references use the stable `Calculated_Field_Reference_ID`, not the
   tenant-specific WID.

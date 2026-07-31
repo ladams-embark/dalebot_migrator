@@ -44,7 +44,7 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(scope="session")
 def wsdl_path() -> str:
-    """Filesystem path to the bundled Report_Metadata WSDL (v47.0)."""
+    """Filesystem path to the bundled Core_Implementation_Service WSDL (v47.0)."""
     assert DEFAULT_WSDL_PATH.is_file(), f"WSDL missing at {DEFAULT_WSDL_PATH}"
     return str(DEFAULT_WSDL_PATH)
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wdmigrator"
 version = "0.1.0"
-description = "Migrates calculated fields and report definitions between Workday tenants via the Report_Metadata SOAP service"
+description = "Migrates calculated fields and report definitions between Workday tenants via the Core_Implementation_Service SOAP service"
 requires-python = ">=3.10"
 
 # zeep 4.3.3 is the version the Get_Calculated_Fields prototype was verified

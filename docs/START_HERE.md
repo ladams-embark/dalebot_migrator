@@ -29,13 +29,17 @@ means `src/wdmigrator/auth/client.py`, imported as `wdmigrator.auth.client`.
 
 4. **Verify the live WSDL is reachable** (only when moving to live calls):
    ```bash
-   curl -s "https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Report_Metadata/v47.0?wsdl" | head -5
+   curl -s "https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Core_Implementation_Service/v47.0?wsdl" | head -5
    ```
    Should return XML starting with `<wsdl:definitions`. If not, check services host in `.env`.
 
    Note: you do **not** need this to develop. The WSDL is bundled at
-   `src/wdmigrator/assets/report_metadata_wsdl.xml` and reachable via
+   `src/wdmigrator/assets/core_implementation_service_wsdl.xml` and reachable via
    `from wdmigrator import DEFAULT_WSDL_PATH`.
+
+   Also note: `Report_Metadata` exposes the identical operations but is
+   rejected live on this tenant regardless of domain security — use
+   `Core_Implementation_Service`. See `docs/WSDL_NOTES.md` for the full story.
 
 ---
 
@@ -141,7 +145,7 @@ and requires `--no-dry-run` flag plus interactive confirmation before real write
 ## Key things that will bite you if you forget
 
 1. **Services host ≠ UI host** — SOAP calls go to `impl-services1.wd12.myworkday.com`, NOT `impl.wd12.myworkday.com`
-2. **Version must be in the URL path** — `https://.../Report_Metadata/v47.0` not just `Report_Metadata`
+2. **Version must be in the URL path** — `https://.../Core_Implementation_Service/v47.0` not just `Core_Implementation_Service`
 3. **ISU username format** — `username@tenant`, not just `username`
 4. **Activate Pending Security Policy Changes** — must be run in Workday UI after ISU permission changes or the ISU silently returns empty data
 5. **PUT loop is sequential** — cannot parallelize because each PUT's response WID feeds the next field's payload

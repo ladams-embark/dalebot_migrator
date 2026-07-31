@@ -6,6 +6,7 @@ Use this as the first thing to run after cloning or changing dependencies:
     python scripts/selfcheck.py
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -69,14 +70,20 @@ def main() -> int:
     service = next(iter(client.wsdl.services.values()))
     address = next(iter(service.ports.values())).binding_options["address"]
     check("endpoint uses services host", "-services" in address)
-    check("endpoint has versioned path", "/Report_Metadata/v47.0" in address)
+    check("endpoint has versioned path", "/Core_Implementation_Service/v47.0" in address)
     print(f"         endpoint: {address}")
 
     print("\nRead prototype:")
     import get_calculated_field as proto
 
     check("scripts/get_calculated_field.py imports", True)
-    check("resolves bundled WSDL", Path(proto.WSDL_SOURCE) == wsdl)
+    if os.environ.get("WD_SOURCE_SERVICES_HOST") and os.environ.get("WD_SOURCE_TENANT"):
+        check(
+            "resolves live tenant endpoint (.env present)",
+            proto.SERVICE_NAME in proto.WSDL_SOURCE and proto.WSDL_SOURCE.startswith("https://"),
+        )
+    else:
+        check("resolves bundled WSDL (no .env)", Path(proto.WSDL_SOURCE) == wsdl)
     req = proto.build_request("SAMPLE_ID", "Calculated_Field_ID")
     check(
         "Response_Group requests field data",

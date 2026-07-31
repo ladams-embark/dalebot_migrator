@@ -1,13 +1,25 @@
-# Workday Report_Metadata WSDL — Discovery Notes
+# Workday Calculated Field / Report Definition WSDL — Discovery Notes
 
 ## Service
-- **Name**: `Report_Metadata`
+- **Name**: `Core_Implementation_Service`
 - **Services host**: `impl-services1.wd12.myworkday.com` (NOT the UI host `impl.wd12.myworkday.com`)
 - **UI host**: `impl.wd12.myworkday.com`
-- **SOAP endpoint**: `https://{services_host}/ccx/service/{tenant}/Report_Metadata/{version}`
-- **WSDL**: `https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Report_Metadata/v47.0?wsdl`
-- **Tenant version**: v47.0
+- **SOAP endpoint**: `https://{services_host}/ccx/service/{tenant}/Core_Implementation_Service/{version}`
+- **WSDL**: `https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Core_Implementation_Service/v47.0?wsdl`
+- **Tenant version**: v47.0 (confirmed max supported on this tenant — v48.0+ return HTTP 500)
 - **Security domain**: Special OX Web Services (System functional area)
+
+### Report_Metadata is not usable on this tenant
+`Report_Metadata`'s WSDL also defines these operations at v47.0 and resolves
+fine, but every call fails live with `SOAP-ENV:Client.validationError` —
+"The web service or version is invalid for the requested operation" — even
+with the ISU confirmed as a proper Integration System User with Special OX
+Web Services and Custom Reports and Fields domain access granted and
+activated. Confirmed via live testing (2026-07-30) that this isn't an auth,
+IP, OAuth, version, or request-shape problem: the same credentials succeed
+against `Staffing.Get_Workers` and against the identical
+`Get_Calculated_Fields` operation on `Core_Implementation_Service`. Use
+`Core_Implementation_Service` for all Get/Put calls in this project.
 
 ## Operations
 

@@ -52,16 +52,25 @@ https://{services_host}/ccx/service/{tenant}/{service}/{version}
 
 WSDL (verified working):
 ```
-https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Report_Metadata/v47.0?wsdl
+https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Core_Implementation_Service/v47.0?wsdl
 ```
 
-### The Report_Metadata service
-- **Service name**: `Report_Metadata` (confirmed from live tenant WSDL)
-- **Security domain**: Special OX Web Services (System functional area)
-- **NOT in the public WWS directory** — restricted service
+### The Core_Implementation_Service service
+- **Service name**: `Core_Implementation_Service` (confirmed live 2026-07-30 — see below)
 - **Tenant version**: v47.0 — must be in the URL path, not just the SOAP envelope
+- **`Report_Metadata` is NOT usable on this tenant**: its WSDL defines the same
+  operations and resolves fine, but every call (`Get_Calculated_Fields`,
+  `Get_Tenanted_Report_Definitions`) fails with a SOAP fault —
+  `SOAP-ENV:Client.validationError`, "The web service or version is invalid
+  for the requested operation" — even with the ISU confirmed as a proper
+  Integration System User, with both **Special OX Web Services** and **Custom
+  Reports and Fields** domain access granted and activated. The identical
+  operations succeed via `Core_Implementation_Service` with the same
+  credentials, same tenant, same version. Use `Core_Implementation_Service`,
+  not `Report_Metadata`, going forward.
 
-Operations used:
+Operations used (all confirmed present on `Core_Implementation_Service`; read
+side confirmed working live, write side not yet tested):
 
 | Operation | Direction |
 |-----------|-----------|
@@ -76,6 +85,11 @@ SOAP WS-Security with ISU credentials. Username format: `{isu_username}@{tenant}
 Each tenant needs its own ISU with **Special OX Web Services** domain granted:
 - Source ISU: needs Get permission
 - Destination ISU: needs Get + Put permission
+
+Note: on the source tenant, domain access alone did not make `Report_Metadata`
+work (see above) — `Core_Implementation_Service` is what actually succeeded.
+Re-verify domain requirements for the destination tenant once Put calls are
+attempted there.
 
 After any ISU permission change in Workday: run "Activate Pending Security Policy Changes" — changes are NOT immediate and the ISU will silently return empty data until activated.
 
@@ -370,7 +384,7 @@ WD_DEST_TENANT=client_sandbox_tenant
 WD_DEST_ISU_USERNAME=your_isu_username
 WD_DEST_ISU_PASSWORD=your_isu_password
 
-WD_OX_SERVICE_NAME=Report_Metadata
+WD_OX_SERVICE_NAME=Core_Implementation_Service
 WD_WWS_VERSION=v47.0
 DRY_RUN=true
 ```
@@ -465,7 +479,19 @@ Never write to the destination tenant in any test, marked or not.
 ## What was discovered and ruled out
 - **OX UI workflow / Configuration Packages**: not used — direct SOAP Get/Put is available
 - **Workday REST API for report/field definitions**: does not exist
-- **`Reporting_Analytics` SOAP service**: does not exist at v47.0; correct service is `Report_Metadata`
+- **`Reporting_Analytics` SOAP service**: does not exist at v47.0
+- **`Report_Metadata` service**: WSDL resolves and defines the right operations
+  and version, but every live call is rejected with `Client.validationError` /
+  "The web service or version is invalid for the requested operation" — for
+  this ISU, on this tenant, regardless of domain security (Special OX Web
+  Services + Custom Reports and Fields both confirmed granted+activated).
+  Confirmed not an auth, IP, OAuth/API-Client, version, or code issue: the
+  same ISU/version/transport succeeds calling `Get_Workers` on `Staffing`, and
+  succeeds calling the identical `Get_Calculated_Fields` operation via
+  `Core_Implementation_Service`. Root cause looks like an entitlement gap
+  specific to the `Report_Metadata` service binding on this tenant — use
+  `Core_Implementation_Service` instead (confirmed live 2026-07-30).
 - **Public WWS directory**: does not list `Report_Metadata` — it is a restricted service
 - **UI host for SOAP** (`impl.wd12.myworkday.com`): wrong — use services host (`impl-services1.wd12.myworkday.com`)
 - **WSDL without version in URL path**: returns 404 on this tenant — version must be in path
+- **v48.0 and above**: return HTTP 500 on this tenant — v47.0 is the current max supported version

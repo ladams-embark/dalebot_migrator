@@ -1,8 +1,10 @@
 # dalebot_migrator
 
 Migrates configuration (calculated fields + custom report definitions) from a
-SOURCE Workday tenant to a DESTINATION tenant via the **Report_Metadata** SOAP
-web service.
+SOURCE Workday tenant to a DESTINATION tenant via the
+**Core_Implementation_Service** SOAP web service. (`Report_Metadata` exposes
+the same operations but is rejected live on this tenant regardless of domain
+security — see `docs/WSDL_NOTES.md`.)
 
 > **Safety:** the destination tenant is a write target. `DRY_RUN=true` is the
 > default everywhere. Implementation/Sandbox tenants only — never Production.
