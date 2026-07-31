@@ -1,6 +1,6 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-07-31_
+_Last updated: 2026-07-31 (session 3)_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields + custom report
@@ -33,7 +33,121 @@ Everything is one installable package, `wdmigrator`, under `src/`:
   `discovery/inventory.py` will formalize.
 - `scripts/selfcheck.py` — offline environment verification.
 
-## Done this session (2026-07-31) — live tenant testing, service switch
+## PICK UP HERE — next session
+
+**Branch:** `core-implementation-service-migration`, pushed through commit
+`cde04c3`. **Not merged to master, and no PR exists** — `gh` CLI is not
+installed on this machine, so the PR has to be opened in the browser:
+`https://github.com/ladams-embark/dalebot_migrator/compare/master...core-implementation-service-migration`
+
+**State:** engine steps 1–6 of 10 are built and green. **Nothing has ever been
+written to a tenant.** All live testing has been read-only.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pytest              # 206 offline, ~12s, no .env or network needed
+pytest -m live      # 9 read-only source-tenant tests, ~50s
+python scripts/selfcheck.py
+```
+
+**Next step: `migrate/writer.py` (build order step 7).** Requirements, all
+non-negotiable:
+- `dry_run=True` default; call `safety.assert_write_allowed()` immediately
+  before *every* write, not once per run.
+- **Inspect `Exceptions_Response_Data` on every `Put_Calculated_Field`.** A
+  HTTP 200 with no SOAP fault can still have failed. `Put_Tenanted_Report_Definition`
+  has no such block — the two writers are asymmetric.
+- Sequential PUT loop in topological order; each response WID feeds
+  `plan.wid_map` for the next payload.
+- Remap the report owner (`Tenanted_Report_Definition_System_User_Reference`).
+- Tests use a mock transport and assert **zero** destination calls. Never write
+  to a tenant in any test, marked or not.
+- `ExecutionRecord.status` needs an `indeterminate` value: a timeout on a PUT
+  may have succeeded server-side. Never auto-retry those — re-probe first.
+
+Then steps 8–10: `api.py` facade (generators, the only module the UI imports),
+`ui/` Streamlit wizard, `validation/verify.py`, `cli.py`.
+
+### Blockers and open questions
+
+1. **No real destination tenant.** `.env` has `WD_DEST_*` pointing at the same
+   tenant as the source (`commitconsulting_dpt1`, same host, same ISU
+   `lmcneil`). `safety.py` blocks live runs in that configuration by design and
+   with no override. Dry runs work fine, so everything except actual writes can
+   be developed and tested. **A distinct impl/sandbox tenant is required before
+   any live migration.**
+2. **`Put_Calculated_Field` with a reference: replace or merge?** Unverified.
+   Until tested, treat UPDATE as unsafe and prefer CREATE/SKIP.
+3. **Can `Data_Source_Reference` existence be probed in the destination?** If
+   not, it becomes a manual pre-flight checklist item on the confirm step.
+4. **Can the destination ISU own a report?** Likely yes (`WorkdayUserName`
+   accepts a plain string), unverified.
+
+### Local machine state (not in git)
+
+`out/cache/commitconsulting_dpt1/calculated_field.json` — 42 MB, all 9,652
+calculated fields. Gitignored. Rebuilding costs ~36s; `load_index()` reads it
+instantly. Delete it if the source tenant's fields change.
+
+### The approved build plan
+
+`C:\Users\LucasAdams\.claude\plans\knowing-what-we-know-swirling-treasure.md`
+holds the full architecture, the Streamlit design, and the safety model.
+
+---
+
+## Done this session (2026-07-31, session 3) — engine steps 1-6
+
+Built the migration engine bottom-up, safety first. Commits `d68e230`
+(steps 1-5) and `cde04c3` (step 6).
+
+**Modules built** — all under `src/wdmigrator/`:
+- `config/targets.py` — `TenantTarget`, `parse_tenant_url()` for pasted browser
+  URLs, host-driven environment classification.
+- `safety.py` — `WriteGuard` / `assert_write_allowed()`.
+- `secrets.py` — `Secret` wrapper + redaction.
+- `ratelimit.py` — 8 calls/sec limiter.
+- `auth/client.py` — `make_client()` / `verify_connection()`.
+- `discovery/inventory.py` — index sweeps, three-valued lookups, disk cache.
+- `migrate/ordering.py` — Kahn topological sort, `substitute_wids()`.
+- `migrate/resolver.py` — dependency closure. Pure, no tenant calls.
+- `migrate/planner.py` — destination probing, CREATE/UPDATE/SKIP.
+
+**Two bugs found by testing that unit tests alone would have missed:**
+
+1. **Clients inherited the WSDL's embedded endpoint.** A WSDL carries the
+   address of the tenant it was fetched from, and the bundled one names the
+   *source*. A destination client built from it would have sent **writes to the
+   source tenant**. `make_client` now rebinds via `create_service` and refuses
+   to return an unpinned client.
+2. **Reports always probed as NOT_FOUND, even when present** — every migration
+   would have duplicated every report. `Custom_Report_ID` is returned on every
+   report reference but rejected as a lookup key (18/18 sampled). Reports are
+   now matched by exact name. Caught only by running the full flow end-to-end
+   against the live tenant, with source == destination so everything *should*
+   have been detected as existing.
+
+**Measurements that drove the design** (source tenant, live):
+- `Count=999` works → CF index is 10 pages / ~20s / ~34 MB. Report index is
+  6 pages / ~160s.
+- 9,652 calculated fields, 5,153 reports.
+- **~95 WID references per report.** Probing each to classify it would cost
+  ~12s per report; with the complete index it is a free set lookup. This is why
+  `resolve_closure()` needs no network at all.
+- 48% of reports reference calculated fields (avg 3.9, max 18).
+- **Only 6 nested calculated-field edges exist in the whole tenant.** Live data
+  barely exercises the DAG, so `tests/fixtures/nested_calculated_fields.json`
+  holds an anonymised capture — real structure and nesting, synthetic
+  identifiers. A real client tenant will stress the ordering far harder than
+  this one can.
+
+**Also corrected `CLAUDE.md`:** the documented custom-WID algorithm was wrong
+and had never been live-tested. It treated every source field as custom, but
+`Get_Calculated_Fields` returns mostly Workday-delivered fields with no payload
+discriminator — it would have tried to migrate ~9,600 delivered fields.
+Replaced with destination existence probing.
+
+## Done earlier (2026-07-31, session 2) — live tenant testing, service switch
 
 First live tenant calls, using credentials the user supplied for a demo
 Implementation tenant (`commitconsulting_dpt1`). Found and fixed several
