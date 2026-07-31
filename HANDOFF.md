@@ -1,6 +1,6 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-07-31 (session 3)_
+_Last updated: 2026-07-31 (session 4)_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields + custom report
@@ -35,71 +35,101 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 
 ## PICK UP HERE — next session
 
-**Branch:** `core-implementation-service-migration`, pushed through commit
-`a1a2b65` at the start of this update (see below for the api.py commit that
-follows it). **Not merged to master, and no PR exists** — `gh` CLI is not
-installed on this machine, so the PR has to be opened in the browser:
+**Branch:** `core-implementation-service-migration`. **Not merged to master,
+and no PR exists** — `gh` CLI is not installed on this machine, so the PR has
+to be opened in the browser:
 `https://github.com/ladams-embark/dalebot_migrator/compare/master...core-implementation-service-migration`
 
-**State:** engine steps 1–8 of 10 are built and green — the engine is
-*complete*. **Nothing has ever been written to a tenant.** All live testing
-has been read-only, and `tests/test_writer.py` is offline-only by design — it
-has a test asserting no test in it carries a `live`/`dest` marker, because a
-test that writes leaves permanent residue in a tenant with no delete
-operation.
+**State:** engine steps 1–8 are built and green. `ui/` (step 9, the Streamlit
+wizard) is built: `app.py`, `state.py`, `runner.py`, `safety_ui.py`,
+`secrets.py`, `components.py`, plus `steps/{connect,select,resolve,conflicts,
+confirm,execute,results}.py`, root `streamlit_app.py`, `.streamlit/
+config.toml`. `pyproject.toml` has the `ui` extra
+(`streamlit>=1.40`, `pandas>=2.2`), installed in `.venv`.
+
+**A live write has now succeeded — the first one this project has ever made.**
+See "Done this session" below. `writer.py` is no longer unproven: a
+calculated field and a report (with a correctly WID-remapped dependency
+between them) were both created live on a genuinely distinct destination
+tenant, `commitconsulting_dpt5`, and read back to confirm. The "no real
+destination tenant" blocker from earlier sessions is resolved — `.env`'s
+`WD_DEST_*` now points at `commitconsulting_dpt5`, not the source tenant.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-pytest              # 316 offline, ~20s, no .env or network needed
-pytest -m live      # 9 read-only source-tenant tests, ~80s
+pytest              # offline suite, no .env or network needed
+pytest -m live      # read-only source-tenant tests
 python scripts/selfcheck.py
 ```
 
-**Next step: `ui/` — the Streamlit wizard (build order step 9).** `api.py`
-(step 8) is the single import surface it should use — everything the UI needs
-(`connect`, `iter_calculated_field_index`, `iter_report_index`, `resolve`,
-`iter_check_existence`, `build_plan`, `validate_plan`, `iter_execute`,
-`WriteGuard`/`evaluate_guards`, `Secret`/`redact_envelope`) is already
-re-exported from `wdmigrator.api`. Do not import `wdmigrator.auth`,
-`.discovery`, `.migrate`, `.config`, `.safety`, or `.secrets` directly from
-`ui/` code — `tests/test_api.py::TestNoUIDependencies` enforces the reverse
-direction (engine never imports streamlit/pandas), but there's nothing yet
-enforcing that the UI only imports `api`. Consider adding that check when
-`ui/` exists.
+**Next step: manual walkthrough of the Streamlit wizard end-to-end**
+(`streamlit run streamlit_app.py`), then step 10 (`validation/verify.py`,
+`cli.py`). The UI has been exercised live piecemeal (Connect, Select,
+Resolve, Conflicts) via manual testing and bug fixes during this session, but
+never all the way through Confirm → Execute → Results in the browser itself
+— the successful live write above went through hand-written scripts in
+`scripts/` (see below), not the wizard's own Execute step, because driving
+credential-entry forms isn't something the assistant can do. Someone with
+hands needs to walk the wizard itself through a live run at least once.
 
-Before building the UI, re-read the Streamlit section of the plan file: the
-chunked-runner pattern, the "no network at render time" rule, and the ban on
-putting credentials or clients in `st.cache_data`/`st.cache_resource` are the
-parts that are easy to get wrong and expensive to retrofit. Also add
-`ui = ["streamlit>=1.40", "pandas>=2.2"]` to `pyproject.toml`'s optional
-dependencies — not done yet, since no UI code exists to need it.
+**"PLNF - All Workers" is resolved — it migrates cleanly now.** What looked
+like a hard capability boundary (session 4's "New known limitation," see
+CLAUDE.md's verified-facts table for the full corrected writeup) turned out
+to be a **report-scoped calculated field that hadn't been promoted to
+global**, not a `Custom_Field`-space object this tool can't touch. Once the
+user promoted `CF_LRV_-_Home_State` to a global calculated field in the
+Workday UI, it took a real activation delay (both a targeted
+`Get_Calculated_Fields(wid=...)` and the bulk index sweep still returned
+`NOT_FOUND` immediately after promotion) before it became visible **under
+its original WID** — no new object, no code changes needed once it was
+actually readable. Live-verified end to end: `CF LRV - Home State` created,
+`PLNF - All Workers` created, the report column's WID correctly remapped to
+the new destination CF, owner correctly set to `wd-support`.
 
-After `ui/`, step 10 is `validation/verify.py` and `cli.py`.
-
-`writer.py` is built but **has never executed against a tenant**. Its first
-real run must be: a distinct sandbox destination, dry run first, a handful of
-objects — not a full migration.
+A pre-flight check that tried to auto-detect "unmigratable" `External_Field`
+references was built and then **reverted** during this same session — it
+would have false-positived on "AE Previous Worker" (a report that already
+migrates successfully live has a non-`Calculated_Field` `External_Field`
+reference too — a delivered field that passes through fine). "Not a
+`Calculated_Field` right now" cannot be reliably distinguished from "not a
+`Calculated_Field`, ever" using anything in this WSDL — see CLAUDE.md.
+**The only reliable move on a `NOT_FOUND` for one of these is to ask whether
+it's a report-scoped calculated field that needs promoting to global, wait
+for activation, and retry** — not to treat it as a hard block.
 
 ### Blockers and open questions
 
-1. **No real destination tenant.** `.env` has `WD_DEST_*` pointing at the same
-   tenant as the source (`commitconsulting_dpt1`, same host, same ISU
-   `lmcneil`). `safety.py` blocks live runs in that configuration by design and
-   with no override. Dry runs work fine, so everything except actual writes can
-   be developed and tested. **A distinct impl/sandbox tenant is required before
-   any live migration.**
-2. **`Put_Calculated_Field` with a reference: replace or merge?** Unverified.
-   Until tested, treat UPDATE as unsafe and prefer CREATE/SKIP.
-3. **Can `Data_Source_Reference` existence be probed in the destination?** If
-   not, it becomes a manual pre-flight checklist item on the confirm step.
-4. **Can the destination ISU own a report?** Likely yes (`WorkdayUserName`
-   accepts a plain string), unverified.
+1. ~~No real destination tenant~~ — **resolved.** `commitconsulting_dpt5` is
+   live-verified as a working, distinct destination.
+2. **`Put_Calculated_Field` with a reference: replace or merge?** Still
+   unverified — the live test so far only exercised CREATE (dest didn't have
+   the field) and SKIP (dest already had it), never UPDATE. Until tested,
+   continue treating UPDATE as unsafe and prefer CREATE/SKIP.
+3. **Can `Data_Source_Reference` existence be probed in the destination?**
+   Still open.
+4. ~~Can the destination ISU own a report?~~ — **confirmed yes.** Verified
+   live: `build_owner_reference(workday_username=<plain ISU username>)`
+   (not the WS-Security-qualified `user@tenant` string) correctly sets
+   `Tenanted_Report_Definition_System_User_Reference`, read back correctly
+   after the write.
+5. ~~`External_Field_Reference` on report columns can point outside this
+   tool's scope~~ — **resolved for the case found.** It was a report-scoped
+   calculated field needing promotion + activation time, not a genuine
+   capability gap; see above. Genuine `Custom_Field`-space references (a
+   plain field, never a calculated field) remain out of scope — no operation
+   exists for those — but no live case of that has actually been confirmed
+   yet, only theorized.
 
 ### Local machine state (not in git)
 
-`out/cache/commitconsulting_dpt1/calculated_field.json` — 42 MB, all 9,652
-calculated fields. Gitignored. Rebuilding costs ~36s; `load_index()` reads it
-instantly. Delete it if the source tenant's fields change.
+`out/cache/commitconsulting_dpt1/calculated_field.json` — 42+ MB, all
+calculated fields (9,654 as of this session — it grows as fields get
+promoted from report-scoped to global). Gitignored. Rebuilding costs ~30-40s;
+`load_index()` reads it instantly. **Stale cache risk confirmed live this
+session**: a just-promoted calculated field was invisible to a cache built
+too soon after promotion. If a report's dependency isn't resolving and you
+suspect it was recently changed in Workday, rebuild fresh rather than
+trusting the cache's age alone.
 
 ### The approved build plan
 
@@ -107,6 +137,143 @@ instantly. Delete it if the source tenant's fields change.
 holds the full architecture, the Streamlit design, and the safety model.
 
 ---
+
+## Done this session (2026-07-31, session 4, continued) — owner fixed to wd-support, External_Field investigation, PLNF resolved
+
+**Report owner is now a fixed constant, not a per-run manual input.** Every
+report this tool creates is owned by `wd-support`
+(`ui/state.py:DEFAULT_REPORT_OWNER_USERNAME`), resolved via `WorkdayUserName`
+at write time. Removed the owner-mode radio/text-input UI and the "no owner
+set" blocker from `ui/steps/confirm.py` entirely — there's nothing left to
+input. Live-verified: reads back as WID `545a0799733c40b7847399ade3039c64`
+on `commitconsulting_dpt5`, exactly the WID originally supplied, confirming
+`wd-support` resolves correctly by username even though it's invisible to
+`Get_Integration_System_Users` (must be a different `System_User` subtype —
+`Employee`/`Contingent_Worker` System User lookups have no filterable
+criteria in this WSDL, so there's no way to search for it directly by name;
+only the reference-on-write resolves it).
+
+**Built, then reverted, a pre-flight blocker for "unmigratable" `External_Field`
+references** (`migrate/resolver.py` gained `Node.unresolvable_external_field_wids`,
+`migrate/planner.py`'s `validate_plan` gained a matching check). Reverted
+after proving it produces false positives: "AE Previous Worker" — a report
+already confirmed to migrate successfully live — has a column whose
+`External_Field_Reference` is *also* not a `Calculated_Field` (a delivered
+field that passes through fine). There is no signal available anywhere in
+this WSDL that distinguishes "not a calculated field, and never will be"
+from "not a calculated field, yet" — see the PLNF resolution below for why
+that distinction matters. Git history has the full attempt and revert if
+this is revisited; the code is back to matching origin exactly.
+
+**"PLNF - All Workers" now migrates successfully — the External_Field wall
+from earlier in this session was a false alarm, not a hard capability
+boundary.** Full story:
+
+1. The failing WID (`da06ec2634331001f8e8b6fa2e4d0000`, report column
+   `CF_LRV_-_Home_State`) returned clean `NOT_FOUND` from
+   `Get_Calculated_Fields`, live, with no fault — looked exactly like a
+   `Custom_Field_ID`-space object this tool has no operation for.
+2. User's hypothesis: it's a Workday **report-scoped calculated field**
+   (defined inline via Report Writer, never registered as a tenant-wide
+   `Calculated_Field`) rather than a `Custom_Field`. Checked the WSDL schema
+   for `Tenanted_Report_Column_DataType` and `Tenanted_Report_Definition_DataType`
+   in full (94 fields combined) for anywhere a report could carry an inline
+   calculated-field definition — there is none, so even if the hypothesis
+   were right, this WSDL still couldn't read or write it *as a report-scoped
+   field*. That part of the investigation was a genuine dead end.
+3. User promoted the field to a global calculated field in the Workday UI.
+   Immediately after, both a targeted `Get_Calculated_Fields(wid=...)` and a
+   full bulk index sweep still returned `NOT_FOUND` for the same WID —
+   **an activation delay**, not a failed promotion.
+4. Some real (unmeasured, at least a few minutes — several other diagnostic
+   calls happened in between) time later, a fresh targeted lookup found it —
+   `Name: 'CF LRV - Home State'`, **same WID as always**. A follow-up bulk
+   sweep also picked it up. No new object was ever created; the same WID
+   simply wasn't visible until activation finished.
+5. Once visible, zero code changes were needed: `resolve_closure` picked it
+   up as a genuine calculated-field dependency automatically (its WID now
+   matched an entry in the refreshed `cf_index`), and the existing
+   create-CF-then-create-report pipeline handled it exactly like "AE
+   Previous Worker." Live-verified end to end: `CF LRV - Home State`
+   created (`dest_wid f12b507378ef10020afc0840bcf80000`), `PLNF - All
+   Workers` created (`dest_wid f12b507378ef10020afc268702070000`), the
+   report's column correctly remapped to the new CF's destination WID, owner
+   correctly `wd-support`. Both read back and confirmed correct.
+
+**Diagnostic scripts added this session** (all read-only except the two
+`migrate_*` ones, which are dry-run-first by design):
+`scripts/diagnose_report_lookup.py`, `scripts/dump_plnf_report.py`,
+`scripts/check_wid_as_cf.py`, `scripts/check_wid_as_system_user.py`,
+`scripts/resolve_wd_support_account.py`, `scripts/find_cf_dependent_report.py`,
+`scripts/find_cf_by_external_field.py`, `scripts/find_cf_by_name.py`,
+`scripts/refresh_cf_index_and_search.py`, `scripts/classify_report_columns.py`,
+`scripts/migrate_report_example.py`, `scripts/migrate_live_execute.py`,
+`scripts/verify_dest_objects.py`. Worth keeping — `classify_report_columns.py`
+in particular (per-column live classification, not cache-dependent) is the
+right first move any time a report's dependency isn't resolving as expected.
+
+## Done this session (2026-07-31, session 4) — ui/ built, first live write
+
+Built the entire `ui/` package (step 9) per the approved plan: the Streamlit
+wizard (`Connect → Select → Resolve → Conflicts → Confirm → Execute →
+Results`), chunked runner (`ui/runner.py` — generators drained in
+time-budgeted batches across reruns, `batch_size=1` for writes so a
+cancel/refresh can't leave an object half-written), and safety-model
+rendering (`ui/safety_ui.py`) on top of the untouched engine guards. Added
+`ui = ["streamlit>=1.40", "pandas>=2.2"]` to `pyproject.toml`.
+
+**Found and fixed two real bugs during manual walkthrough**, both traced with
+read-only diagnostic scripts (now in `scripts/`) rather than guessed at:
+
+1. **Reports added via "Add by exact name" carried no `Name`.** The UI reused
+   `lookup_report_by_name()` — deliberately data-free, it's the cheap
+   existence probe `planner.probe_node` uses against the *destination* — to
+   pull a report's full definition from the *source*. With no `Name`, the
+   report's own downstream existence probe then searched the destination for
+   an empty string, which `lookup_report_by_name` correctly refuses (returns
+   `UNKNOWN`, not `NOT_FOUND`) — collapsing what should have been a clean
+   `NOT_FOUND` → `CREATE` into a blocking `UNKNOWN` → `SKIP`. One root cause,
+   two symptoms. Fixed in `ui/steps/select.py`: resolve the name to a WID via
+   `lookup_report_by_name`, then a second targeted `lookup_report(wid=...)`
+   fetches the full definition. Regression tests in `tests/test_discovery.py`
+   (`TestReportLookupByNameThenFullFetch`) pin the composition.
+2. **A running Streamlit dev process can serve stale imported code** after
+   editing a file under `src/wdmigrator/ui/` — the in-browser "Rerun" prompt
+   reruns the script, but doesn't reliably bust `sys.modules` for the
+   package's own submodules. A full process restart is what actually picks up
+   the fix. Worth remembering for any future live UI debugging session.
+
+**First successful live write against a real, distinct destination tenant**
+(`commitconsulting_dpt5`) — everything before this was read-only. Two
+objects, chosen because the report ("AE Previous Worker") depends on exactly
+one calculated field ("AE CF LRV JA Previous Worker"), via hand-written
+scripts (`scripts/migrate_report_example.py` for dry run,
+`scripts/migrate_live_execute.py` for live, `scripts/verify_dest_objects.py`
+to read the results back) rather than the wizard's own Execute step:
+
+- Calculated field created first (child-most-first, per the topological
+  sort) → new destination WID `f12b507378ef1002038ec7a812f70000`.
+- Report created second, `wid_map` correctly substituting the calculated
+  field's source WID with its new destination WID in the report's column
+  data, owner remapped to the destination ISU → new destination WID
+  `c832794e42dd100203a5ce5034030000`.
+- Read back from the destination afterward: names, owner, and the
+  remapped `External_Field_Reference` on the dependent column all correct.
+- **Bug caught along the way:** `Connection.username` is the WS-Security
+  *qualified* `user@tenant` string used for SOAP auth, not a plain username —
+  passing it straight into `build_owner_reference(workday_username=...)`
+  fails with `Invalid ID value ... not a valid ID value for type =
+  'WorkdayUserName'`. Fixed by using the plain ISU username from `.env`
+  instead. Only affected the throwaway scripts, not `writer.py` itself, but
+  worth remembering if `ui/steps/confirm.py`'s owner-remap input ever
+  defaults to something derived from `Connection.username`.
+
+**Also found and documented a real scope boundary, not a bug**: a report
+column's `External_Field_Reference` isn't always a `Calculated_Field`
+WID — see "New known limitation" above and CLAUDE.md's verified-facts table.
+Found via a live PUT failure on "PLNF - All Workers", traced by parsing the
+bundled WSDL directly (`External_FieldReferenceEnumeration` lists
+`Custom_Field_ID` as a sibling of `Calculated_Field_ID`) rather than guessing.
 
 ## Done this session (2026-07-31, session 3, continued on Sonnet) — step 8: api.py
 
