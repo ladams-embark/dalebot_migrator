@@ -23,6 +23,7 @@ from wdmigrator.discovery.inventory import (
     load_index,
     lookup_calculated_field,
     lookup_report,
+    lookup_report_by_name,
     save_index,
 )
 
@@ -44,5 +45,6 @@ __all__ = [
     "load_index",
     "lookup_calculated_field",
     "lookup_report",
+    "lookup_report_by_name",
     "save_index",
 ]

@@ -110,6 +110,22 @@ against `Staffing.Get_Workers` and against the identical
 - `Tenanted_Report_Chart_Layout_Data` — chart config
 - ... (77 total, full list in WSDL)
 
+## Cross-tenant identity — how each object kind is matched
+
+| Kind | Matched on | Notes |
+|---|---|---|
+| Calculated field | `Calculated_Field_ID` | Works as documented. Targeted `Request_References` lookup returns the object, or a "not a valid ID value" fault when absent. |
+| Report definition | **Exact name** (`Request_Criteria.Report_Name`) | `Custom_Report_ID` is returned on every report reference but is **rejected as a lookup key** — verified 18/18 sampled reports. The same reports resolve by WID, but a source WID is meaningless in another tenant, so name is the only usable cross-tenant handle. |
+
+Consequences of matching reports by name:
+- Name is exact-match only; a substring finds nothing.
+- Names are not unique (7 of 999 sampled reports shared one). Ambiguity must
+  resolve to UNKNOWN and block, never to a guess — there is no delete operation
+  to undo overwriting the wrong report.
+- `tests/test_planner.py::test_custom_report_id_is_still_rejected_as_a_lookup_key`
+  pins this. If Workday fixes it, that test fails and reports can move back to
+  stable-ID matching.
+
 ## Key architectural notes
 1. **Dependency order**: calculated fields can reference other calculated fields via their sub-type data.
    Must topologically sort before Putting to destination.

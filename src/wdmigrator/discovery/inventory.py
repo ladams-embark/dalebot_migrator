@@ -311,10 +311,11 @@ def lookup_report(
 def find_report_by_exact_name(
     connection: Connection, name: str
 ) -> ReportSummary | None:
-    """Look a report up by name.
+    """Look a report up by name, for selection.
 
     ``Report_Name`` is **exact match** — a substring finds nothing. Use the
-    index for anything resembling a search.
+    index for anything resembling a search. Returns the first match; use
+    :func:`lookup_report_by_name` when ambiguity matters.
     """
     connection.limiter.wait()
     response = connection.service.Get_Tenanted_Report_Definitions(
@@ -328,6 +329,68 @@ def find_report_by_exact_name(
     data = serialize_object(response)
     items = (data.get("Response_Data") or {}).get("Tenanted_Report_Definition") or []
     return _report_summary(items[0]) if items else None
+
+
+def lookup_report_by_name(connection: Connection, name: str) -> LookupResult:
+    """Existence check for a report, matched on its exact name.
+
+    Name is used because **``Custom_Report_ID`` does not work as a lookup key**
+    on this tenant. The API returns it on every report reference, but feeding it
+    back to ``Request_References`` fails with "is not a valid ID value for type
+    = 'Custom_Report_ID'" — verified against 18 of 18 sampled reports, including
+    ones whose names contain no special characters. WID is not an option either,
+    since a source WID means nothing in another tenant. That leaves the name.
+
+    Name is a weaker identity than a stable ID, and it is not unique: 7 of 999
+    sampled reports shared a name with another. A duplicate therefore returns
+    ``UNKNOWN`` rather than a guess — picking the wrong one would overwrite an
+    unrelated report, and there is no delete operation to recover from that.
+    """
+    if not name:
+        return LookupResult(
+            outcome=LookupOutcome.UNKNOWN,
+            fault="Report has no name, so it cannot be matched by name.",
+        )
+
+    try:
+        connection.limiter.wait()
+        response = connection.service.Get_Tenanted_Report_Definitions(
+            Request_Criteria={"Report_Name": name},
+            Response_Filter={"Page": 1, "Count": 5},
+            Response_Group={
+                "Include_Reference": True,
+                "Include_Tenanted_Report_Definition_Data": False,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = connection.redact(str(exc))
+        return LookupResult(outcome=classify_fault(message), fault=message)
+
+    data = serialize_object(response)
+    results = data.get("Response_Results") or {}
+    total = int(results.get("Total_Results") or 0)
+    items = (data.get("Response_Data") or {}).get("Tenanted_Report_Definition") or []
+
+    if total == 0:
+        return LookupResult(outcome=LookupOutcome.NOT_FOUND)
+
+    if total > 1:
+        return LookupResult(
+            outcome=LookupOutcome.UNKNOWN,
+            fault=(
+                f"{total} reports in the destination are named {name!r}. Cannot "
+                "tell which one this is, and overwriting the wrong report "
+                "cannot be undone."
+            ),
+        )
+
+    ids = ids_of(items[0].get("Tenanted_Report_Definition_Reference")) if items else {}
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=items[0] if items else None,
+        wid=ids.get("WID"),
+        reference_id=ids.get("Custom_Report_ID"),
+    )
 
 
 # ── Index sweeps ─────────────────────────────────────────────────────────────

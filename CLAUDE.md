@@ -122,7 +122,8 @@ After any ISU permission change in Workday: run "Activate Pending Security Polic
 | `Response_Filter.Count` accepts **999**, not 100 | Full CF index = 10 pages ≈ **25s**. Full report index = 6 pages ≈ **158s**. Cheap enough to just build and cache. |
 | `Report_Name` criteria is **exact-match** (substring returns 0 hits) | Server-side search is useless for discovery. A local index is mandatory, not an optimization. |
 | Reference-only report sweep returns **no name** — only `{WID, Custom_Report_ID}` | A browsable report index needs `Include_..._Data=True` (the slower path). |
-| Reports carry a stable cross-tenant `Custom_Report_ID` | Use it for report identity/probing, mirroring `Calculated_Field_ID`. |
+| **`Custom_Report_ID` is returned but rejected as a lookup key** | Verified on 18/18 sampled reports: feeding the `Custom_Report_ID` from a report's own reference back into `Request_References` fails with "is not a valid ID value for type = 'Custom_Report_ID'", while the same report resolves fine by WID. Reports must therefore be matched across tenants by **exact name** (`Request_Criteria.Report_Name`), which does work. Calculated fields are unaffected — `Calculated_Field_ID` works normally. |
+| Report names are **not unique** — 7 of 999 sampled reports shared one | A duplicated name must resolve to UNKNOWN, never a guess. Overwriting the wrong report cannot be undone. |
 | `Put_Calculated_Field_ResponseType` contains `Exceptions_Response_Data` | **A HTTP-200 no-fault PUT can still have failed.** Always inspect it — "no fault" ≠ success. |
 | `Put_Tenanted_Report_Definition_ResponseType` has **no** exceptions block | Error handling is asymmetric between the two writers. |
 | Volumes on `commitconsulting_dpt1`: 9,652 CFs / 5,153 reports | Index once, cache, rate-limit at ~8 calls/sec. |
