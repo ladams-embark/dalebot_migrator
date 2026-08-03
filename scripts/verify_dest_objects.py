@@ -17,8 +17,8 @@ from wdmigrator import api
 
 load_dotenv()
 
-CF_DEST_WID = "f12b507378ef10020afc0840bcf80000"
-REPORT_DEST_WID = "f12b507378ef10020afc268702070000"
+CF_DEST_WID = "2bf676e597c31000bc25073b67c60000"
+REPORT_DEST_WID = "3027e60674561000bcd934f424510000"
 
 
 def main() -> None:
@@ -52,6 +52,9 @@ def main() -> None:
         for col in columns:
             ext_ids = api.ids_of(col.get("External_Field_Reference"))
             print(f"    Report_Column_ID={col.get('Report_Column_ID')} External_Field WID={ext_ids.get('WID')}")
+
+        top_filter = data.get("Tenanted_Report_Definition_Top_Level_Filter_Data")
+        print(f"  Top_Level_Filter_Data: {top_filter}")
 
 
 if __name__ == "__main__":

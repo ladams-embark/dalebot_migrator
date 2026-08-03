@@ -170,6 +170,38 @@ def build_calculated_field_payload(
     return payload
 
 
+def _strip_filter_instance_references(obj: object) -> None:
+    """Remove ``Filter_Instances_Reference`` from every filter condition, in place.
+
+    A filter condition's fixed comparison value is a reference to a specific
+    business object instance in the *source* tenant — a particular Cost
+    Center, Location, Worker, whatever the filtered field happens to be on.
+    That is tenant-specific data, not something this tool creates or can
+    verify ahead of time (no generic "does this WID exist" operation exists,
+    same underlying limit as the ``External_Field`` case).
+
+    Confirmed live 2026-08-03 on "Luke's Fancy Report": Workday rejects an
+    unresolvable ``Filter_Instances_Reference`` outright
+    (``Invalid ID value ... is not a valid ID value for type = 'WID'``), and
+    ``Ignore_When_No_Target_Value`` — despite its name — does not suppress
+    that validation; the same fault occurred with it set ``True``. Stripping
+    the reference is safe in the direction that matters: worst case the
+    migrated report's filter has no default value and someone sets one in
+    Workday afterward, versus the whole report being blocked outright.
+    ``Ignore_When_No_Target_Value`` is stripped alongside it since it has
+    nothing left to apply to.
+    """
+    if isinstance(obj, dict):
+        if "Filter_Instances_Reference" in obj:
+            obj.pop("Filter_Instances_Reference", None)
+            obj.pop("Ignore_When_No_Target_Value", None)
+        for value in obj.values():
+            _strip_filter_instance_references(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _strip_filter_instance_references(item)
+
+
 def build_report_payload(
     node: Node,
     wid_map: Mapping[str, str],
@@ -183,7 +215,9 @@ def build_report_payload(
     The owner is remapped because a source ``System_User`` reference is
     meaningless in the destination. If no owner is supplied the source's is
     stripped rather than passed through, so the destination assigns its own
-    default instead of the write failing on an unresolvable user.
+    default instead of the write failing on an unresolvable user. Filter
+    condition instance references are stripped for the same reason — see
+    :func:`_strip_filter_instance_references`.
     """
     data = node.payload.get("Tenanted_Report_Definition_Data")
     if not data:
@@ -192,6 +226,7 @@ def build_report_payload(
         )
 
     remapped = substitute_wids(data, wid_map)
+    _strip_filter_instance_references(remapped)
 
     if owner_reference is not None:
         remapped["Tenanted_Report_Definition_System_User_Reference"] = owner_reference

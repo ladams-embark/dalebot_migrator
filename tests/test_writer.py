@@ -77,6 +77,37 @@ def cf_payload(wid, ref_id, name="Field", refs=()):
     }
 
 
+def report_payload_with_filter_instance(wid, name="Report", instance_wid="SRC_INSTANCE"):
+    """Shape matches what a live tenant actually returns — confirmed via
+    scripts/find_wid_in_report.py: Filter_Instances_Reference is a list."""
+    return {
+        "Tenanted_Report_Definition_Reference": {
+            "ID": [
+                {"type": "WID", "_value_1": wid},
+                {"type": "Custom_Report_ID", "_value_1": name},
+            ]
+        },
+        "Tenanted_Report_Definition_Data": {
+            "Name": name,
+            "Tenanted_Report_Definition_Top_Level_Filter_Data": {
+                "Tenanted_Report_Filter_Data": {
+                    "Condition_Item_Data": [
+                        {
+                            "Relational_Operator_Reference_Data": {
+                                "ID": [{"type": "WID", "_value_1": "OP_EQUALS"}]
+                            },
+                            "Filter_Instances_Reference": [
+                                {"ID": [{"type": "WID", "_value_1": instance_wid}]}
+                            ],
+                            "Ignore_When_No_Target_Value": True,
+                        }
+                    ]
+                }
+            },
+        },
+    }
+
+
 def report_payload(wid, name="Report", refs=(), owner="source_user"):
     return {
         "Tenanted_Report_Definition_Reference": {
@@ -532,6 +563,55 @@ class TestOwnerRemapping:
         assert build_owner_reference(wid="W")["ID"][0]["type"] == "WID"
         with pytest.raises(ValueError):
             build_owner_reference(workday_username="u", wid="W")
+
+
+class TestFilterInstanceStripping:
+    """Filter_Instances_Reference points at a specific business-object
+    instance in the source tenant — tenant-specific data this tool has no
+    way to verify or create. Confirmed live 2026-08-03 that Workday rejects
+    an unresolvable one outright and that Ignore_When_No_Target_Value does
+    not suppress that validation, so both are stripped unconditionally."""
+
+    def _report_node(self, instance_wid="SRC_INSTANCE"):
+        closure, _ = plan_for(
+            reports={"r1": report_payload_with_filter_instance("r1", instance_wid=instance_wid)}
+        )
+        return closure.nodes["report:r1"]
+
+    def test_filter_instance_reference_is_stripped(self):
+        payload = build_report_payload(self._report_node(), {}, action=Action.CREATE)
+        condition = payload["Tenanted_Report_Definition_Data"][
+            "Tenanted_Report_Definition_Top_Level_Filter_Data"
+        ]["Tenanted_Report_Filter_Data"]["Condition_Item_Data"][0]
+        assert "Filter_Instances_Reference" not in condition
+        assert "Ignore_When_No_Target_Value" not in condition
+
+    def test_other_condition_fields_survive_the_strip(self):
+        """Only the instance reference and its now-meaningless flag go —
+        everything else on the condition (the operator, in this case) stays."""
+        payload = build_report_payload(self._report_node(), {}, action=Action.CREATE)
+        condition = payload["Tenanted_Report_Definition_Data"][
+            "Tenanted_Report_Definition_Top_Level_Filter_Data"
+        ]["Tenanted_Report_Filter_Data"]["Condition_Item_Data"][0]
+        assert condition["Relational_Operator_Reference_Data"]["ID"][0]["_value_1"] == "OP_EQUALS"
+
+    def test_source_payload_is_not_mutated_by_stripping(self):
+        node = self._report_node()
+        build_report_payload(node, {}, action=Action.CREATE)
+        condition = node.payload["Tenanted_Report_Definition_Data"][
+            "Tenanted_Report_Definition_Top_Level_Filter_Data"
+        ]["Tenanted_Report_Filter_Data"]["Condition_Item_Data"][0]
+        assert "Filter_Instances_Reference" in condition
+
+    def test_a_report_with_no_filters_is_unaffected(self):
+        payload = build_report_payload(
+            plan_for(reports={"r1": report_payload("r1")})[0].nodes["report:r1"],
+            {},
+            action=Action.CREATE,
+        )
+        assert "Tenanted_Report_Definition_Top_Level_Filter_Data" not in payload[
+            "Tenanted_Report_Definition_Data"
+        ]
 
 
 class TestSkippedObjects:

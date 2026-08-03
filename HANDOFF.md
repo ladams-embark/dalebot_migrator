@@ -1,6 +1,6 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-07-31 (session 4)_
+_Last updated: 2026-08-03 (session 5)_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields + custom report
@@ -97,6 +97,22 @@ reference too — a delivered field that passes through fine). "Not a
 it's a report-scoped calculated field that needs promoting to global, wait
 for activation, and retry** — not to treat it as a hard block.
 
+**A second, unrelated wall was found and fixed (2026-08-03): a filter
+condition's `Filter_Instances_Reference`** (its fixed comparison value —
+e.g. "Location = Austin Office" — a reference to a specific business-object
+*instance*, not a field definition) fails the exact same way if that
+instance doesn't exist on the destination. Tried
+`Ignore_When_No_Target_Value=True` first, live, on the untouched reference —
+**still failed**, same fault, ruled out empirically. Fixed instead by
+stripping `Filter_Instances_Reference` (and the now-meaningless
+`Ignore_When_No_Target_Value`) unconditionally in
+`migrate/writer.py:build_report_payload`, the same treatment already given
+to the report owner — the field is optional in the schema
+(`minOccurs="0"`), so there's nothing Workday requires there. Live-verified
+on "Luke's Fancy Report": created successfully, filter condition intact
+minus its default value. See CLAUDE.md's verified-facts table for the full
+writeup.
+
 ### Blockers and open questions
 
 1. ~~No real destination tenant~~ — **resolved.** `commitconsulting_dpt5` is
@@ -137,6 +153,53 @@ trusting the cache's age alone.
 holds the full architecture, the Streamlit design, and the safety model.
 
 ---
+
+## Done this session (2026-08-03, session 5) — Filter_Instances_Reference fix
+
+Second live wall found and fixed, unrelated to session 4's `External_Field`
+finding. Migrating "Luke's Fancy Report" (`commitconsulting_dpt1` →
+`commitconsulting_dpt5`) failed live on a filter condition's
+`Filter_Instances_Reference` — a fixed comparison value (a specific
+business-object instance: a particular Cost Center, Location, Worker,
+whatever the filtered field is on) that doesn't exist on the destination.
+Structurally different from the column-reference wall: that one was about a
+*field definition* being invisible; this one is about a reference to
+specific *tenant data*, which this tool was never going to create or verify
+in the first place.
+
+**Tested and ruled out `Ignore_When_No_Target_Value` empirically before
+building anything** — the field sits right next to `Filter_Instances_Reference`
+in `Condition_Item_DataType` and its name suggested it might suppress
+exactly this validation. Wrote a one-off script
+(`scripts/test_ignore_when_no_target_value.py`) that fetched the report,
+recursively set the flag `True` on every filter condition carrying an
+instance reference, left the reference itself untouched, and ran it
+live. Same fault, identical WID. Confirmed via
+`scripts/find_wid_in_report.py` that the failure really was the patched
+field, not something else — first attempt actually failed on a *different*,
+unrelated column reference first (the report also depended on a genuine
+calculated field, `CF ESI - Workday`, that wasn't in the — again stale —
+CF index cache; same "rebuild fresh" fix as session 4).
+
+**Fix**: `migrate/writer.py`'s `build_report_payload` now calls a new
+`_strip_filter_instance_references()` — a recursive walk (same pattern as
+`extract_wid_refs`, not tied to a specific parent container) that removes
+`Filter_Instances_Reference` and `Ignore_When_No_Target_Value` from every
+filter condition, unconditionally. `Filter_Instances_Reference` is
+`minOccurs="0"` in the schema, so this is a legal, well-formed payload, not
+a workaround. 4 new offline tests in `tests/test_writer.py`
+(`TestFilterInstanceStripping`). 368 offline tests total.
+
+**Live-verified end to end**: "Luke's Fancy Report" created on
+`commitconsulting_dpt5` (`dest_wid 3027e60674561000bcd934f424510000`), its
+calculated-field dependency `CF ESI - Workday` created first
+(`dest_wid 2bf676e597c31000bc25073b67c60000`), owner correctly `wd-support`.
+Read back afterward: `Filter_Instances_Reference: []`,
+`Ignore_When_No_Target_Value: False` — both cleanly absent — and the rest of
+the filter condition (operator, source field) intact.
+
+New diagnostic scripts: `scripts/test_ignore_when_no_target_value.py`,
+`scripts/find_wid_in_report.py`.
 
 ## Done this session (2026-07-31, session 4, continued) — owner fixed to wd-support, External_Field investigation, PLNF resolved
 
