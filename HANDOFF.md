@@ -35,10 +35,11 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 
 ## PICK UP HERE — next session
 
-**Branch:** `core-implementation-service-migration`. **Not merged to master,
-and no PR exists** — `gh` CLI is not installed on this machine, so the PR has
-to be opened in the browser:
-`https://github.com/ladams-embark/dalebot_migrator/compare/master...core-implementation-service-migration`
+**Branch:** `core-implementation-service-migration`, **merged to master**
+2026-08-03 via [PR #1](https://github.com/ladams-embark/dalebot_migrator/pull/1)
+(opened and merged in the browser — `gh` CLI is not installed on this
+machine). `master` now has everything through the filter-instance-reference
+fix (commit `0a33070`). Start the next session from `master`.
 
 **State:** engine steps 1–8 are built and green. `ui/` (step 9, the Streamlit
 wizard) is built: `app.py`, `state.py`, `runner.py`, `safety_ui.py`,
