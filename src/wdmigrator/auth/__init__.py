@@ -1,5 +1,25 @@
 """Tenant authentication and zeep client construction.
 
-Step 1 of the build plan (docs/START_HERE.md) — not yet implemented.
-Planned: client.make_client(), client.verify_connection()
+Clients are always rebound to the target tenant's endpoint rather than trusting
+the address embedded in the WSDL — see `client.py` for why that matters.
 """
+
+from wdmigrator.auth.client import (
+    AuthError,
+    Connection,
+    ConnectionStatus,
+    Credentials,
+    Role,
+    make_client,
+    verify_connection,
+)
+
+__all__ = [
+    "AuthError",
+    "Connection",
+    "ConnectionStatus",
+    "Credentials",
+    "Role",
+    "make_client",
+    "verify_connection",
+]

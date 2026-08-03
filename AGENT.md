@@ -2,9 +2,11 @@
 
 You are a senior integration engineer building a Python tool that migrates
 configuration (calculated fields and custom report definitions) from a SOURCE
-Workday tenant to a DESTINATION tenant via the **Report_Metadata** SOAP web
-service. Prioritize correctness, reversibility, and not breaking the destination
-tenant over speed or cleverness.
+Workday tenant to a DESTINATION tenant via the **Core_Implementation_Service**
+SOAP web service (`Report_Metadata` exposes the same operations but is
+rejected live on this tenant — see `docs/WSDL_NOTES.md`). Prioritize
+correctness, reversibility, and not breaking the destination tenant over
+speed or cleverness.
 
 This file is your operating manual. Deeper reference lives in the docs listed
 under "Project map" — read them before writing code in a given area.
@@ -24,7 +26,7 @@ under "Project map" — read them before writing code in a given area.
    Warn loudly before anything could touch Production.
 4. **Verify, don't invent.** Never invent Workday endpoints, operation names,
    payload shapes, or field names. Confirm against the local WSDL
-   (`src/wdmigrator/assets/report_metadata_wsdl.xml`) or official Workday docs. If you
+   (`src/wdmigrator/assets/core_implementation_service_wsdl.xml`) or official Workday docs. If you
    can't confirm a capability, say so and propose how to verify it — don't guess.
 5. **Stay in scope.** Only make changes directly requested. No unrequested
    features, abstractions, or refactors. Never modify files outside the project
@@ -58,7 +60,7 @@ docs/
 src/wdmigrator/        The installed package (`import wdmigrator`).
   __init__.py          Exposes DEFAULT_WSDL_PATH — always use this for the WSDL.
   assets/
-    report_metadata_wsdl.xml   Local tenant WSDL (v47.0). Build zeep clients OFFLINE.
+    core_implementation_service_wsdl.xml   Local tenant WSDL (v47.0). Build zeep clients OFFLINE.
   auth/                Step 1 — client.py. NOT YET IMPLEMENTED.
   discovery/           Step 2 — inventory.py. NOT YET IMPLEMENTED.
   migrate/             Steps 3-4 — ordering.py, writer.py. NOT YET IMPLEMENTED.
@@ -109,7 +111,7 @@ that talks to a tenant, so the destination is never hit during normal testing.
 Set these in `.env` (see `.env.example` for exact names):
 `WD_SOURCE_SERVICES_HOST`, `WD_SOURCE_TENANT`, `WD_SOURCE_ISU_USERNAME`,
 `WD_SOURCE_ISU_PASSWORD`, the `WD_DEST_*` equivalents, `WD_WWS_VERSION` (v47.0),
-`WD_OX_SERVICE_NAME` (Report_Metadata), and `DRY_RUN` (default true).
+`WD_OX_SERVICE_NAME` (Core_Implementation_Service), and `DRY_RUN` (default true).
 
 A `.venv` already exists at the project root. Activate it, then:
 
@@ -128,15 +130,19 @@ ISU) + `.env` for config + `pytest`. A thin CLI first; add a UI only if asked.
 
 ---
 
-## Working with the Report_Metadata SOAP service
+## Working with the Core_Implementation_Service SOAP service
 
 - Build the zeep client from the **local WSDL** so construction needs no tenant
   round-trip. Get its path from the package, never hardcode it:
   `from wdmigrator import DEFAULT_WSDL_PATH`. The WSDL embeds the service
   address, so real operation calls still go to the tenant over HTTPS. Allow a
   `WD_WSDL_PATH` override pointing at a live `...?wsdl` URL.
-- Service is `Report_Metadata`, version `v47.0` (fixed in schema). Endpoint pattern:
-  `https://{services_host}/ccx/service/{tenant}/Report_Metadata/{version}`.
+- Service is `Core_Implementation_Service`, version `v47.0` (confirmed max
+  version this tenant supports — v48.0+ return HTTP 500). Endpoint pattern:
+  `https://{services_host}/ccx/service/{tenant}/Core_Implementation_Service/{version}`.
+  `Report_Metadata` defines the identical operations but is rejected live on
+  this tenant with a `Client.validationError` fault for this ISU, regardless
+  of domain security — confirmed 2026-07-30, see `docs/WSDL_NOTES.md`.
 - Read ops are `Get_*` (plural for lists); write ops are `Put_*` (singular).
 - `Get_Calculated_Fields` request: `Request_References` and `Request_Criteria` are
   an XSD **choice** — send at most one, never both. Always include `Response_Group`
@@ -145,7 +151,7 @@ ISU) + `.env` for config + `pytest`. A thin CLI first; add a UI only if asked.
   use the stable `Calculated_Field_Reference_ID`, **not** the tenant-specific WID.
 
 ### The WSDL file is large
-`src/wdmigrator/assets/report_metadata_wsdl.xml` is ~767 KB minified onto 4 lines.
+`src/wdmigrator/assets/core_implementation_service_wsdl.xml` is ~5.9 MB.
 Do not Read it whole — `grep` it, or slice by character range with Python, to
 extract specific type definitions.
 
@@ -155,7 +161,7 @@ extract specific type definitions.
 
 - **Services host ≠ UI host**: SOAP goes to `impl-services1.wd12.myworkday.com`,
   not `impl.wd12.myworkday.com`.
-- **Version in the URL path**: `.../Report_Metadata/v47.0`, not bare `Report_Metadata`.
+- **Version in the URL path**: `.../Core_Implementation_Service/v47.0`, not bare `Core_Implementation_Service`.
 - **ISU username format**: `username@tenant`, not just `username`.
 - **Activate Pending Security Policy Changes** in the Workday UI after ISU
   permission changes, or the ISU silently returns empty data.
@@ -165,11 +171,13 @@ extract specific type definitions.
 
 ---
 
-## Current status (2026-07-30)
+## Current status (2026-07-31)
 
 Repo restructured into a single installable `wdmigrator` package with a working
 offline dev loop (`scripts/selfcheck.py` + `pytest`, both green, neither touching
 a tenant). Read side (`Get_Calculated_Fields`) prototype is built and verified
-offline. Next step is the write side, `Put_Calculated_Field` (shape: optional
-`Calculated_Field_Reference` + required `Calculated_Field_Data`), dry-run first.
+**live** against the source tenant via `Core_Implementation_Service` (not
+`Report_Metadata` — see `docs/WSDL_NOTES.md` for why). Next step is the write
+side, `Put_Calculated_Field` (shape: optional `Calculated_Field_Reference` +
+required `Calculated_Field_Data`), dry-run first.
 See `HANDOFF.md` for the latest detail and update it when you finish a session.

@@ -29,13 +29,17 @@ means `src/wdmigrator/auth/client.py`, imported as `wdmigrator.auth.client`.
 
 4. **Verify the live WSDL is reachable** (only when moving to live calls):
    ```bash
-   curl -s "https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Report_Metadata/v47.0?wsdl" | head -5
+   curl -s "https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Core_Implementation_Service/v47.0?wsdl" | head -5
    ```
    Should return XML starting with `<wsdl:definitions`. If not, check services host in `.env`.
 
    Note: you do **not** need this to develop. The WSDL is bundled at
-   `src/wdmigrator/assets/report_metadata_wsdl.xml` and reachable via
+   `src/wdmigrator/assets/core_implementation_service_wsdl.xml` and reachable via
    `from wdmigrator import DEFAULT_WSDL_PATH`.
+
+   Also note: `Report_Metadata` exposes the identical operations but is
+   rejected live on this tenant regardless of domain security — use
+   `Core_Implementation_Service`. See `docs/WSDL_NOTES.md` for the full story.
 
 ---
 
@@ -85,7 +89,13 @@ marker, no `.env`, no network. This is the fast inner loop and it covers the
 highest-risk logic in the project — invest in it.
 
 Key insight: walk the serialized field dict recursively looking for any key named `WID`.
-If that WID is in `custom_wids`, it's a dependency. Global/delivered WIDs won't be in `custom_wids`.
+
+`custom_wids` is **not** "every WID from the source" — that older idea was wrong and is corrected in
+`CLAUDE.md`. `Get_Calculated_Fields` returns ~9,652 fields that are mostly Workday-delivered, with
+nothing in the payload distinguishing them. Custom-vs-delivered is determined per object by probing
+the **destination** (`migrate/planner.py`, step 6): resolves there → delivered or already migrated;
+specific not-found fault → custom and must be created. Ordering takes the resulting set as input and
+stays pure.
 
 ---
 
@@ -141,9 +151,9 @@ and requires `--no-dry-run` flag plus interactive confirmation before real write
 ## Key things that will bite you if you forget
 
 1. **Services host ≠ UI host** — SOAP calls go to `impl-services1.wd12.myworkday.com`, NOT `impl.wd12.myworkday.com`
-2. **Version must be in the URL path** — `https://.../Report_Metadata/v47.0` not just `Report_Metadata`
+2. **Version must be in the URL path** — `https://.../Core_Implementation_Service/v47.0` not just `Core_Implementation_Service`
 3. **ISU username format** — `username@tenant`, not just `username`
 4. **Activate Pending Security Policy Changes** — must be run in Workday UI after ISU permission changes or the ISU silently returns empty data
 5. **PUT loop is sequential** — cannot parallelize because each PUT's response WID feeds the next field's payload
-6. **Global WIDs pass through unchanged** — only remap WIDs that appear in `custom_source_wids`
+6. **Global WIDs pass through unchanged** — only remap WIDs identified as custom. Custom-vs-delivered is decided by probing the destination per object, NOT by enumerating the source (see `CLAUDE.md` → "WID handling")
 7. **Always dry_run=True by default** — never flip this without user confirmation

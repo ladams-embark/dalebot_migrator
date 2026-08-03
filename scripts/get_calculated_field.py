@@ -2,12 +2,10 @@
 get_calculated_field.py
 -----------------------
 Calls the Workday 'Get_Calculated_Fields' SOAP operation on the
-Report_Metadata web service.
+Core_Implementation_Service web service.
 
-All specifics below are CONFIRMED against the local WSDL
-(report_metadata_wsdl.xml, Report_MetadataService, v47.0):
-  - Service ...... Report_Metadata   (NOT Report_Builder)
-  - Version ...... v47.0             (fixed in the schema)
+  - Service ...... Core_Implementation_Service
+  - Version ...... v47.0             (confirmed max supported on this tenant)
   - Operation .... Get_Calculated_Fields (plural)
   - Reference .... Calculated_Field_Reference with ID type
                    "WID" or "Calculated_Field_ID"
@@ -19,6 +17,12 @@ All specifics below are CONFIRMED against the local WSDL
     Request_Criteria is an empty type, so it carries no usable filters.
     Response_Group.Include_Calculated_Field_Data must be True to get the
     actual calculated-field definitions (the point of a migration export).
+
+Note: `Report_Metadata` exposes the identical operation and was the
+originally documented service, but it's rejected live on this tenant with a
+`Client.validationError` SOAP fault for this ISU regardless of domain
+security. `Core_Implementation_Service` is confirmed working — see
+docs/WSDL_NOTES.md.
 
 This script READS from the source tenant only. It performs no writes.
 
@@ -32,9 +36,14 @@ Environment variables (never hardcode — see .env.example):
   WD_SOURCE_ISU_USERNAME  — Integration System User (usually ISU_name@tenant)
   WD_SOURCE_ISU_PASSWORD  — ISU password
   WD_WWS_VERSION          — defaults to v47.0 (matches the WSDL)
-  WD_WSDL_PATH            — optional; defaults to the WSDL bundled with the
-                            wdmigrator package (src/wdmigrator/assets/). Set to
-                            a live "...?wsdl" URL to fetch from the tenant.
+  WD_WSDL_PATH            — optional; overrides the WSDL source entirely
+                            (e.g. to point at a different service/version).
+                            Without it, the live tenant endpoint is built from
+                            WD_SOURCE_SERVICES_HOST + WD_SOURCE_TENANT. If
+                            neither is set, falls back to the Core_Implementation_Service
+                            WSDL bundled with the wdmigrator package
+                            (src/wdmigrator/assets/) so this module stays
+                            importable with no .env, e.g. for scripts/selfcheck.py.
 """
 
 import os
@@ -42,8 +51,8 @@ import os
 from dotenv import load_dotenv
 from zeep import Client, Settings
 from zeep.transports import Transport
+from zeep.wsse import UsernameToken
 from requests import Session
-from requests.auth import HTTPBasicAuth
 
 from wdmigrator import DEFAULT_WSDL_PATH
 
@@ -52,13 +61,27 @@ load_dotenv()
 
 # ── Config from environment ──────────────────────────────────────────────────
 
-SERVICE_NAME = "Report_Metadata"                       # confirmed from WSDL
-API_VERSION  = os.environ.get("WD_WWS_VERSION", "v47.0")  # WSDL fixes this at v47.0
+SERVICE_NAME = "Core_Implementation_Service"  # confirmed live 2026-07-30 — Report_Metadata
+                                               # rejects this ISU for every operation tested
+API_VERSION  = os.environ.get("WD_WWS_VERSION", "v47.0")
 
-# Build the client from the local WSDL by default (no tenant round-trip needed
-# just to construct the client). The WSDL embeds the service address, so actual
-# operation calls still go to the tenant endpoint over HTTPS.
-WSDL_SOURCE = os.environ.get("WD_WSDL_PATH", str(DEFAULT_WSDL_PATH))
+
+def _default_wsdl_source() -> str:
+    """Prefer the live tenant endpoint, built from WD_SOURCE_* env vars, since
+    the bundled WSDL can drift from the live tenant over time. Falls back to
+    the bundled Core_Implementation_Service asset only so this module stays
+    importable with no .env, e.g. for scripts/selfcheck.py."""
+    override = os.environ.get("WD_WSDL_PATH")
+    if override:
+        return override
+    services_host = os.environ.get("WD_SOURCE_SERVICES_HOST")
+    tenant = os.environ.get("WD_SOURCE_TENANT")
+    if services_host and tenant:
+        return f"https://{services_host}/ccx/service/{tenant}/{SERVICE_NAME}/{API_VERSION}?wsdl"
+    return str(DEFAULT_WSDL_PATH)
+
+
+WSDL_SOURCE = _default_wsdl_source()
 
 
 def _require_env(name: str) -> str:
@@ -74,17 +97,19 @@ def _require_env(name: str) -> str:
 # ── Build authenticated zeep client ──────────────────────────────────────────
 
 def build_client() -> Client:
-    """Return a zeep SOAP client for Report_Metadata, authenticated with the
-    SOURCE tenant's ISU credentials. The WSDL is loaded from WSDL_SOURCE."""
+    """Return a zeep SOAP client for Core_Implementation_Service, authenticated
+    with the SOURCE tenant's ISU credentials via WS-Security UsernameToken.
+    The WSDL is loaded from WSDL_SOURCE."""
     isu_user = _require_env("WD_SOURCE_ISU_USERNAME")
     isu_pass = _require_env("WD_SOURCE_ISU_PASSWORD")
+    tenant = _require_env("WD_SOURCE_TENANT")
 
     session = Session()
-    session.auth = HTTPBasicAuth(isu_user, isu_pass)
+    wsse = UsernameToken(f"{isu_user}@{tenant}", isu_pass)
 
     settings = Settings(strict=False, xml_huge_tree=True)
     transport = Transport(session=session)
-    return Client(wsdl=WSDL_SOURCE, settings=settings, transport=transport)
+    return Client(wsdl=WSDL_SOURCE, settings=settings, transport=transport, wsse=wsse)
 
 
 # ── Request builder ──────────────────────────────────────────────────────────

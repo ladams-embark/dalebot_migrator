@@ -9,7 +9,10 @@ You are a senior integration engineer building a Python CLI tool that migrates c
 - NEVER hardcode credentials, tenant URLs, ISU passwords, or tokens. All secrets live in `.env` (gitignored).
 - If a credential appears anywhere, strip it and tell the user to rotate it and use `.env` instead.
 - The DESTINATION tenant is a write target — treat every Put as potentially destructive.
+- **This service has no delete operation.** Nothing the tool writes can be undone by the tool; it has to be removed by hand in the Workday UI, object by object. Bias every decision toward refusing a write.
 - `DRY_RUN=true` is the default. Never write to a tenant without dry-run=false AND explicit user confirmation.
+- **Source and destination must never be the same tenant for a live run.** Enforced unconditionally in `safety.py` with no override — an override that exists is one that eventually gets clicked, and the failure mode is silently corrupting the tenant being migrated *from*. Dry runs against a same-tenant config stay allowed.
+- Safety checks belong in the engine, re-validated per object — never in the UI alone.
 - Only test against Sandbox or Implementation tenants. Warn loudly before anything touches Production.
 - Only make changes directly requested. No unrequested features, abstractions, or refactors.
 - Before each coding session, state: which files you will touch, what you will change, and what the stop condition is. Wait for confirmation before writing to a tenant.
@@ -19,19 +22,38 @@ You are a senior integration engineer building a Python CLI tool that migrates c
 ## Current state of the project
 The package structure and dev environment are in place and verified offline
 (`scripts/selfcheck.py` and `pytest` both green, neither contacting a tenant).
-The migration modules themselves are still unwritten.
+The read path is verified **live** against the source tenant.
+
+The end goal is a Streamlit app: the user supplies source + destination tenant
+URLs and credentials, selects reports and/or calculated fields, reviews the
+resolved dependency order and any conflicts, then pushes — with a
+success/failure overview afterwards. Auth on the app itself is out of scope
+for now.
 
 All module paths below are relative to `src/wdmigrator/`, so `auth/client.py`
 means `src/wdmigrator/auth/client.py`, imported as `wdmigrator.auth.client`.
 
 Build order:
-1. `auth/client.py` ← **start here**
-2. `discovery/inventory.py`
-3. `migrate/ordering.py`
-4. `migrate/writer.py`
-5. `validation/verify.py`
-6. `cli.py`
-7. Tests in `tests/` alongside each module (see the Testing approach section)
+1. `config/targets.py` + `safety.py` — **done.** Tenant URL parsing and the
+   write guard. Built first deliberately: the guard has to exist before any
+   code that can write to a tenant. 57 offline tests.
+2. `auth/client.py` ← **next**
+3. `discovery/inventory.py` — index sweeps at Count=999, disk cache
+4. `migrate/ordering.py` — DAG + Kahn topological sort (child-most first)
+5. `migrate/resolver.py` — WID classification + dependency closure walker
+6. `migrate/planner.py` — CREATE/UPDATE/SKIP via destination probing
+7. `migrate/writer.py` — dry-run default; inspect `Exceptions_Response_Data`
+8. `api.py` — the only engine module the UI imports; generator-based
+9. `ui/` — Streamlit gated wizard; then `validation/verify.py`, `cli.py`
+10. Tests in `tests/` alongside each module (see the Testing approach section)
+
+Two structural rules for this build:
+- **Nothing under `src/wdmigrator/` except `ui/` may import streamlit or
+  pandas.** The engine stays importable and testable without them.
+- **Every long-running engine operation is a generator yielding progress
+  events**, not a blocking call with a callback. This is what makes
+  cancellable progress work under Streamlit's rerun model, and it serves a
+  `click` CLI equally well.
 
 ---
 
@@ -52,16 +74,25 @@ https://{services_host}/ccx/service/{tenant}/{service}/{version}
 
 WSDL (verified working):
 ```
-https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Report_Metadata/v47.0?wsdl
+https://impl-services1.wd12.myworkday.com/ccx/service/commitconsulting_dpt1/Core_Implementation_Service/v47.0?wsdl
 ```
 
-### The Report_Metadata service
-- **Service name**: `Report_Metadata` (confirmed from live tenant WSDL)
-- **Security domain**: Special OX Web Services (System functional area)
-- **NOT in the public WWS directory** — restricted service
+### The Core_Implementation_Service service
+- **Service name**: `Core_Implementation_Service` (confirmed live 2026-07-30 — see below)
 - **Tenant version**: v47.0 — must be in the URL path, not just the SOAP envelope
+- **`Report_Metadata` is NOT usable on this tenant**: its WSDL defines the same
+  operations and resolves fine, but every call (`Get_Calculated_Fields`,
+  `Get_Tenanted_Report_Definitions`) fails with a SOAP fault —
+  `SOAP-ENV:Client.validationError`, "The web service or version is invalid
+  for the requested operation" — even with the ISU confirmed as a proper
+  Integration System User, with both **Special OX Web Services** and **Custom
+  Reports and Fields** domain access granted and activated. The identical
+  operations succeed via `Core_Implementation_Service` with the same
+  credentials, same tenant, same version. Use `Core_Implementation_Service`,
+  not `Report_Metadata`, going forward.
 
-Operations used:
+Operations used (all confirmed present on `Core_Implementation_Service`; read
+side confirmed working live, write side not yet tested):
 
 | Operation | Direction |
 |-----------|-----------|
@@ -77,17 +108,43 @@ Each tenant needs its own ISU with **Special OX Web Services** domain granted:
 - Source ISU: needs Get permission
 - Destination ISU: needs Get + Put permission
 
+Note: on the source tenant, domain access alone did not make `Report_Metadata`
+work (see above) — `Core_Implementation_Service` is what actually succeeded.
+Re-verify domain requirements for the destination tenant once Put calls are
+attempted there.
+
 After any ISU permission change in Workday: run "Activate Pending Security Policy Changes" — changes are NOT immediate and the ISU will silently return empty data until activated.
+
+### Live-verified facts (tested 2026-07-31 — build on these, do not re-derive)
+
+| Fact | Consequence |
+|---|---|
+| `Response_Filter.Count` accepts **999**, not 100 | Full CF index = 10 pages ≈ **25s**. Full report index = 6 pages ≈ **158s**. Cheap enough to just build and cache. |
+| `Report_Name` criteria is **exact-match** (substring returns 0 hits) | Server-side search is useless for discovery. A local index is mandatory, not an optimization. |
+| Reference-only report sweep returns **no name** — only `{WID, Custom_Report_ID}` | A browsable report index needs `Include_..._Data=True` (the slower path). |
+| **`Custom_Report_ID` is returned but rejected as a lookup key** | Verified on 18/18 sampled reports: feeding the `Custom_Report_ID` from a report's own reference back into `Request_References` fails with "is not a valid ID value for type = 'Custom_Report_ID'", while the same report resolves fine by WID. Reports must therefore be matched across tenants by **exact name** (`Request_Criteria.Report_Name`), which does work. Calculated fields are unaffected — `Calculated_Field_ID` works normally. |
+| Report names are **not unique** — 7 of 999 sampled reports shared one | A duplicated name must resolve to UNKNOWN, never a guess. Overwriting the wrong report cannot be undone. |
+| `Put_Calculated_Field_ResponseType` contains `Exceptions_Response_Data` | **A HTTP-200 no-fault PUT can still have failed.** Always inspect it — "no fault" ≠ success. |
+| `Put_Tenanted_Report_Definition_ResponseType` has **no** exceptions block | Error handling is asymmetric between the two writers. |
+| Volumes on `commitconsulting_dpt1`: ~9,650+ CFs (grows as report-scoped fields get promoted to global — was 9,652, now 9,654) / ~5,153 reports | Index once, cache, rate-limit at ~8 calls/sec. Re-sweep rather than trust an old cache if a dependency unexpectedly won't resolve. |
+| **No Configuration Package / Object Transporter API exists** | Probed `Object_Transporter`, `Configuration_Package`, `Integrations`, `Custom_Object`, `Change_Set`, `Solution`, `Workday_Extensibility` — none expose a package/transport/migration operation. OX is UI-only tooling. Scope by explicit user selection instead. |
+| This service has **no delete operation** | Nothing written can be undone by the tool. See `src/wdmigrator/safety.py`. |
+| **`Tenanted_Report_Column_Data.External_Field_Reference` is not always a `Calculated_Field` reference — it's a superset `External_Field` ID space** | Its enumeration (`External_FieldReferenceEnumeration` in the WSDL) is `WID`, `Calculated_Field_ID`, `Custom_Field_ID`, `Computed_Data_Source_Field_ID`, `Cube_Field_Last_Entry_ID`, `Custom_Field_Data_Set_ID`, `Extension_Computed_Data_Field_Reference_ID`, `External_Analytics_Data_Source_Field_ID`, plus two `Business_View_*_Field` variants — several distinct underlying object types share one WID namespace. `Get_Calculated_Fields` by WID returning `NOT_FOUND` for a column reference is real and not a bug — **but it does not by itself mean the field is unmigratable.** See the next two rows: it can also mean "report-scoped calculated field, not yet promoted to global" (fixable, see below) or "delivered field, passes through fine regardless" (also fine — confirmed live on "AE Previous Worker," which has exactly this shape of reference and migrates successfully). There is nothing in this WSDL that distinguishes those cases from a genuinely unmigratable `Custom_Field_ID`-space reference ahead of time — **do not build a pre-flight blocker on "not a Calculated_Field" alone; it was tried and reverted for producing false positives.** |
+| **No operation exists to Get/Put a plain custom field** — still true, but confirm before assuming a `NOT_FOUND` is one | Checked every operation in the bundled WSDL for anything custom-field-shaped: `Get/Put_Custom_Object_Field_Types_for_OX`, `Get/Put_Custom_Object_Rules_for_OX`, `Get/Put_Custom_Object_Validations_for_OX`, `Get/Put_Custom_Object_for_OX` — all of these manage **Custom Object** field *type definitions* (Workday's user-defined-business-object feature), not an individual custom field hung off a standard object like Worker, and not a plain `Custom_Field_ID`-space object either. If a report column's `External_Field_Reference` genuinely does resolve to a `Custom_Field_ID`-space object, this tool has no way to create it — the underlying field would have to already exist on the destination some other way. **No live case of this has actually been confirmed** (see below — the one case investigated turned out to be something else entirely). Don't assume a `NOT_FOUND` means this without checking the next row first. |
+| **A `NOT_FOUND` on `Get_Calculated_Fields` can mean "report-scoped calculated field, not yet promoted" — and once promoted, there is a real activation delay before the *same* WID resolves** | Workday's Report Writer supports calculated fields defined inline within a single report (never registered as a tenant-wide `Calculated_Field`, invisible to `Get_Calculated_Fields` for that reason — not a WSDL gap, this WSDL has no schema location for an inline report-scoped field's definition either, checked `Tenanted_Report_Column_DataType` and `Tenanted_Report_Definition_DataType` in full). **Confirmed live 2026-07-31** on `commitconsulting_dpt1`'s "PLNF - All Workers" report, column `CF_LRV_-_Home_State`, WID `da06ec2634331001f8e8b6fa2e4d0000`: initially `NOT_FOUND` (live PUT failed with `Invalid ID value ... is not a valid ID value for type = 'WID'`). After the user promoted it to a global calculated field in the Workday UI, it was **still** `NOT_FOUND` from both a targeted `Get_Calculated_Fields(wid=...)` and a full bulk index sweep immediately afterward — an activation delay, not a failed promotion. Some real (unmeasured, several minutes) time later, both the targeted lookup and a fresh bulk sweep found it — `Name: 'CF LRV - Home State'`, **the same WID it always had**. No new object was created. Once visible, the existing resolve → probe → create pipeline worked with zero code changes. **Consequence:** on a `NOT_FOUND` for a report's `External_Field_Reference`, ask whether it might be report-scoped before concluding it's out of scope — promoting it to global and retrying (allowing real time for activation, and rebuilding the CF index/cache fresh rather than trusting a sweep that ran too soon) may simply fix it. |
+| **A filter condition's `Filter_Instances_Reference` (a fixed comparison value pointing at a specific business-object instance) fails the same way as an unresolvable field reference — and `Ignore_When_No_Target_Value` does NOT suppress it, despite the name** | `Condition_Item_DataType` has both `Filter_Instances_Reference -> wd:InstanceObjectType` (optional, `minOccurs=0`) and a sibling `Ignore_When_No_Target_Value: xsd:boolean`, undocumented in the WSDL (no `<xsd:documentation>` on either). **Confirmed live 2026-08-03** on `commitconsulting_dpt1`'s "Luke's Fancy Report": its top-level filter condition's `Filter_Instances_Reference` WID (`e5593fb2f0f41001b5a2ddb588c90000`) doesn't exist on the destination. Setting `Ignore_When_No_Target_Value=True` alongside the untouched reference and PUTting anyway **still failed live** with the identical `Invalid ID value ... is not a valid ID value for type = 'WID'` fault — ruled out empirically, not assumed. **Fix, also confirmed live**: since the field is optional in the schema, `migrate/writer.py:build_report_payload` now strips `Filter_Instances_Reference` (and `Ignore_When_No_Target_Value`, meaningless without it) from every filter condition on every report, unconditionally — same treatment as the owner reference. Read back afterward: the filter condition survives with everything else intact (operator, source field), just no default value. This is a fixed-value reference to *specific tenant data* (a particular Cost Center, Location, Worker, whatever the filtered field is on) — there is no generic "does this WID exist" operation to pre-check it, same underlying limit as the `External_Field` case above, so unconditional stripping (not a probe-and-decide) is the only reliable option. |
 
 ### Get_Calculated_Fields request structure
 ```
 Get_Calculated_Fields_Request
-  Request_References   (optional) — list of Calculated_Field WID references to fetch specific fields
-  Request_Criteria     (optional) — currently empty type in WSDL, so omit or leave empty to fetch all
-  Response_Filter      (optional) — Page (int), Count (int) for pagination
+  Request_References   (optional) — Calculated_Field references, by WID or Calculated_Field_ID
+  Request_Criteria     (optional) — EMPTY type in the WSDL: no filtering is possible at all
+  Response_Filter      (optional) — Page (int), Count (int, max 999) for pagination
   Response_Group       (optional) — Include_Reference (bool), Include_Calculated_Field_Data (bool)
 ```
 Always set `Include_Calculated_Field_Data=True` in Response_Group, otherwise you get stubs.
+
+`Request_References` and `Request_Criteria` are an XSD **choice** — send at most one, never both.
 
 ### Put_Calculated_Field request structure
 ```
@@ -95,6 +152,11 @@ Put_Calculated_Field_Request
   Calculated_Field_Reference   (optional) — omit to create; include to update existing
   Calculated_Field_Data        (required) — full field definition
 ```
+The response carries `Exceptions_Response_Data` → `Exceptions_Data` → `Exception_Data{Classification,
+Message}`. **Inspect it on every PUT.** A 200 with no SOAP fault does not mean the write succeeded.
+
+Open question, unverified: whether a PUT *with* a reference does a full replace or a merge. Until
+that is tested, treat UPDATE as unsafe and prefer CREATE/SKIP.
 
 ### Calculated_Field_DataType — 45 fields, polymorphic
 Base fields (always present):
@@ -152,52 +214,137 @@ Same WID in every Workday tenant worldwide. Pass through unchanged.
 Tenant-specific. A custom calculated field PUT to the destination tenant gets a brand new WID.
 If field A references field B (both custom), B's source WID ≠ B's destination WID.
 
-### The algorithm
+### ⚠️ The superseded algorithm — do not use
+An earlier version of this file said:
+
 ```python
-# Step 1: GET all custom calculated fields from source
-source_fields = get_all_calculated_fields(source_client)
+custom_source_wids = {field.wid for field in source_fields}   # WRONG
+```
 
-# Step 2: Build set of all custom WIDs from source
-custom_source_wids = {field.wid for field in source_fields}
+That is incorrect and was never live-tested. `Get_Calculated_Fields` returns **9,652 fields on this
+tenant, most of them Workday-delivered**, mixed in with the custom ones. Live inspection found no way
+to tell them apart from the payload: identical ID-type combos (`Calculated_Field_ID` + `WID`), no
+flag, no `Do_Not_Use` signal, no naming pattern. Treating every returned field as custom would
+classify ~9,600 delivered fields as needing migration.
 
-# Step 3: Build dependency DAG
-# For each field, scan its sub-type data for WID references that are in custom_source_wids
-dag = build_dependency_dag(source_fields, custom_source_wids)
+### The algorithm — verified live 2026-07-31
 
-# Step 4: Topological sort → determines PUT order
-ordered_fields = topological_sort(dag)
+Custom-vs-delivered is decided by **targeted existence probing against the destination**, not by
+enumerating the source. A field is delivered (or already migrated) if it resolves in the destination;
+it is custom-and-missing if it does not:
 
-# Step 5: PUT loop — sequential, NOT parallel
-wid_map = {}  # source_wid → dest_wid
+```python
+# Probe: does this object exist in the destination?
+dest_client.service.Get_Calculated_Fields(
+    Request_References={"Calculated_Field_Reference": [
+        {"ID": [{"type": "Calculated_Field_ID", "_value_1": reference_id}]}]},
+    Response_Group={"Include_Reference": True, "Include_Calculated_Field_Data": True})
+```
 
-for field in ordered_fields:
-    # Substitute any custom WIDs in the sub-type data
-    remapped_field = substitute_wids(field, wid_map)
-    
+- **Resolves** → EXISTS. Capture the destination WID and seed `wid_map` with it.
+- **Fault** `Invalid ID value.  'X' is not a valid ID value for type = 'Calculated_Field_ID'` → MISSING.
+- **Any other fault** → UNKNOWN. Must NOT be collapsed into MISSING: "missing" means "create", and
+  creating something that already exists is how you get duplicates. Block the run instead.
+
+This one mechanism does both jobs — custom-vs-delivered discrimination *and* conflict detection — and
+costs O(dependency closure) instead of O(9652).
+
+Full flow:
+
+```python
+# 1. Build the source calculated-field index (Count=999 → 10 pages, ~25s). Cache it.
+cf_index = build_cf_index(source_client)          # {wid: slim record}
+
+# 2. User explicitly selects reports and/or calculated fields (no Config Package API exists).
+
+# 3. Resolve the dependency closure. Report references are WID-ONLY with no type marker, so each
+#    WID must be classified: present in cf_index → calculated field; otherwise probe once and cache.
+closure = resolve_closure(selected, cf_index)
+
+# 4. Topological sort → child-most calculated fields FIRST, building up. Cycles are a hard block.
+ordered = topological_sort(closure)
+
+# 5. Pre-flight against the DESTINATION (see probe above) → CREATE / UPDATE / SKIP per object.
+#    Seed wid_map with the destination WIDs of everything that already EXISTS — otherwise a SKIP on
+#    an existing dependency leaves downstream payloads pointing at a meaningless source WID.
+plan = classify_against_destination(dest_client, ordered)
+
+# 6. PUT loop — sequential, NOT parallel. Each response WID feeds the next payload.
+for node in plan.ordered_nodes:
+    remapped = substitute_wids(node.data, wid_map)
     if dry_run:
-        log(f"DRY RUN: would PUT {field.name}")
+        log(f"DRY RUN: would PUT {node.name}")
         continue
-    
-    response = put_calculated_field(dest_client, remapped_field)
-    dest_wid = response.Calculated_Field_Reference.WID
-    wid_map[field.source_wid] = dest_wid  # register for downstream fields
+    response = put_calculated_field(dest_client, remapped)
+    # A HTTP-200 no-fault PUT can STILL have failed — see Exceptions_Response_Data below.
+    check_exceptions(response)
+    wid_map[node.source_wid] = response.Calculated_Field_Reference.WID
 
-# Step 6: PUT report definitions — apply same wid_map to column/filter data
-for report in reports:
-    remapped_report = substitute_wids(report, wid_map)
-    put_tenanted_report_definition(dest_client, remapped_report)
+# 7. PUT report definitions — same wid_map applied to column/filter data, owner remapped.
 ```
 
 ### Identifying custom vs global WIDs
-Any WID reference in sub-type data that is in `custom_source_wids` → remap via `wid_map`.
-Any WID not in `custom_source_wids` → global/delivered → pass through unchanged.
+Decided per object by the destination probe above. A WID that resolves in the destination is
+delivered or already migrated → pass through / use the destination WID. A WID that does not resolve
+is custom → must be created, and downstream references to it remapped via `wid_map`.
 
 ### WID scanning approach
-zeep returns response objects as nested dicts/objects. Use `zeep.helpers.serialize_object(response)` to convert to plain Python dicts, then recursively walk any value that has a `WID` key. Compare each WID against `custom_source_wids`. This handles all sub-type variants without needing to know each sub-type's internal structure.
+zeep returns response objects as nested dicts/objects. Use `zeep.helpers.serialize_object(response)`
+to convert to plain Python dicts, then recursively walk for `ID` lists / `WID` keys. This handles all
+sub-type variants without needing to know each sub-type's internal structure.
+
+Note that report definition references are **WID-only** — roughly 36 of 41 references on a sampled
+report carried just `{'WID': ...}` with no `type` discriminator. You cannot tell a calculated field
+from a data source or business object by inspection; classify by index lookup, then by probe.
 
 ---
 
 ## Module interfaces
+
+### config/targets.py — BUILT
+```python
+class Environment(str, Enum):   # IMPLEMENTATION | SANDBOX | PRODUCTION | UNKNOWN
+    @property
+    def is_safe_write_target(self) -> bool: ...
+    # UNKNOWN is NOT neutral — safety.py treats it exactly like PRODUCTION.
+
+@dataclass(frozen=True)
+class TenantTarget:
+    # Pure addressing. Carries NO credentials — targets get logged, hashed and
+    # rendered in the UI, and a secret here would leak through all three.
+    tenant: str; services_host: str; ui_host: str
+    environment: Environment; services_host_derived: bool; raw_input: str
+    def identity(self) -> tuple[str, str]:   # (host, tenant), case-normalised
+    def endpoint(self, service: str, version: str) -> str
+    def wsdl_url(self, service: str, version: str) -> str
+
+def parse_tenant_url(raw: str) -> TenantTarget   # accepts pasted browser URLs
+def target_from_parts(services_host: str, tenant: str) -> TenantTarget
+def classify_environment(host: str, tenant: str) -> Environment
+def derive_services_host(host: str) -> tuple[str, bool]   # (host, was_derived)
+```
+Classification is **host-driven**: a tenant *named* `acme_sandbox` on a production host still
+classifies PRODUCTION. Only `impl.wdNN → impl-services1.wdNN` is a verified host mapping, so anything
+derived is flagged `services_host_derived=True` for the UI to confirm by connection test.
+
+### safety.py — BUILT
+```python
+@dataclass(frozen=True)
+class WriteGuard:
+    source: TenantTarget; dest: TenantTarget
+    dry_run: bool = True          # callers must opt IN to writing
+    plan_hash: str; confirmed_tenant_name: str; dry_run_reviewed: bool
+    source_verified: bool; dest_verified: bool
+    source_username: str; dest_username: str
+
+def evaluate_guards(guard: WriteGuard) -> list[Guard]    # all findings at once
+def blocking_guards(guard: WriteGuard) -> list[Guard]
+def assert_write_allowed(guard: WriteGuard) -> None      # raises GuardViolation
+```
+Call `assert_write_allowed` immediately before **every** write, not once per run. It raises if
+reached with `dry_run=True` — a dry run must never touch a write path at all.
+Override for a non-impl destination is the `WDMIGRATOR_ALLOW_NON_IMPL=1` env var **plus** retyping
+the tenant name. Only the exact string `"1"` counts. It does **not** unlock the same-tenant block.
 
 ### auth/client.py
 ```python
@@ -370,7 +517,7 @@ WD_DEST_TENANT=client_sandbox_tenant
 WD_DEST_ISU_USERNAME=your_isu_username
 WD_DEST_ISU_PASSWORD=your_isu_password
 
-WD_OX_SERVICE_NAME=Report_Metadata
+WD_OX_SERVICE_NAME=Core_Implementation_Service
 WD_WWS_VERSION=v47.0
 DRY_RUN=true
 ```
@@ -453,19 +600,33 @@ Never write to the destination tenant in any test, marked or not.
 ---
 
 ## Known risks / pre-flight checklist before first real migration
+- [ ] **A real, distinct destination tenant exists.** As of 2026-07-31 `.env` points `WD_DEST_*` at the same tenant as the source (`commitconsulting_dpt1`, same host, same ISU). `safety.py` blocks live runs in that configuration; dry runs still work.
 - [ ] Source ISU has Special OX Web Services Get permission + activated
 - [ ] Destination ISU has Special OX Web Services Put permission + activated
 - [ ] All data sources referenced by reports exist in destination tenant
 - [ ] Destination tenant version matches source (or is compatible)
 - [ ] Report owner (System_User_Reference) remapping strategy confirmed
 - [ ] Dry run executed and output reviewed before real run
+- [ ] Whether `Put_Calculated_Field` with a reference replaces or merges is **still unverified** — until it is, prefer CREATE/SKIP over UPDATE
 
 ---
 
 ## What was discovered and ruled out
 - **OX UI workflow / Configuration Packages**: not used — direct SOAP Get/Put is available
 - **Workday REST API for report/field definitions**: does not exist
-- **`Reporting_Analytics` SOAP service**: does not exist at v47.0; correct service is `Report_Metadata`
+- **`Reporting_Analytics` SOAP service**: does not exist at v47.0
+- **`Report_Metadata` service**: WSDL resolves and defines the right operations
+  and version, but every live call is rejected with `Client.validationError` /
+  "The web service or version is invalid for the requested operation" — for
+  this ISU, on this tenant, regardless of domain security (Special OX Web
+  Services + Custom Reports and Fields both confirmed granted+activated).
+  Confirmed not an auth, IP, OAuth/API-Client, version, or code issue: the
+  same ISU/version/transport succeeds calling `Get_Workers` on `Staffing`, and
+  succeeds calling the identical `Get_Calculated_Fields` operation via
+  `Core_Implementation_Service`. Root cause looks like an entitlement gap
+  specific to the `Report_Metadata` service binding on this tenant — use
+  `Core_Implementation_Service` instead (confirmed live 2026-07-30).
 - **Public WWS directory**: does not list `Report_Metadata` — it is a restricted service
 - **UI host for SOAP** (`impl.wd12.myworkday.com`): wrong — use services host (`impl-services1.wd12.myworkday.com`)
 - **WSDL without version in URL path**: returns 404 on this tenant — version must be in path
+- **v48.0 and above**: return HTTP 500 on this tenant — v47.0 is the current max supported version

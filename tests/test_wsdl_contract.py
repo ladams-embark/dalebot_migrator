@@ -16,7 +16,7 @@ EXPECTED_OPERATIONS = (
 
 
 def test_wsdl_asset_is_bundled(wsdl_path):
-    assert wsdl_path.endswith("report_metadata_wsdl.xml")
+    assert wsdl_path.endswith("core_implementation_service_wsdl.xml")
 
 
 def test_client_builds_offline(offline_client):
@@ -42,6 +42,6 @@ def test_endpoint_uses_services_host_and_versioned_path(offline_client):
     address = next(iter(binding.ports.values())).binding_options["address"]
 
     assert "-services" in address, f"expected services host, got {address}"
-    assert "/Report_Metadata/v47.0" in address, (
-        f"expected versioned path .../Report_Metadata/v47.0, got {address}"
+    assert "/Core_Implementation_Service/v47.0" in address, (
+        f"expected versioned path .../Core_Implementation_Service/v47.0, got {address}"
     )

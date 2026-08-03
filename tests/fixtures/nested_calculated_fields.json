@@ -1,0 +1,544 @@
+{
+  "_note": "Anonymised from a live tenant: structure is real, identifiers are synthetic.",
+  "Calculated_Field": [
+    {
+      "Calculated_Field_Reference": {
+        "ID": [
+          {
+            "_value_1": "WID0000",
+            "type": "WID"
+          },
+          {
+            "_value_1": "REF_73C5F7E0",
+            "type": "Calculated_Field_ID"
+          }
+        ],
+        "Descriptor": null
+      },
+      "Calculated_Field_Data": {
+        "Calculated_Field_Reference_ID": "REF_73988B50",
+        "Class_Name": "Lookup Field with Prompts Calculated Field",
+        "Name": "Sample Calculated Field 0",
+        "Description": null,
+        "External_Field_Category_Reference": [
+          {
+            "ID": [
+              {
+                "_value_1": "WID0001",
+                "type": "WID"
+              },
+              {
+                "_value_1": "Uncategorized",
+                "type": "External_Field_Category_ID"
+              }
+            ],
+            "Descriptor": null
+          }
+        ],
+        "External_Field_Usage_Reference": [
+          {
+            "ID": [
+              {
+                "_value_1": "WID0002",
+                "type": "WID"
+              },
+              {
+                "_value_1": "Default",
+                "type": "External_Field_Usage_ID"
+              }
+            ],
+            "Descriptor": null
+          }
+        ],
+        "External_Field_Reference": {
+          "ID": [
+            {
+              "_value_1": "WID0003",
+              "type": "WID"
+            }
+          ],
+          "Descriptor": null
+        },
+        "Intermediate_Calculation": false,
+        "Do_Not_Use": false,
+        "Option_Reference": [],
+        "WQL_Alias": "cf_CFLFPTimeBlocksForWorkerInThePastAnniversaryYear",
+        "Arithmetic_Calculated_Field_Data": null,
+        "Conditional_Expression_Calculated_Field_Data": null,
+        "Concatenate_Calculated_Field_Data": null,
+        "Convert_Currency_Calculated_Field_Data": null,
+        "Date_Constant_Calculated_Field_Data": null,
+        "Date_Difference_Calculated_Field_Data": null,
+        "Extract_Single_Instance_Calculated_Field_Data": null,
+        "Evaluate_Expression_Calculated_Field_Data": null,
+        "Increment_or_Decrement_Date_Calculated_Field_Data": null,
+        "Lookup_Single_Instance_Calculated_Field_Data": null,
+        "Lookup_Value_As_Of_Date_Calculated_Field_Data": null,
+        "Numeric_Constant_Calculated_Field_Data": null,
+        "Text_Constant_Calculated_Field_Data": null,
+        "Format_Date_Calculated_Field_Data": null,
+        "Extract_Multi-Instance_Calculated_Field_Data": null,
+        "Lookup_Org_Calculated_Field_Data": null,
+        "Lookup_Org_Role_Assignments_Calculated_Field_Data": null,
+        "Lookup_Range_Band_Calculated_Field_Data": null,
+        "Count_Related_Instances_Calculated_Field_Data": null,
+        "Sum_Related_Instances_Calculated_Field_Data": null,
+        "Text_Substring_Calculated_Field_Data": null,
+        "Text_Length_Calculated_Field_Data": null,
+        "Lookup_Hierarchy_Rollup_Calculated_Field_Data": null,
+        "Format_Number_Calculated_Field_Data": null,
+        "Convert_Text_To_Number_Calculated_Field_Data": null,
+        "Aggregate_Related_Instances_Calculated_Field_Data": null,
+        "Lookup_Translated_Value_Data": null,
+        "Build_Date_Calculated_Field_Data": null,
+        "Lookup_Hierarchy_Calculated_Field_Data": null,
+        "Prompt_Calculated_Field_Data": null,
+        "Lookup_Date_Rollup_Calculated_Field_Data": null,
+        "Format_Text_Calculated_Field_Data": null,
+        "Lookup_Field_with_Prompts_Calculated_Field_Data": {
+          "Source_Field": {
+            "Class_Report_Field_Reference": {
+              "ID": [
+                {
+                  "_value_1": "WID0004",
+                  "type": "WID"
+                }
+              ],
+              "Descriptor": null
+            },
+            "Calculated_Field_Class_Name": null,
+            "Calculated_Field_Reference_ID": null,
+            "Calculated_Field_Name": null,
+            "Business_Object_Reference": null
+          },
+          "Prompt_for_Source_Field": [
+            {
+              "Prompt_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0005",
+                    "type": "WID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Value_Type_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0006",
+                    "type": "WID"
+                  },
+                  {
+                    "_value_1": "REF_1FDF1751",
+                    "type": "Parameter_Initialization_Operator_ID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Boolean": false,
+              "Text": null,
+              "Numeric": "0",
+              "Currency": "0",
+              "Date": null,
+              "DateTime": null,
+              "Time_Zone_Reference": null,
+              "Time": null,
+              "Instance_Reference": [],
+              "Value_from_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0007",
+                    "type": "WID"
+                  },
+                  {
+                    "_value_1": "REF_5553B547",
+                    "type": "Calculated_Field_ID"
+                  }
+                ],
+                "Descriptor": null
+              }
+            },
+            {
+              "Prompt_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0008",
+                    "type": "WID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Value_Type_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0006",
+                    "type": "WID"
+                  },
+                  {
+                    "_value_1": "REF_1FDF1751",
+                    "type": "Parameter_Initialization_Operator_ID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Boolean": false,
+              "Text": null,
+              "Numeric": "0",
+              "Currency": "0",
+              "Date": null,
+              "DateTime": null,
+              "Time_Zone_Reference": null,
+              "Time": null,
+              "Instance_Reference": [],
+              "Value_from_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0009",
+                    "type": "WID"
+                  },
+                  {
+                    "_value_1": "REF_ADFC7BAC",
+                    "type": "Calculated_Field_ID"
+                  }
+                ],
+                "Descriptor": null
+              }
+            }
+          ]
+        },
+        "Evaluate_Expression_Band_Calculated_Field_Data": null
+      }
+    },
+    {
+      "Calculated_Field_Reference": {
+        "ID": [
+          {
+            "_value_1": "WID0009",
+            "type": "WID"
+          },
+          {
+            "_value_1": "REF_ADFC7BAC",
+            "type": "Calculated_Field_ID"
+          }
+        ],
+        "Descriptor": null
+      },
+      "Calculated_Field_Data": {
+        "Calculated_Field_Reference_ID": "REF_9D134A20",
+        "Class_Name": "Build Date Calculated Field",
+        "Name": "Sample Calculated Field 1",
+        "Description": null,
+        "External_Field_Category_Reference": [
+          {
+            "ID": [
+              {
+                "_value_1": "WID0001",
+                "type": "WID"
+              },
+              {
+                "_value_1": "Uncategorized",
+                "type": "External_Field_Category_ID"
+              }
+            ],
+            "Descriptor": null
+          }
+        ],
+        "External_Field_Usage_Reference": [
+          {
+            "ID": [
+              {
+                "_value_1": "WID0002",
+                "type": "WID"
+              },
+              {
+                "_value_1": "Default",
+                "type": "External_Field_Usage_ID"
+              }
+            ],
+            "Descriptor": null
+          }
+        ],
+        "External_Field_Reference": {
+          "ID": [
+            {
+              "_value_1": "WID0003",
+              "type": "WID"
+            }
+          ],
+          "Descriptor": null
+        },
+        "Intermediate_Calculation": false,
+        "Do_Not_Use": false,
+        "Option_Reference": [],
+        "WQL_Alias": "cf_CFBDAnniversaryDateBasedOnTodaysDate",
+        "Arithmetic_Calculated_Field_Data": null,
+        "Conditional_Expression_Calculated_Field_Data": null,
+        "Concatenate_Calculated_Field_Data": null,
+        "Convert_Currency_Calculated_Field_Data": null,
+        "Date_Constant_Calculated_Field_Data": null,
+        "Date_Difference_Calculated_Field_Data": null,
+        "Extract_Single_Instance_Calculated_Field_Data": null,
+        "Evaluate_Expression_Calculated_Field_Data": null,
+        "Increment_or_Decrement_Date_Calculated_Field_Data": null,
+        "Lookup_Single_Instance_Calculated_Field_Data": null,
+        "Lookup_Value_As_Of_Date_Calculated_Field_Data": null,
+        "Numeric_Constant_Calculated_Field_Data": null,
+        "Text_Constant_Calculated_Field_Data": null,
+        "Format_Date_Calculated_Field_Data": null,
+        "Extract_Multi-Instance_Calculated_Field_Data": null,
+        "Lookup_Org_Calculated_Field_Data": null,
+        "Lookup_Org_Role_Assignments_Calculated_Field_Data": null,
+        "Lookup_Range_Band_Calculated_Field_Data": null,
+        "Count_Related_Instances_Calculated_Field_Data": null,
+        "Sum_Related_Instances_Calculated_Field_Data": null,
+        "Text_Substring_Calculated_Field_Data": null,
+        "Text_Length_Calculated_Field_Data": null,
+        "Lookup_Hierarchy_Rollup_Calculated_Field_Data": null,
+        "Format_Number_Calculated_Field_Data": null,
+        "Convert_Text_To_Number_Calculated_Field_Data": null,
+        "Aggregate_Related_Instances_Calculated_Field_Data": null,
+        "Lookup_Translated_Value_Data": null,
+        "Build_Date_Calculated_Field_Data": {
+          "Calculated_Field_Build_Date_Field_Type_Reference": {
+            "ID": [
+              {
+                "_value_1": "WID0010",
+                "type": "WID"
+              }
+            ],
+            "Descriptor": null
+          },
+          "Build_Date_Extract_Year_Field": {
+            "Build_Date_Extract_Year_Field_Add_or_Reference_Data": {
+              "Class_Report_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0011",
+                    "type": "WID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Calculated_Field_Class_Name": null,
+              "Calculated_Field_Reference_ID": null,
+              "Calculated_Field_Name": null,
+              "Business_Object_Reference": null
+            }
+          },
+          "Build_Date_Specific_Year_Field": null,
+          "Build_Date_Extract_Month_Field": {
+            "Build_Date_Extract_Month_Field_Add_or_Reference_Data": {
+              "Class_Report_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0012",
+                    "type": "WID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Calculated_Field_Class_Name": null,
+              "Calculated_Field_Reference_ID": null,
+              "Calculated_Field_Name": null,
+              "Business_Object_Reference": null
+            }
+          },
+          "Build_Date_Specific_Month_Field": null,
+          "Build_Date_Extract_Day_Field": {
+            "Build_Date_Extract_Day_Field_Add_or_Reference_Data": {
+              "Class_Report_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0012",
+                    "type": "WID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Calculated_Field_Class_Name": null,
+              "Calculated_Field_Reference_ID": null,
+              "Calculated_Field_Name": null,
+              "Business_Object_Reference": null
+            }
+          },
+          "Build_Date_Specific_Day_Field": null,
+          "Hours": null,
+          "Build_Date_Extract_Hour_Field": null,
+          "Minutes": null,
+          "Build_Date_Extract_Minute_Field": null,
+          "Seconds": null,
+          "Build_Date_Extract_Second_Field": null,
+          "Milliseconds": null,
+          "Build_Date_Extract_Millisecond_Field": null,
+          "Return_Blank_Date_on_Error": true,
+          "Build_Date_TimeZone_Field": null,
+          "Build_Date_Specific_TimeZone_Reference": null,
+          "User_TimeZone": null,
+          "Return_Local_Date_Time": null
+        },
+        "Lookup_Hierarchy_Calculated_Field_Data": null,
+        "Prompt_Calculated_Field_Data": null,
+        "Lookup_Date_Rollup_Calculated_Field_Data": null,
+        "Format_Text_Calculated_Field_Data": null,
+        "Lookup_Field_with_Prompts_Calculated_Field_Data": null,
+        "Evaluate_Expression_Band_Calculated_Field_Data": null
+      }
+    },
+    {
+      "Calculated_Field_Reference": {
+        "ID": [
+          {
+            "_value_1": "WID0007",
+            "type": "WID"
+          },
+          {
+            "_value_1": "REF_5553B547",
+            "type": "Calculated_Field_ID"
+          }
+        ],
+        "Descriptor": null
+      },
+      "Calculated_Field_Data": {
+        "Calculated_Field_Reference_ID": "REF_1C98BBA3",
+        "Class_Name": "Increment or Decrement Date Calculated Field",
+        "Name": "Sample Calculated Field 2",
+        "Description": null,
+        "External_Field_Category_Reference": [
+          {
+            "ID": [
+              {
+                "_value_1": "WID0001",
+                "type": "WID"
+              },
+              {
+                "_value_1": "Uncategorized",
+                "type": "External_Field_Category_ID"
+              }
+            ],
+            "Descriptor": null
+          }
+        ],
+        "External_Field_Usage_Reference": [
+          {
+            "ID": [
+              {
+                "_value_1": "WID0002",
+                "type": "WID"
+              },
+              {
+                "_value_1": "Default",
+                "type": "External_Field_Usage_ID"
+              }
+            ],
+            "Descriptor": null
+          }
+        ],
+        "External_Field_Reference": {
+          "ID": [
+            {
+              "_value_1": "WID0003",
+              "type": "WID"
+            }
+          ],
+          "Descriptor": null
+        },
+        "Intermediate_Calculation": false,
+        "Do_Not_Use": false,
+        "Option_Reference": [],
+        "WQL_Alias": "cf_CFIDDAnniversaryDateBasedOnTodaysDate_1Year",
+        "Arithmetic_Calculated_Field_Data": null,
+        "Conditional_Expression_Calculated_Field_Data": null,
+        "Concatenate_Calculated_Field_Data": null,
+        "Convert_Currency_Calculated_Field_Data": null,
+        "Date_Constant_Calculated_Field_Data": null,
+        "Date_Difference_Calculated_Field_Data": null,
+        "Extract_Single_Instance_Calculated_Field_Data": null,
+        "Evaluate_Expression_Calculated_Field_Data": null,
+        "Increment_or_Decrement_Date_Calculated_Field_Data": {
+          "Increment_or_Decrement_Date_Field": {
+            "External_Field": {
+              "Class_Report_Field_Reference": null,
+              "Calculated_Field_Class_Name": "Build Date Calculated Field",
+              "Calculated_Field_Reference_ID": "Worker - CF BD Anniversary Date (based on Today's date) - 1696997003",
+              "Calculated_Field_Name": "CF BD Anniversary Date (based on Today's date)",
+              "Business_Object_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0003",
+                    "type": "WID"
+                  }
+                ],
+                "Descriptor": null
+              }
+            }
+          },
+          "Increment_or_Decrement_Number_of_Days_Field": {
+            "External_Field": {
+              "Class_Report_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0013",
+                    "type": "WID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Calculated_Field_Class_Name": null,
+              "Calculated_Field_Reference_ID": null,
+              "Calculated_Field_Name": null,
+              "Business_Object_Reference": null
+            }
+          },
+          "Increment_or_Decrement_Number_of_Months_Field": null,
+          "Increment_or_Decrement_Number_of_Years_Field": {
+            "External_Field": {
+              "Class_Report_Field_Reference": {
+                "ID": [
+                  {
+                    "_value_1": "WID0014",
+                    "type": "WID"
+                  }
+                ],
+                "Descriptor": null
+              },
+              "Calculated_Field_Class_Name": null,
+              "Calculated_Field_Reference_ID": null,
+              "Calculated_Field_Name": null,
+              "Business_Object_Reference": null
+            }
+          },
+          "Return_Blank_Date_on_Error": true,
+          "Increment_or_Decrement_Hours_Field": null,
+          "Increment_or_Decrement_Minutes_Field": null,
+          "Increment_or_Decrement_Seconds_Field": null,
+          "Increment_or_Decrement_Milliseconds_Field": null
+        },
+        "Lookup_Single_Instance_Calculated_Field_Data": null,
+        "Lookup_Value_As_Of_Date_Calculated_Field_Data": null,
+        "Numeric_Constant_Calculated_Field_Data": null,
+        "Text_Constant_Calculated_Field_Data": null,
+        "Format_Date_Calculated_Field_Data": null,
+        "Extract_Multi-Instance_Calculated_Field_Data": null,
+        "Lookup_Org_Calculated_Field_Data": null,
+        "Lookup_Org_Role_Assignments_Calculated_Field_Data": null,
+        "Lookup_Range_Band_Calculated_Field_Data": null,
+        "Count_Related_Instances_Calculated_Field_Data": null,
+        "Sum_Related_Instances_Calculated_Field_Data": null,
+        "Text_Substring_Calculated_Field_Data": null,
+        "Text_Length_Calculated_Field_Data": null,
+        "Lookup_Hierarchy_Rollup_Calculated_Field_Data": null,
+        "Format_Number_Calculated_Field_Data": null,
+        "Convert_Text_To_Number_Calculated_Field_Data": null,
+        "Aggregate_Related_Instances_Calculated_Field_Data": null,
+        "Lookup_Translated_Value_Data": null,
+        "Build_Date_Calculated_Field_Data": null,
+        "Lookup_Hierarchy_Calculated_Field_Data": null,
+        "Prompt_Calculated_Field_Data": null,
+        "Lookup_Date_Rollup_Calculated_Field_Data": null,
+        "Format_Text_Calculated_Field_Data": null,
+        "Lookup_Field_with_Prompts_Calculated_Field_Data": null,
+        "Evaluate_Expression_Band_Calculated_Field_Data": null
+      }
+    }
+  ]
+}
