@@ -140,7 +140,13 @@ def classify_environment(host: str, tenant: str) -> Environment:
     if base:
         first = base.group("base")
 
-    if first.startswith("impl"):
+    # "impl" as a leading prefix (impl.wd12.myworkday.com, verified live) or
+    # as its own hyphenated token (wd2-impl-services1.workday.com, also
+    # verified live — see auth/endpoint_discovery.py) both mean
+    # Implementation. A plain substring check would be too loose (would also
+    # match e.g. "implement"); checking hyphen-split tokens avoids that while
+    # still covering both confirmed real shapes.
+    if first.startswith("impl") or "impl" in first.split("-"):
         return Environment.IMPLEMENTATION
     if first.startswith("sbx") or "sandbox" in first:
         return Environment.SANDBOX

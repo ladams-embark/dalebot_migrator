@@ -61,6 +61,17 @@ class ConnectionState:
     status: Optional[ConnectionStatus] = None
     verified_fingerprint: str = ""
 
+    # Endpoint discovery ("I only know the tenant ID") — separate from
+    # target_raw/target above since discovery works from a bare tenant ID,
+    # not a URL, and needs its own in-progress job state.
+    discovery_tenant_id: str = ""
+    discovery_job: Optional[JobState] = None
+    # st.expander defaults to closed on every rerun unless expanded= is
+    # passed explicitly — without tracking this, the expander showing
+    # discovery's own progress collapses on the very reruns that pump
+    # generates, hiding the progress messages it exists to show.
+    discovery_expanded: bool = False
+
     @property
     def verified(self) -> bool:
         return self.status is not None and self.status.ok and self.connection is not None

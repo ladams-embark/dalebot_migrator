@@ -40,8 +40,15 @@ from wdmigrator.secrets import Secret, redact
 #: is rejected live on this tenant — see docs/WSDL_NOTES.md.
 DEFAULT_SERVICE_NAME = "Core_Implementation_Service"
 
-#: v47.0 is the highest version this tenant serves; v48.0+ return HTTP 500.
-DEFAULT_VERSION = "v47.0"
+#: Hardcoded rather than read from WD_WWS_VERSION — a version has to work
+#: across every tenant this tool talks to in one run (source and destination
+#: are almost always different tenants), and the max supported version isn't
+#: the same everywhere: v47.0 on commitconsulting_dpt1/dpt5, but only v46.0 on
+#: the "web" tenant (confirmed live 2026-08-03 — v47.x and v48.0 both reject
+#: with "Invalid request service version" there, v46.0 down to v42.0 all
+#: return a real WSDL). v46.0 is the highest version confirmed to work on
+#: every tenant seen so far.
+DEFAULT_VERSION = "v46.0"
 
 DEFAULT_TIMEOUT = 60
 
@@ -181,7 +188,7 @@ def make_client(
     service_name = service_name or os.environ.get(
         "WD_OX_SERVICE_NAME", DEFAULT_SERVICE_NAME
     )
-    version = version or os.environ.get("WD_WWS_VERSION", DEFAULT_VERSION)
+    version = version or DEFAULT_VERSION
     endpoint = target.endpoint(service_name, version)
     wsdl = wsdl_source or resolve_wsdl_source(target, service_name, version)
 

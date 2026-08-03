@@ -13,17 +13,21 @@ from __future__ import annotations
 import streamlit as st
 
 from wdmigrator.api import (
+    DEFAULT_SERVICE_NAME,
+    DEFAULT_VERSION,
     AuthError,
     Blocker,
     Role,
     TenantURLError,
     connect,
     install_redacting_log_filter,
+    iter_discover_services_host,
     parse_tenant_url,
     verify_connection,
 )
 from wdmigrator.ui import secrets as secrets_ui
 from wdmigrator.ui.components import render_connection_status, render_target_card
+from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import ConnectionState, WizardState, reset_downstream
 
 STEP_ID = "connect"
@@ -71,8 +75,80 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
         side.connection = None
 
 
+def _run_discovery(side: ConnectionState) -> None:
+    tenant_id = side.discovery_tenant_id.strip()
+    side.discovery_job = start_job(iter_discover_services_host(tenant_id))
+    side.discovery_expanded = True
+
+
+def _pump_discovery(side: ConnectionState, *, target_widget_key: str) -> None:
+    job = side.discovery_job
+    pump(job, time_budget=0.8)
+
+    for event in job.events:
+        icon = "✅" if event.ok else "❌"
+        st.caption(f"{icon} `{event.data_center}` ({event.services_host}) — {event.detail}")
+
+    if job.error is not None:
+        st.error(f"Discovery failed: {job.error}")
+        side.discovery_job = None
+        return
+
+    if not job.done:
+        st.rerun()
+        return
+
+    found = next((e for e in job.events if e.ok), None)
+    side.discovery_job = None
+    if found is None:
+        st.error(
+            "Not found in any known Implementation/Sandbox data center. "
+            "This tenant's data center may not be one this tool knows about yet — "
+            "see auth/endpoint_discovery.py's KNOWN_IMPL_DATA_CENTERS."
+        )
+        return
+
+    tenant_id = side.discovery_tenant_id.strip()
+    side.target_raw = (
+        f"https://{found.services_host}/ccx/service/"
+        f"{tenant_id}/{DEFAULT_SERVICE_NAME}/{DEFAULT_VERSION}"
+    )
+    # Once a widget's key exists in session_state, passing a different
+    # value= on a later st.text_input(...) call is silently ignored —
+    # session_state[key] is what actually drives the displayed value from
+    # here on. Writing it directly is the only way to update the field
+    # programmatically after the user has interacted with it once.
+    st.session_state[target_widget_key] = side.target_raw
+    # Cheap and offline — parse it immediately so the target card shows
+    # something before the user has even entered credentials to test with.
+    try:
+        side.target = parse_tenant_url(side.target_raw)
+    except TenantURLError:
+        side.target = None
+    st.success(f"Found on `{found.data_center}` ({found.services_host}) — filled in below.")
+    st.rerun()
+
+
 def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
     st.subheader(label)
+
+    with st.expander(
+        "Don't know the services host? Find it from just the tenant ID",
+        expanded=side.discovery_expanded,
+    ):
+        side.discovery_tenant_id = st.text_input(
+            "Tenant ID",
+            value=side.discovery_tenant_id,
+            key=f"{key}_discover_tenant",
+            help="Just the tenant ID, e.g. commitconsulting_dpt1 — not a URL.",
+        )
+        if side.discovery_job is None:
+            if st.button("Find services host", key=f"{key}_discover_btn") and side.discovery_tenant_id.strip():
+                _run_discovery(side)
+                st.rerun()
+        else:
+            _pump_discovery(side, target_widget_key=f"{key}_target")
+
     side.target_raw = st.text_input(
         f"{label} tenant URL",
         value=side.target_raw,

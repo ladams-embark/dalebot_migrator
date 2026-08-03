@@ -1,6 +1,6 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-08-03 (session 5)_
+_Last updated: 2026-08-03 (session 6)_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields + custom report
@@ -35,11 +35,12 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 
 ## PICK UP HERE — next session
 
-**Branch:** `core-implementation-service-migration`, **merged to master**
-2026-08-03 via [PR #1](https://github.com/ladams-embark/dalebot_migrator/pull/1)
+**Branch:** working directly on `master` now — `core-implementation-service-migration`
+was merged 2026-08-03 via [PR #1](https://github.com/ladams-embark/dalebot_migrator/pull/1)
 (opened and merged in the browser — `gh` CLI is not installed on this
-machine). `master` now has everything through the filter-instance-reference
-fix (commit `0a33070`). Start the next session from `master`.
+machine), and this session's work (endpoint discovery, version hardcoding)
+was committed straight to `master`, same as the small housekeeping commit
+right after the merge. No open PR right now.
 
 **State:** engine steps 1–8 are built and green. `ui/` (step 9, the Streamlit
 wizard) is built: `app.py`, `state.py`, `runner.py`, `safety_ui.py`,
@@ -154,6 +155,65 @@ trusting the cache's age alone.
 holds the full architecture, the Streamlit design, and the safety model.
 
 ---
+
+## Done this session (2026-08-03, session 6) — hardcoded v46.0, tenant-ID endpoint discovery
+
+Triggered by trying to connect a genuinely new tenant (`web`) that didn't
+match any of this tool's prior assumptions — surfaced two real gaps at once.
+
+**API version hardcoded.** `WD_WWS_VERSION` is no longer read.
+`DEFAULT_VERSION` in `auth/client.py` is now `"v46.0"` — confirmed live to
+work on every tenant seen so far (`commitconsulting_dpt1`/`dpt5` max out at
+`v47.0`, `web` maxes out at `v46.0`; a single run touches two tenants at
+once, source and destination, so the version has to work on both, not just
+whichever one is highest).
+
+**New module: `auth/endpoint_discovery.py`.** Given just a tenant ID, tries
+an actual WSDL fetch against a curated list of known Implementation/Sandbox
+data centers (seeded from the user's own reference implementation for
+finding a tenant's data center) until one answers — real network calls, not
+inference from an unrelated URL. Key insight that shaped the design: **the
+services host is a property of the data center, not the tenant** — every
+tenant on a pod shares the same host, only the URL path differs — so once a
+data center's host is confirmed once, it's confirmed for every tenant on
+it. Only 2 of 9 seeded data centers are actually live-verified (`dc1`,
+`wd12`); the rest are unverified guesses by analogy and need confirming (or
+correcting) the first time discovery is used against them — see
+`KNOWN_IMPL_DATA_CENTERS`. No caching (per explicit choice — probes fresh
+every time), impl/sandbox only (matches the safety model; no reason to make
+discovering a Production endpoint easy).
+
+**Real bug found and fixed along the way**: `classify_environment` only
+matched `impl` as a strict hostname *prefix*. The `web` tenant's real
+services host, `wd2-impl-services1.workday.com`, has `impl` as its own
+hyphenated token instead — so a tenant discovery had *already confirmed* as
+Implementation/Sandbox would still misclassify as `UNKNOWN` and get treated
+as risky/production by the safety gate. Fixed in `config/targets.py`; both
+confirmed real host shapes now classify correctly.
+
+**Two more real bugs found and fixed live in the browser** while wiring the
+discovery flow into `ui/steps/connect.py`:
+1. `st.expander` collapses back to closed on every rerun unless `expanded=`
+   is passed explicitly — since the discovery job reruns repeatedly while
+   pumping progress, the expander was hiding its own progress messages the
+   moment they'd appear. Now tracked in `ConnectionState.discovery_expanded`.
+2. Once a widget's `key` exists in Streamlit's `session_state`, passing a
+   different `value=` on a later call to the same widget is silently
+   ignored — `session_state[key]` is what actually drives the display from
+   then on. The discovered URL wasn't reaching the "tenant URL" text field
+   until this was fixed by writing directly to
+   `st.session_state[target_widget_key]` instead of just the dataclass field.
+
+**Verified live end to end, in the actual browser** (not just offline
+tests): typed `commitconsulting_dpt1` into the new "Find services host"
+field, clicked it, watched it correctly skip `dc1` and land on `wd12` (both
+the target card and the URL text field updated correctly with the right
+environment badge). 377 offline tests passing.
+
+New offline tests: `tests/test_endpoint_discovery.py` (6 tests, `requests.get`
+faked — no real network calls in the default suite), 2 new cases in
+`tests/test_targets.py` for the `classify_environment` fix, 2 existing
+`tests/test_auth.py` assertions updated for the new default version.
 
 ## Done this session (2026-08-03, session 5) — Filter_Instances_Reference fix
 

@@ -47,6 +47,8 @@ from wdmigrator.config import (
 
 # ── Authentication: building a pinned, authenticated client ─────────────────
 from wdmigrator.auth import (
+    DEFAULT_SERVICE_NAME,
+    DEFAULT_VERSION,
     AuthError,
     Connection,
     ConnectionStatus,
@@ -54,6 +56,17 @@ from wdmigrator.auth import (
     Role,
     make_client,
     verify_connection,
+)
+
+# ── Endpoint discovery: finding a services host from just a tenant ID ───────
+from wdmigrator.auth import (
+    DataCenter,
+    DiscoveryAttempt,
+    DiscoveryResult,
+    EndpointNotFoundError,
+    KNOWN_IMPL_DATA_CENTERS,
+    discover_services_host,
+    iter_discover_services_host,
 )
 
 # ── Discovery: indexing and targeted lookups ────────────────────────────────
@@ -149,9 +162,19 @@ __all__ = [
     "ConnectionStatus",
     "Credentials",
     "Role",
+    "DEFAULT_SERVICE_NAME",
+    "DEFAULT_VERSION",
     "connect",
     "make_client",
     "verify_connection",
+    # endpoint discovery
+    "DataCenter",
+    "DiscoveryAttempt",
+    "DiscoveryResult",
+    "EndpointNotFoundError",
+    "KNOWN_IMPL_DATA_CENTERS",
+    "discover_services_host",
+    "iter_discover_services_host",
     # discovery
     "PAGE_SIZE",
     "CalculatedFieldSummary",

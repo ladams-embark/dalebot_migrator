@@ -102,6 +102,8 @@ class TestEnvironmentClassification:
         [
             ("impl.wd12.myworkday.com", Environment.IMPLEMENTATION),
             ("impl-services1.wd12.myworkday.com", Environment.IMPLEMENTATION),
+            ("wd2-impl-services1.workday.com", Environment.IMPLEMENTATION),
+            ("wd2-impl.workday.com", Environment.IMPLEMENTATION),
             ("sbx.wd5.myworkday.com", Environment.SANDBOX),
             ("wd12.myworkday.com", Environment.PRODUCTION),
             ("www.wd12.myworkday.com", Environment.PRODUCTION),
@@ -124,6 +126,23 @@ class TestEnvironmentClassification:
         assert (
             classify_environment("unknown.example.com", "acme_sandbox")
             is Environment.UNKNOWN
+        )
+
+    def test_impl_as_a_hyphenated_token_is_recognised_not_just_as_a_prefix(self):
+        """Confirmed live 2026-08-03: the 'web' tenant's real services host is
+        wd2-impl-services1.workday.com — 'impl' as its own hyphenated token,
+        not a leading prefix like impl.wd12.myworkday.com. Without this, a
+        tenant discovered via the impl/sandbox-only endpoint discovery
+        (auth/endpoint_discovery.py) would misclassify as UNKNOWN and get
+        treated as risky/production by the safety gate, defeating the point
+        of discovery only ever searching impl/sandbox data centers."""
+        assert (
+            classify_environment("wd2-impl-services1.workday.com", "web")
+            is Environment.IMPLEMENTATION
+        )
+        assert (
+            classify_environment("wd102-impl-services1.workday.com", "acme")
+            is Environment.IMPLEMENTATION
         )
 
     def test_only_impl_and_sandbox_are_safe_write_targets(self):

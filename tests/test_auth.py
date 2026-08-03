@@ -82,7 +82,7 @@ class TestEndpointPinning:
         )
         assert conn.endpoint == (
             "https://impl-services1.wd12.myworkday.com/ccx/service/"
-            "some_other_tenant/Core_Implementation_Service/v47.0"
+            "some_other_tenant/Core_Implementation_Service/v46.0"
         )
         assert conn.service._binding_options["address"] == conn.endpoint
 
@@ -194,7 +194,7 @@ class TestFailureExplanation:
 
     def test_404_names_the_endpoint_actually_used(self, wsdl_path):
         detail = self._status_for(wsdl_path, Exception("404 Client Error"))
-        assert "commitconsulting_dpt1/Core_Implementation_Service/v47.0" in detail
+        assert "commitconsulting_dpt1/Core_Implementation_Service/v46.0" in detail
 
     def test_explanation_redacts_the_password(self, wsdl_path):
         detail = self._status_for(wsdl_path, Exception("fault mentioning pw-value"))
