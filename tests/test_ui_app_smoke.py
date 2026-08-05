@@ -32,8 +32,11 @@ def test_connect_step_is_the_initial_step():
 
 
 def test_next_button_is_disabled_with_no_credentials_entered():
+    # Keyed on "nav_next" rather than the button's label: the label is a
+    # presentation choice that the Commit rebrand already changed once, but
+    # the key is the wizard's actual gating contract.
     at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
     at.run(timeout=15)
-    next_buttons = [b for b in at.button if b.label == "Next →"]
+    next_buttons = [b for b in at.button if b.key == "nav_next"]
     assert next_buttons
     assert next_buttons[0].disabled

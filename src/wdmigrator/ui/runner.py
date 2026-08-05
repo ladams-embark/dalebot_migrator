@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
 
 @dataclass
@@ -41,7 +41,6 @@ class JobState:
     cancelled: bool = False
     error: BaseException | None = None
     result: Any = None
-    started_at: float = field(default_factory=time.monotonic)
 
     @property
     def running(self) -> bool:
@@ -65,7 +64,6 @@ def pump(
     *,
     time_budget: float = 0.8,
     batch_size: int | None = None,
-    on_event: Callable[[Any], None] | None = None,
 ) -> None:
     """Advance ``job`` for up to ``time_budget`` seconds or ``batch_size`` items.
 
@@ -103,5 +101,3 @@ def pump(
             return
         job.events.append(event)
         pulled += 1
-        if on_event is not None:
-            on_event(event)

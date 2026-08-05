@@ -3,8 +3,15 @@
   "configurations": [
     {
       "name": "wdmigrator-ui",
-      "runtimeExecutable": ".venv/Scripts/streamlit.exe",
-      "runtimeArgs": ["run", "streamlit_app.py", "--server.headless", "true"],
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "streamlit_app.py",
+        "--server.headless",
+        "true"
+      ],
       "port": 8501
     }
   ]

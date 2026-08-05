@@ -16,6 +16,7 @@ import json
 import streamlit as st
 
 from wdmigrator.api import Blocker, summarise
+from wdmigrator.ui import theme
 from wdmigrator.ui.state import WizardState, reset_downstream
 
 STEP_ID = "results"
@@ -61,14 +62,25 @@ def render(state: WizardState) -> None:
     st.header("Results")
 
     records = state.execute_records or state.dry_run_records
-    label = "Live execution" if state.execute_records else "Dry run (no live execution has been run)"
     if not records:
-        st.info("Nothing has been run yet.")
+        theme.banner("neutral", "Nothing has been run yet",
+                     "Results appear here after a dry run or a live execution.")
         return
 
-    st.subheader(label)
+    is_live = bool(state.execute_records)
+    theme.section(
+        "Live execution" if is_live else "Dry run",
+        None if is_live else "No live execution has been run — these are serialized "
+                             "payloads, not writes.",
+        eyebrow="Wrote to the destination" if is_live else "Nothing was written",
+    )
+
     counts = summarise(records)
-    st.write(", ".join(f"{v} {k}" for k, v in counts.items() if v))
+    shown = {k: v for k, v in counts.items() if v}
+    theme.figures(
+        list(shown.items()),
+        tones={k: "danger" for k in shown if k in ("failed", "indeterminate")},
+    )
 
     rows = [
         {
@@ -89,11 +101,13 @@ def render(state: WizardState) -> None:
         st.download_button(
             "Download results (CSV)", data=_records_to_csv(records),
             file_name="migration_results.csv", mime="text/csv",
+            use_container_width=True,
         )
     with col2:
         st.download_button(
             "Download results (JSON)", data=_records_to_json(records),
             file_name="migration_results.json", mime="application/json",
+            use_container_width=True,
         )
     wid_map = _wid_map_from(records)
     with col3:
@@ -102,6 +116,7 @@ def render(state: WizardState) -> None:
                 "Download WID map (JSON)",
                 data=json.dumps(wid_map, indent=2).encode("utf-8"),
                 file_name="wid_map.json", mime="application/json",
+                use_container_width=True,
             )
 
     st.divider()

@@ -7,3 +7,56 @@ showErrorDetails = "none"
 
 [browser]
 gatherUsageStats = false
+
+[server]
+# Serves ./static at /app/static/ — the Commit brand assets (Open Sans, the
+# reverse logo, the dotted-pixel header pattern) referenced by the theme
+# below and by ui/theme.py. Everything is local: the app makes no CDN calls,
+# which matters because it runs against tenants on networks that may not
+# allow them.
+enableStaticServing = true
+
+# ── Commit Design System ────────────────────────────────────────────────────
+# Native theme tokens, so Streamlit's own chrome (widgets, focus rings, the
+# top bar) is brand-correct before ui/theme.py's stylesheet touches anything.
+# Values mirror colors_and_type.css — keep them in sync with the semantic
+# token block in ui/theme.py rather than editing either in isolation.
+[theme]
+base = "light"
+primaryColor = "#29357F"              # --commit-cobalt-blue
+backgroundColor = "#FFFFFF"           # --bg-page
+secondaryBackgroundColor = "#EEF1FA"  # --commit-surface-tint
+textColor = "#0A1140"                 # --commit-blue-black, never pure black
+linkColor = "#29357F"                 # --fg-link
+borderColor = "#D9DDE9"               # --commit-border-soft
+baseRadius = "6px"                    # --radius-md
+font = "Open Sans"
+headingFont = "Open Sans"
+codeFont = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+
+# Only Regular/Bold (+ italics) ship as real font files. 500/600/800 have no
+# file, so a browser asked for one synthesizes a faux-bold that is not real
+# Open Sans — ui/theme.py therefore sticks to 400 and 700 throughout.
+[[theme.fontFaces]]
+family = "Open Sans"
+url = "app/static/fonts/OpenSans-Regular.ttf"
+weight = 400
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Open Sans"
+url = "app/static/fonts/OpenSans-Italic.ttf"
+weight = 400
+style = "italic"
+
+[[theme.fontFaces]]
+family = "Open Sans"
+url = "app/static/fonts/OpenSans-Bold.ttf"
+weight = 700
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Open Sans"
+url = "app/static/fonts/OpenSans-BoldItalic.ttf"
+weight = 700
+style = "italic"
