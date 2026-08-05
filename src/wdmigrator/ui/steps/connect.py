@@ -170,7 +170,8 @@ def render(state: WizardState) -> None:
     st.header("Connect")
     st.caption(
         "Both sides need a verified connection before you can pick anything to migrate. "
-        "The destination ISU needs Put permission on Special OX Web Services; the source ISU needs Get."
+        "Both ISUs need Get and Put on the Configuration Set: Custom Reports and Fields "
+        "domain — Special OX Web Services access is not required."
     )
 
     col1, col2 = st.columns(2)

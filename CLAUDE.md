@@ -104,14 +104,15 @@ side confirmed working live, write side not yet tested):
 ### Authentication
 SOAP WS-Security with ISU credentials. Username format: `{isu_username}@{tenant}`.
 
-Each tenant needs its own ISU with **Special OX Web Services** domain granted:
-- Source ISU: needs Get permission
-- Destination ISU: needs Get + Put permission
+Each tenant needs its own ISU with **Get and Put** granted on the
+**Configuration Set: Custom Reports and Fields** domain — both source and
+destination ISUs need both permissions (not the asymmetric Get-only /
+Get+Put split this doc previously assumed). **Special OX Web Services
+access is not required** — despite the domain name being suggestive, it
+turned out not to be the one that actually gates these operations.
 
 Note: on the source tenant, domain access alone did not make `Report_Metadata`
 work (see above) — `Core_Implementation_Service` is what actually succeeded.
-Re-verify domain requirements for the destination tenant once Put calls are
-attempted there.
 
 After any ISU permission change in Workday: run "Activate Pending Security Policy Changes" — changes are NOT immediate and the ISU will silently return empty data until activated.
 
@@ -613,8 +614,8 @@ Never write to the destination tenant in any test, marked or not.
 
 ## Known risks / pre-flight checklist before first real migration
 - [ ] **A real, distinct destination tenant exists.** As of 2026-07-31 `.env` points `WD_DEST_*` at the same tenant as the source (`commitconsulting_dpt1`, same host, same ISU). `safety.py` blocks live runs in that configuration; dry runs still work.
-- [ ] Source ISU has Special OX Web Services Get permission + activated
-- [ ] Destination ISU has Special OX Web Services Put permission + activated
+- [ ] Source ISU has Get on Configuration Set: Custom Reports and Fields + activated
+- [ ] Destination ISU has Get and Put on Configuration Set: Custom Reports and Fields + activated
 - [ ] All data sources referenced by reports exist in destination tenant
 - [ ] Destination tenant version matches source (or is compatible)
 - [ ] Report owner (System_User_Reference) remapping strategy confirmed

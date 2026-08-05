@@ -161,6 +161,21 @@ holds the full architecture, the Streamlit design, and the safety model.
 Triggered by trying to connect a genuinely new tenant (`web`) that didn't
 match any of this tool's prior assumptions — surfaced two real gaps at once.
 
+**Domain requirement corrected — was documented wrong.** CLAUDE.md's
+Authentication section and the Connect step's own help caption both said the
+ISU needs **Special OX Web Services**. Per the user's direct confirmation:
+that's not actually required. What's required is **Get and Put on
+Configuration Set: Custom Reports and Fields**, and — unlike what was
+previously documented — both source and destination ISUs need *both*
+permissions, not an asymmetric Get-only/Get+Put split. Corrected in three
+places: CLAUDE.md's Authentication section and pre-flight checklist,
+`ui/steps/connect.py`'s help caption, and `auth/client.py`'s
+`_explain_failure` (the "web service or version is invalid" fault
+explanation now names the right domain instead of saying "required domain
+access" generically). Not independently re-verified live by this session —
+recorded as the user's direct correction, same trust level as the REST
+endpoint URLs that resolved `web` and `wd501` earlier.
+
 **API version hardcoded.** `WD_WWS_VERSION` is no longer read.
 `DEFAULT_VERSION` in `auth/client.py` is now `"v46.0"` — confirmed live to
 work on every tenant seen so far (`commitconsulting_dpt1`/`dpt5` max out at

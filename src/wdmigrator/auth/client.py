@@ -311,9 +311,10 @@ def _explain_failure(connection: Connection, exc: Exception) -> str:
         return (
             f"{message}\n\nThis usually means the ISU is not entitled to "
             f"{connection.service_name} on this tenant, rather than a version "
-            "problem. Confirm the ISU is an Integration System User with the "
-            "required domain access, and that 'Activate Pending Security "
-            "Policy Changes' has been run."
+            "problem. Confirm the ISU is an Integration System User with Get "
+            "and Put on the Configuration Set: Custom Reports and Fields domain "
+            "(Special OX Web Services is not required), and that 'Activate "
+            "Pending Security Policy Changes' has been run."
         )
     if "invalid username or password" in lowered or "failed to authenticate" in lowered:
         return (
