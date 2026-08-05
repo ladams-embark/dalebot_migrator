@@ -292,7 +292,16 @@ code, kbd, pre {{ color: var(--fg-strong); }}
 /* ── Step rail ────────────────────────────────────────────────────────── */
 /* Read-only progress display, never a nav control: jumping straight to
    Execute is exactly what ui/app.py's gating exists to prevent, so nothing
-   here is clickable. */
+   here is clickable.
+
+   Built from <div role="list"> rather than <ul>, and that is load-bearing.
+   Streamlit ships a `.st-emotion-cache-XXX > ul` rule forcing display to
+   block — a (0,1,1) selector that beats a plain `.cmt-steps` class (0,1,0)
+   and silently makes
+   the rail vertical. Matching that specificity would mean writing a selector
+   against a generated emotion class name, which changes between releases.
+   Streamlit's rule keys on the ELEMENT name, so a div is simply never
+   matched. Do not turn these back into list elements. */
 
 .cmt-steps {{
   display: flex;
@@ -350,6 +359,17 @@ code, kbd, pre {{ color: var(--fg-strong); }}
 .cmt-step--current .cmt-step__label {{ color: var(--fg-strong); font-weight: var(--fw-bold); }}
 
 .cmt-step__mark .cmt-check {{ width: 14px; height: 14px; }}
+
+/* Seven steps across a narrow viewport: keep the rail horizontal rather than
+   letting it wrap, and shed the label text before the marks start colliding. */
+@media (max-width: 900px) {{
+  .cmt-step__label {{ font-size: var(--fs-caption); }}
+}}
+@media (max-width: 640px) {{
+  .cmt-step__label {{ display: none; }}
+  .cmt-step__mark {{ width: 26px; height: 26px; }}
+  .cmt-step::before {{ top: 13px; }}
+}}
 
 /* ── Section headings ─────────────────────────────────────────────────── */
 
@@ -458,15 +478,16 @@ code, kbd, pre {{ color: var(--fg-strong); }}
 
 /* ── Checkmark bullets — the signature marker glyph ───────────────────── */
 
+/* Also div-based rather than <ul>/<li> — see the step rail comment above. */
 .cmt-check {{ width: 12px; height: 12px; flex: none; }}
 .cmt-checklist {{ list-style: none; margin: var(--space-2) 0; padding: 0; }}
-.cmt-checklist li {{
+.cmt-checklist > div {{
   display: flex; align-items: baseline; gap: var(--space-3);
   font-size: var(--fs-body-sm);
   color: var(--fg-default);
   margin-bottom: var(--space-2);
 }}
-.cmt-checklist li .cmt-check {{ color: var(--commit-accent-blue); position: relative; top: 1px; }}
+.cmt-checklist > div .cmt-check {{ color: var(--commit-accent-blue); position: relative; top: 1px; }}
 
 /* ── Figures ──────────────────────────────────────────────────────────── */
 
@@ -633,12 +654,17 @@ def stepper(current: str, order: Sequence[str], titles: Mapping[str, str],
             state, mark = "done", CHECK_SVG
         else:
             state, mark = "locked", str(i + 1)
+        aria = ' aria-current="step"' if state == "current" else ""
         items.append(
-            f'<li class="cmt-step cmt-step--{state}">'
+            f'<div class="cmt-step cmt-step--{state}" role="listitem"{aria}>'
             f'<div class="cmt-step__mark">{mark}</div>'
-            f'<div class="cmt-step__label">{_esc(titles[step_id])}</div></li>'
+            f'<div class="cmt-step__label">{_esc(titles[step_id])}</div></div>'
         )
-    st.markdown(f'<ul class="cmt-steps">{"".join(items)}</ul>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="cmt-steps" role="list" aria-label="Migration steps">'
+        f'{"".join(items)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def section(title: str, caption: str | None = None, eyebrow: str | None = None) -> None:
@@ -705,5 +731,9 @@ def figures(items: Sequence[tuple[str, object]], *, tones: Mapping[str, str] | N
 
 def checklist(items: Iterable[str]) -> None:
     """A bulleted list using the cyan checkmark — the brand's signature marker."""
-    lis = "".join(f"<li>{CHECK_SVG}<span>{_esc(i)}</span></li>" for i in items)
-    st.markdown(f'<ul class="cmt-checklist">{lis}</ul>', unsafe_allow_html=True)
+    rows = "".join(
+        f'<div role="listitem">{CHECK_SVG}<span>{_esc(i)}</span></div>' for i in items
+    )
+    st.markdown(
+        f'<div class="cmt-checklist" role="list">{rows}</div>', unsafe_allow_html=True
+    )

@@ -301,3 +301,117 @@ def _seed_wid(index):
         if deps:
             return wid
     raise AssertionError("fixture contains no nested dependencies")
+
+
+def cf_payload_nested_by_reference_id(wid, ref_id, name="Field", nested_ref_ids=()):
+    """A calculated field that names its dependencies the way Workday actually
+    does: by `Calculated_Field_Reference_ID`, with no WID for the nested field
+    anywhere. The only WID present belongs to the business object.
+
+    Confirmed live on `commitconsulting` (wd501) 2026-08-05 — see
+    `ordering.extract_reference_id_refs`.
+    """
+    return {
+        "Calculated_Field_Reference": {
+            "ID": [
+                {"type": "WID", "_value_1": wid},
+                {"type": "Calculated_Field_ID", "_value_1": ref_id},
+            ]
+        },
+        "Calculated_Field_Data": {
+            "Calculated_Field_Reference_ID": ref_id,
+            "Name": name,
+            "Class_Name": "Extract Single Instance Calculated Field",
+            "External_Field_Reference": {
+                "ID": [{"type": "WID", "_value_1": "business_object_wid"}]
+            },
+            "Extract_Single_Instance_Calculated_Field_Data": {
+                "Business_Object_Field_Add_or_Reference_Data": {
+                    "Business_Object_Field": [
+                        {
+                            "Class_Report_Field_Reference": None,
+                            "Calculated_Field_Reference_ID": nested,
+                            "Calculated_Field_Name": f"Nested {nested}",
+                            "Business_Object_Reference": {
+                                "ID": [{"type": "WID", "_value_1": "business_object_wid"}]
+                            },
+                        }
+                        for nested in nested_ref_ids
+                    ]
+                }
+            },
+        },
+    }
+
+
+class TestNestedReferenceByReferenceId:
+    """Regression: the multi-level dependency that carries no WID.
+
+    Before this was handled, a field referencing another purely by
+    `Calculated_Field_Reference_ID` resolved to a closure of one — the
+    dependency was recorded as a pass-through and never migrated, so the live
+    PUT landed in the destination pointing at a field that was never created.
+    """
+
+    def test_nested_field_is_pulled_into_the_closure(self):
+        index = cf_index(
+            cf_payload_nested_by_reference_id("W1", "CF_A", nested_ref_ids=["CF_B"]),
+            cf_payload("W2", "CF_B"),
+        )
+        closure = resolve_closure(cf_index=index, selected_field_wids=["W1"])
+        assert len(closure) == 2
+        assert node_id_for(NodeKind.CALCULATED_FIELD, "W2") in closure.nodes
+
+    def test_nested_field_is_ordered_before_its_dependent(self):
+        index = cf_index(
+            cf_payload_nested_by_reference_id("W1", "CF_A", nested_ref_ids=["CF_B"]),
+            cf_payload("W2", "CF_B"),
+        )
+        closure = resolve_closure(cf_index=index, selected_field_wids=["W1"])
+        order = [n.source_wid for n in topological_sort(closure.nodes)]
+        assert order.index("W2") < order.index("W1")
+
+    def test_chain_of_reference_id_links_expands_fully(self):
+        index = cf_index(
+            cf_payload_nested_by_reference_id("W1", "A", nested_ref_ids=["B"]),
+            cf_payload_nested_by_reference_id("W2", "B", nested_ref_ids=["C"]),
+            cf_payload("W3", "C"),
+        )
+        closure = resolve_closure(cf_index=index, selected_field_wids=["W1"])
+        assert len(closure) == 3
+        order = [n.source_wid for n in topological_sort(closure.nodes)]
+        assert order == ["W3", "W2", "W1"]
+
+    def test_business_object_wid_still_passes_through(self):
+        index = cf_index(
+            cf_payload_nested_by_reference_id("W1", "CF_A", nested_ref_ids=["CF_B"]),
+            cf_payload("W2", "CF_B"),
+        )
+        closure = resolve_closure(cf_index=index, selected_field_wids=["W1"])
+        assert "business_object_wid" in closure.passthrough_wids
+
+    def test_a_nested_id_missing_from_the_index_is_recorded_not_ignored(self):
+        """The payload states outright that the target is a calculated field, so
+        not finding it is a real missing dependency, not a pass-through."""
+        index = cf_index(
+            cf_payload_nested_by_reference_id("W1", "CF_A", nested_ref_ids=["GONE"])
+        )
+        closure = resolve_closure(cf_index=index, selected_field_wids=["W1"])
+        assert closure.unresolved_reference_ids == {"GONE"}
+        assert len(closure) == 1
+
+    def test_self_reference_by_reference_id_creates_no_cycle(self):
+        index = cf_index(
+            cf_payload_nested_by_reference_id("W1", "CF_A", nested_ref_ids=["CF_A"])
+        )
+        closure = resolve_closure(cf_index=index, selected_field_wids=["W1"])
+        assert len(closure) == 1
+        topological_sort(closure.nodes)  # must not raise CycleError
+
+    def test_a_clean_closure_records_nothing_unresolved(self):
+        index = cf_index(
+            cf_payload_nested_by_reference_id("W1", "CF_A", nested_ref_ids=["CF_B"]),
+            cf_payload("W2", "CF_B"),
+        )
+        closure = resolve_closure(cf_index=index, selected_field_wids=["W1"])
+        assert closure.unresolved_reference_ids == set()

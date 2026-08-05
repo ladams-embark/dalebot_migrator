@@ -9,6 +9,7 @@ Every writer function defaults to dry_run=True.
 from wdmigrator.migrate.ordering import (
     CycleError,
     build_dag,
+    extract_reference_id_refs,
     extract_wid_refs,
     substitute_wids,
     topological_sort,
@@ -75,6 +76,7 @@ __all__ = [
     "build_report_payload",
     "default_action",
     "extract_exceptions",
+    "extract_reference_id_refs",
     "extract_wid_refs",
     "is_failure",
     "iter_check_existence",

@@ -107,6 +107,28 @@ def test_brand_assets_are_present_and_local():
         assert (STATIC / name).is_file(), f"missing brand asset: static/{name}"
 
 
+def test_theme_emits_no_list_elements():
+    """Streamlit ships `.st-emotion-cache-XXX > ul { display: block }`, a (0,1,1)
+    selector that outranks any plain class of ours and silently forces the step
+    rail vertical. It matches on the ELEMENT name, so div-based lists are never
+    caught by it — and matching its specificity would mean writing a selector
+    against a generated class name that changes between Streamlit releases.
+
+    This regressed once already: the rail rendered as seven stacked rows while
+    the colors all verified correctly, because the check looked at paint and not
+    at geometry.
+    """
+    source = (UI_ROOT / "theme.py").read_text(encoding="utf-8")
+    # Emitted markup always opens a tag immediately after a quote — f'<div ...
+    # This deliberately does not match the tag names discussed in prose inside
+    # the CSS comments, which is where they legitimately appear.
+    offenders = re.findall(r"""['"]</?(?:ul|ol|li)\b""", source)
+    assert not offenders, (
+        f"theme.py emits {offenders} — Streamlit's own ul/ol/li rules will "
+        'override the layout. Use <div role="list"> / <div role="listitem">.'
+    )
+
+
 def test_theme_css_has_no_external_urls():
     css = (UI_ROOT / "theme.py").read_text(encoding="utf-8")
     assert "http://" not in css
