@@ -176,6 +176,21 @@ access" generically). Not independently re-verified live by this session —
 recorded as the user's direct correction, same trust level as the REST
 endpoint URLs that resolved `web` and `wd501` earlier.
 
+**Quick-fill button added to Connect** (`ui/steps/connect.py`) — "Quick
+fill: commitconsulting_dpt1" on both Source and Destination, since it's the
+common-case tenant. Hardcodes the tenant ID and its known services host
+(`impl-services1.wd12.myworkday.com`) directly in the UI code — confirmed
+with the user this is fine despite CLAUDE.md's hard rule grouping "tenant
+URLs" with credentials, since a bare tenant identifier isn't a secret and
+is already throughout this repo's docs/tests. Deliberately does **not**
+extend to username/password — those stay typed, never prefilled. Reuses
+the exact same session_state-write pattern already proven live for
+discovery's auto-fill, but **could not be re-verified live itself this
+time** — the dev server failed to launch (`spawn EPERM`, an environment
+issue unrelated to this change; `.claude/launch.json` and the venv's
+`streamlit.exe` are both intact) both times it was attempted this session.
+Worth an actual click-through next session before trusting it fully.
+
 **API version hardcoded.** `WD_WWS_VERSION` is no longer read.
 `DEFAULT_VERSION` in `auth/client.py` is now `"v46.0"` — confirmed live to
 work on every tenant seen so far (`commitconsulting_dpt1`/`dpt5` max out at

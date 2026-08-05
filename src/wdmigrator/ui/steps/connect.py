@@ -32,6 +32,12 @@ from wdmigrator.ui.state import ConnectionState, WizardState, reset_downstream
 
 STEP_ID = "connect"
 
+# Common-case quick fill. The tenant ID itself isn't a credential (it's
+# already throughout this repo's docs and tests) — never extend this to
+# username/password, which must always be typed, never prefilled.
+_QUICK_FILL_TENANT = "commitconsulting_dpt1"
+_QUICK_FILL_SERVICES_HOST = "impl-services1.wd12.myworkday.com"
+
 
 def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, label: str) -> None:
     # Installed before anything else touches the tenant, so even an auth
@@ -129,8 +135,26 @@ def _pump_discovery(side: ConnectionState, *, target_widget_key: str) -> None:
     st.rerun()
 
 
+def _quick_fill(side: ConnectionState, *, target_widget_key: str) -> None:
+    side.target_raw = (
+        f"https://{_QUICK_FILL_SERVICES_HOST}/ccx/service/"
+        f"{_QUICK_FILL_TENANT}/{DEFAULT_SERVICE_NAME}/{DEFAULT_VERSION}"
+    )
+    # See the same fix in _pump_discovery — a widget's session_state entry
+    # overrides value= once the widget has been rendered once.
+    st.session_state[target_widget_key] = side.target_raw
+    try:
+        side.target = parse_tenant_url(side.target_raw)
+    except TenantURLError:
+        side.target = None
+
+
 def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
     st.subheader(label)
+
+    if st.button(f"Quick fill: {_QUICK_FILL_TENANT}", key=f"{key}_quick_fill"):
+        _quick_fill(side, target_widget_key=f"{key}_target")
+        st.rerun()
 
     with st.expander(
         "Don't know the services host? Find it from just the tenant ID",
