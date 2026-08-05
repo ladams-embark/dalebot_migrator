@@ -51,16 +51,34 @@ class DataCenter:
 #: Implementation/Sandbox data centers this tool knows how to try. Add a new
 #: entry (verified=True) once discovery succeeds against a data center not
 #: already listed here, so future lookups don't need to re-discover it.
+#:
+#: Two naming families confirmed live so far, and they do NOT reduce to one
+#: formula — a data center's real host has to be confirmed independently,
+#: not derived:
+#:   - "impl-services1.wdNN.myworkday.com" (wd12, and now wd501 too — 2/2 of
+#:     the data centers with an explicit "wdNN" in their production URL,
+#:     confirmed 2026-08-03 via commitconsulting's REST API Endpoint page)
+#:   - "wdN-impl-services1.workday.com" (dc1 only — the one data center with
+#:     NO "wdNN" in its production URL at all, e.g. plain workday.com)
+#: Since the wdNN-numbered data centers are now 2/2 on the myworkday.com
+#: pattern, the still-unverified wd3/5/10/102/103/105 entries below try that
+#: pattern first, then fall back to the workday.com-style guess.
 KNOWN_IMPL_DATA_CENTERS: tuple[DataCenter, ...] = (
     DataCenter("dc1", "wd2-impl-services1.workday.com", verified=True),
     DataCenter("wd12", "impl-services1.wd12.myworkday.com", verified=True),
-    DataCenter("wd3", "wd3-impl-services1.workday.com", verified=False),
-    DataCenter("wd5", "wd5-impl-services1.workday.com", verified=False),
-    DataCenter("wd10", "wd10-impl-services1.workday.com", verified=False),
-    DataCenter("wd102", "wd102-impl-services1.workday.com", verified=False),
-    DataCenter("wd103", "wd103-impl-services1.workday.com", verified=False),
-    DataCenter("wd105", "wd105-impl-services1.workday.com", verified=False),
-    DataCenter("wd501", "wd501-impl-services1.workday.com", verified=False),
+    DataCenter("wd501", "impl-services1.wd501.myworkday.com", verified=True),
+    DataCenter("wd3 (myworkday guess)", "impl-services1.wd3.myworkday.com", verified=False),
+    DataCenter("wd3 (workday guess)", "wd3-impl-services1.workday.com", verified=False),
+    DataCenter("wd5 (myworkday guess)", "impl-services1.wd5.myworkday.com", verified=False),
+    DataCenter("wd5 (workday guess)", "wd5-impl-services1.workday.com", verified=False),
+    DataCenter("wd10 (myworkday guess)", "impl-services1.wd10.myworkday.com", verified=False),
+    DataCenter("wd10 (workday guess)", "wd10-impl-services1.workday.com", verified=False),
+    DataCenter("wd102 (myworkday guess)", "impl-services1.wd102.myworkday.com", verified=False),
+    DataCenter("wd102 (workday guess)", "wd102-impl-services1.workday.com", verified=False),
+    DataCenter("wd103 (myworkday guess)", "impl-services1.wd103.myworkday.com", verified=False),
+    DataCenter("wd103 (workday guess)", "wd103-impl-services1.workday.com", verified=False),
+    DataCenter("wd105 (myworkday guess)", "impl-services1.wd105.myworkday.com", verified=False),
+    DataCenter("wd105 (workday guess)", "wd105-impl-services1.workday.com", verified=False),
 )
 
 

@@ -176,12 +176,27 @@ inference from an unrelated URL. Key insight that shaped the design: **the
 services host is a property of the data center, not the tenant** — every
 tenant on a pod shares the same host, only the URL path differs — so once a
 data center's host is confirmed once, it's confirmed for every tenant on
-it. Only 2 of 9 seeded data centers are actually live-verified (`dc1`,
-`wd12`); the rest are unverified guesses by analogy and need confirming (or
-correcting) the first time discovery is used against them — see
-`KNOWN_IMPL_DATA_CENTERS`. No caching (per explicit choice — probes fresh
-every time), impl/sandbox only (matches the safety model; no reason to make
-discovering a Production endpoint easy).
+it. No caching (per explicit choice — probes fresh every time), impl/sandbox
+only (matches the safety model; no reason to make discovering a Production
+endpoint easy).
+
+**Found live, same session, right after landing the first version**: the
+initial `wd501` guess (`wd501-impl-services1.workday.com`, by analogy with
+`dc1`'s naming) was wrong — didn't even resolve via DNS, caught when the
+user tried `commitconsulting` (a tenant on `wd501`) and discovery correctly
+came up empty rather than silently guessing. The real host, found via
+`commitconsulting`'s REST API Endpoint page (same technique as finding
+`web`'s), is `impl-services1.wd501.myworkday.com` — the **same naming
+family as `wd12`**, not `dc1`'s. That's now 2/2 confirmed data centers with
+an explicit `wdNN` pod number in their login URL using the
+`.myworkday.com`-suffixed pattern, versus 1/1 for `dc1` (no pod number at
+all) using the `wdN-impl-services1.workday.com` pattern. The remaining
+unverified entries (`wd3`/`wd5`/`wd10`/`wd102`/`wd103`/`wd105`) now each
+carry two candidate hosts, `.myworkday.com` tried first given the updated
+odds, falling back to `.workday.com` — still unconfirmed either way, and
+each needs its own live confirmation the same way `dc1`/`wd12`/`wd501` got
+theirs. 3 of 15 seeded candidates are now actually live-verified; see
+`KNOWN_IMPL_DATA_CENTERS`.
 
 **Real bug found and fixed along the way**: `classify_environment` only
 matched `impl` as a strict hostname *prefix*. The `web` tenant's real
