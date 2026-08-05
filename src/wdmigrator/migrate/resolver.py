@@ -25,7 +25,7 @@ from enum import Enum
 from typing import Iterable, Mapping
 
 from wdmigrator.discovery.inventory import Index, ids_of
-from wdmigrator.migrate.ordering import extract_wid_refs
+from wdmigrator.migrate.ordering import extract_reference_id_refs, extract_wid_refs
 
 
 class NodeKind(str, Enum):
@@ -69,6 +69,12 @@ class Closure:
     #: objects, data sources, field categories) that pass through unchanged —
     #: they are recorded for transparency, not as errors.
     passthrough_wids: set[str] = field(default_factory=set)
+    #: ``Calculated_Field_Reference_ID`` values naming a calculated field that
+    #: is **not** in the source index. Unlike ``passthrough_wids`` these are
+    #: unambiguous: the payload states outright that the target is a calculated
+    #: field, so failing to find it means a genuinely missing dependency, not a
+    #: delivered object passing through. A write referencing one will fail.
+    unresolved_reference_ids: set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
         return len(self.nodes)
@@ -188,30 +194,60 @@ def resolve_closure(
             )
         closure.nodes[node.node_id] = node
 
-    # Expand transitively. Every reference that names a calculated field in the
-    # index becomes an edge; everything else is a pass-through.
+    # Expand transitively. A calculated field can be named two different ways
+    # and BOTH have to be followed:
+    #
+    #   * by WID, inside an ``ID`` list — what ``extract_wid_refs`` finds;
+    #   * by ``Calculated_Field_Reference_ID``, a bare string with no WID
+    #     anywhere near it — what ``extract_reference_id_refs`` finds.
+    #
+    # The second is how nested calculated fields are actually stored, and
+    # following only the first silently drops 43.7% of this tenant's fields'
+    # dependencies (measured live). See `ordering.extract_reference_id_refs`.
+    by_reference_id = {
+        summary.reference_id: summary
+        for summary in cf_index.summaries.values()
+        if getattr(summary, "reference_id", None)
+    }
+
     pending = list(closure.nodes.values())
     edges: dict[str, set[str]] = {n.node_id: set() for n in pending}
 
+    def _link(dep_wid: str, from_node: Node) -> None:
+        """Record an edge, adding the dependency to the closure if it's new."""
+        if dep_wid == from_node.source_wid:
+            return
+        dep_id = node_id_for(NodeKind.CALCULATED_FIELD, dep_wid)
+        if dep_id not in closure.nodes:
+            dep = _calculated_field_node(dep_wid, cf_index, selected=False)
+            if dep is None:
+                # In the index but without a payload. Recording an edge to a
+                # node that will never exist would leave a dangling dependency
+                # that `build_dag` silently drops, so refuse the edge too.
+                return
+            closure.nodes[dep_id] = dep
+            edges.setdefault(dep_id, set())
+            pending.append(dep)
+        edges.setdefault(from_node.node_id, set()).add(dep_id)
+
     while pending:
         node = pending.pop()
-        refs = extract_wid_refs(_dependency_payload(node), exclude=[node.source_wid])
+        payload = _dependency_payload(node)
 
-        for ref_wid in refs:
+        for ref_wid in extract_wid_refs(payload, exclude=[node.source_wid]):
             if ref_wid not in cf_index:
                 closure.passthrough_wids.add(ref_wid)
                 continue
+            _link(ref_wid, node)
 
-            dep_id = node_id_for(NodeKind.CALCULATED_FIELD, ref_wid)
-            edges.setdefault(node.node_id, set()).add(dep_id)
-
-            if dep_id not in closure.nodes:
-                dep = _calculated_field_node(ref_wid, cf_index, selected=False)
-                if dep is None:  # pragma: no cover - guarded by the `in` check
-                    continue
-                closure.nodes[dep_id] = dep
-                edges.setdefault(dep_id, set())
-                pending.append(dep)
+        for ref_id in extract_reference_id_refs(payload):
+            summary = by_reference_id.get(ref_id)
+            if summary is None:
+                # The payload says this is a calculated field, so unlike an
+                # unmatched WID this is not a delivered object passing through.
+                closure.unresolved_reference_ids.add(ref_id)
+                continue
+            _link(summary.wid, node)
 
     # Freeze edges onto the nodes, and record the reverse direction so review
     # can answer "why is this object in my migration?".

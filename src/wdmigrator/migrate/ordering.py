@@ -169,6 +169,62 @@ def _collect(obj: Any, found: set[str]) -> None:
             _collect(item, found)
 
 
+#: The key a calculated field uses to name *another* calculated field it
+#: depends on. Confirmed live 2026-08-05 on `commitconsulting` (wd501).
+_CF_REFERENCE_ID_KEY = "Calculated_Field_Reference_ID"
+
+
+def extract_reference_id_refs(obj: Any) -> set[str]:
+    """Every nested ``Calculated_Field_Reference_ID`` inside ``obj``.
+
+    **This is the primary way one calculated field names another, and it is
+    invisible to :func:`extract_wid_refs`.** The "Add or Reference" structures
+    that carry a nested field — ``Business_Object_Field``, ``Condition_Field``,
+    ``Related_Field``, ``Sort_Field``, ``Default_Value_Field`` and a dozen more
+    — identify it by a bare ``Calculated_Field_Reference_ID`` string, sitting
+    directly in the block rather than inside an ``ID`` list, with the WID slot
+    (``Class_Report_Field_Reference``) left null::
+
+        "Business_Object_Field": [{
+            "Class_Report_Field_Reference": null,
+            "Calculated_Field_Reference_ID": "LRV_Global_Top_Supervisory_...",
+            "Calculated_Field_Name": "LRV Global Top Supervisory ...",
+            "Business_Object_Reference": {"ID": [{"type": "WID", ...}]}
+        }]
+
+    The only WID in that block belongs to the *business object* the field lives
+    on, not to the field, so a WID-only walk records a pass-through and drops
+    the dependency silently. Measured on `commitconsulting`: 612 of 1,399
+    calculated fields (43.7%) reference another one exclusively this way, 1,035
+    references in total, all of them resolvable in the index.
+
+    A top-level ``Calculated_Field_Reference_ID`` is the field's *own* id and is
+    excluded — only nested occurrences are dependencies.
+
+    Because these references are business IDs rather than WIDs, they are stable
+    across tenants and need no remapping by :func:`substitute_wids`. What they
+    do need is for the referenced field to already exist in the destination,
+    which is exactly what including them in the closure and ordering child-most
+    first achieves.
+    """
+    found: set[str] = set()
+    _collect_reference_ids(obj, found, at_root=True)
+    return found
+
+
+def _collect_reference_ids(obj: Any, found: set[str], *, at_root: bool) -> None:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key == _CF_REFERENCE_ID_KEY:
+                if not at_root and isinstance(value, str) and value:
+                    found.add(value)
+                continue
+            _collect_reference_ids(value, found, at_root=False)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_reference_ids(item, found, at_root=False)
+
+
 def unmapped_wids(obj: Any, wid_map: Mapping[str, str], custom: Iterable[str]) -> set[str]:
     """Custom WIDs still present in ``obj`` that have no destination mapping.
 

@@ -83,6 +83,25 @@ def render(state: WizardState) -> None:
         ]
     )
 
+    # A payload that names a calculated field by Calculated_Field_Reference_ID
+    # states outright that the target IS a calculated field. Not finding it in
+    # the source index therefore means a genuinely missing dependency, and a
+    # write referencing it will fail — unlike an unmatched WID, which is
+    # usually just a delivered object passing through.
+    if state.closure.unresolved_reference_ids:
+        missing = sorted(state.closure.unresolved_reference_ids)
+        theme.banner(
+            "danger",
+            f"{len(missing)} referenced calculated field(s) are not in the source index",
+            "These are named directly as calculated fields by something being "
+            "migrated, so they are real dependencies, not pass-throughs: "
+            + ", ".join(missing[:5])
+            + (f", and {len(missing) - 5} more" if len(missing) > 5 else ""),
+            remedy="Rebuild the calculated field index — it may predate them. If they "
+                   "still do not appear, they are report-scoped and must be promoted "
+                   "to global in the Workday UI before this migration can succeed.",
+        )
+
     ordered = topological_sort(state.closure.nodes)
     with st.expander(f"Migration order (child-most first) — {len(ordered)} objects"):
         st.dataframe(
@@ -106,6 +125,25 @@ def gate(state: WizardState) -> list[Blocker]:
                 title="Dependencies not resolved",
                 detail=state.closure_error or "Click Recompute closure to resolve dependencies.",
                 remedy="Resolve dependencies with no errors before continuing.",
+            )
+        )
+        return blockers
+
+    if state.closure.unresolved_reference_ids:
+        missing = sorted(state.closure.unresolved_reference_ids)
+        blockers.append(
+            Blocker(
+                node_id=None,
+                title=f"{len(missing)} dependency(ies) missing from the source index",
+                detail=(
+                    "Something being migrated names these as calculated fields, but "
+                    f"they are not in the index: {', '.join(missing[:3])}"
+                    + (f" (+{len(missing) - 3} more)" if len(missing) > 3 else "")
+                    + ". Writing an object that references a field the destination "
+                    "does not have will fail."
+                ),
+                remedy="Rebuild the calculated field index, or promote the field(s) to "
+                       "global in Workday if they are report-scoped.",
             )
         )
     return blockers

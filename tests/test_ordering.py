@@ -11,6 +11,7 @@ import pytest
 from wdmigrator.migrate.ordering import (
     CycleError,
     build_dag,
+    extract_reference_id_refs,
     extract_wid_refs,
     substitute_wids,
     topological_sort,
@@ -210,3 +211,73 @@ class TestUnmappedWids:
     def test_delivered_wids_are_not_flagged(self):
         payload = ref("WID", "delivered")
         assert unmapped_wids(payload, {}, custom={"custom1"}) == set()
+
+
+class TestExtractReferenceIdRefs:
+    """The nested-calculated-field reference that carries no WID at all.
+
+    Shape confirmed live on `commitconsulting` (wd501) 2026-08-05: 612 of 1,399
+    calculated fields reference another one exclusively this way, and
+    `extract_wid_refs` finds none of them — the only WID in the block belongs to
+    the business object the field lives on.
+    """
+
+    def real_shape(self, own_id, nested_id):
+        return {
+            "Calculated_Field_Reference_ID": own_id,
+            "Class_Name": "Extract Single Instance Calculated Field",
+            "External_Field_Reference": ref("WID", "business_object_wid"),
+            "Extract_Single_Instance_Calculated_Field_Data": {
+                "Business_Object_Field_Add_or_Reference_Data": {
+                    "Business_Object_Field": [
+                        {
+                            "Class_Report_Field_Reference": None,
+                            "Calculated_Field_Class_Name": "Lookup Single Instance",
+                            "Calculated_Field_Reference_ID": nested_id,
+                            "Calculated_Field_Name": "Nested field",
+                            "Business_Object_Reference": ref("WID", "business_object_wid"),
+                        }
+                    ]
+                }
+            },
+        }
+
+    def test_finds_the_nested_reference(self):
+        payload = self.real_shape("OWN", "NESTED")
+        assert extract_reference_id_refs(payload) == {"NESTED"}
+
+    def test_excludes_the_fields_own_top_level_id(self):
+        payload = self.real_shape("OWN", "NESTED")
+        assert "OWN" not in extract_reference_id_refs(payload)
+
+    def test_wid_walk_cannot_see_it(self):
+        """The regression this whole extractor exists for."""
+        payload = self.real_shape("OWN", "NESTED")
+        assert extract_wid_refs(payload) == {"business_object_wid"}
+
+    def test_finds_several_across_different_containers(self):
+        payload = {
+            "Calculated_Field_Reference_ID": "OWN",
+            "A": {"Condition_Field": [{"Calculated_Field_Reference_ID": "C1"}]},
+            "B": {"Related_Field": {"Calculated_Field_Reference_ID": "C2"}},
+            "C": [{"Sort_Field": [{"Calculated_Field_Reference_ID": "C3"}]}],
+        }
+        assert extract_reference_id_refs(payload) == {"C1", "C2", "C3"}
+
+    def test_ignores_empty_and_non_string_values(self):
+        payload = {"X": {"Calculated_Field_Reference_ID": ""},
+                   "Y": {"Calculated_Field_Reference_ID": None}}
+        assert extract_reference_id_refs(payload) == set()
+
+    def test_empty_payload_yields_nothing(self):
+        assert extract_reference_id_refs({}) == set()
+
+    def test_reference_ids_survive_wid_substitution_untouched(self):
+        """They are business IDs, stable across tenants — remapping one would
+        break the identity the migration matches on."""
+        payload = self.real_shape("OWN", "NESTED")
+        out = substitute_wids(payload, {"business_object_wid": "dest_wid"})
+        block = out["Extract_Single_Instance_Calculated_Field_Data"][
+            "Business_Object_Field_Add_or_Reference_Data"
+        ]["Business_Object_Field"][0]
+        assert block["Calculated_Field_Reference_ID"] == "NESTED"
