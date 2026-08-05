@@ -13,6 +13,7 @@ from __future__ import annotations
 import streamlit as st
 
 from wdmigrator.api import Blocker, GuardViolation, iter_execute
+from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import WizardState, build_guard, owner_reference
@@ -28,7 +29,7 @@ def _start(state: WizardState) -> None:
             owner_reference=owner_reference(state), stop_on_failure=True,
         )
     except GuardViolation as exc:
-        st.error(f"Blocked: {exc}", icon="🚫")
+        theme.banner("danger", "Blocked by the write guard", str(exc))
         return
     state.execute_job = start_job(generator)
     state.execute_records = []
@@ -39,16 +40,22 @@ def render(state: WizardState) -> None:
     st.header("Execute")
 
     if state.plan is None:
-        st.error("No plan — go back to Conflicts.")
+        theme.banner("danger", "No plan", remedy="Go back to Conflicts.")
         return
 
     job = state.execute_job
 
     if job is None and not state.execute_records:
-        st.warning(
-            f"This will write {state.plan.writes_planned} object(s) to "
-            f"`{state.dest.target.tenant}`. This cannot be undone by this tool.",
-            icon="⚠️",
+        theme.figures(
+            [("Objects to write", state.plan.writes_planned)], tones={"Objects to write": "write"}
+        )
+        theme.banner(
+            "warning",
+            f"This writes to {state.dest.target.tenant}",
+            "Objects are written one at a time, in dependency order, and each one's "
+            "destination WID feeds the next. Pause and cancel take effect between "
+            "objects, never mid-write.",
+            remedy="Nothing written here can be undone by this tool.",
         )
         if st.button("Start live execution", key="execute_start", type="primary"):
             _start(state)
@@ -56,18 +63,19 @@ def render(state: WizardState) -> None:
         return
 
     if job is not None:
-        col1, col2 = st.columns(2)
+        col1, col2, _ = st.columns([1, 1, 4])
         with col1:
             if not state.execute_paused:
-                if st.button("Pause", key="execute_pause"):
+                if st.button("Pause", key="execute_pause", use_container_width=True):
                     state.execute_paused = True
                     st.rerun()
             else:
-                if st.button("Resume", key="execute_resume"):
+                if st.button("Resume", key="execute_resume", type="primary",
+                             use_container_width=True):
                     state.execute_paused = False
                     st.rerun()
         with col2:
-            if st.button("Cancel", key="execute_cancel"):
+            if st.button("Cancel", key="execute_cancel", use_container_width=True):
                 job.cancel()
                 st.rerun()
 
@@ -95,7 +103,12 @@ def render(state: WizardState) -> None:
         elif job.cancelled:
             state.execute_records = [p.record for p in job.events]
             state.execute_job = None
-            st.warning("Execution cancelled. Objects already written cannot be undone by this tool.", icon="⏹️")
+            theme.banner(
+                "warning",
+                "Execution cancelled",
+                "It stopped cleanly between objects, so nothing is half-written — but "
+                "objects already written cannot be undone by this tool.",
+            )
         elif job.done:
             state.execute_records = [p.record for p in job.events]
             state.execute_job = None
@@ -105,7 +118,11 @@ def render(state: WizardState) -> None:
             st.rerun()
         return
 
-    st.success(f"Execution finished — {len(state.execute_records)} record(s). See Results.")
+    theme.banner(
+        "success",
+        f"Execution finished — {len(state.execute_records)} record(s)",
+        "Continue to Results for the per-object outcome and the exports.",
+    )
 
 
 def gate(state: WizardState) -> list[Blocker]:

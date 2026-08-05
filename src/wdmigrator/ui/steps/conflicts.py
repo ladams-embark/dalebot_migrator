@@ -15,7 +15,8 @@ import pandas as pd
 import streamlit as st
 
 from wdmigrator.api import Action, Blocker, build_plan, iter_check_existence, validate_plan
-from wdmigrator.ui.components import render_job_progress
+from wdmigrator.ui import theme
+from wdmigrator.ui.components import render_blockers, render_job_progress
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import WizardState, reset_downstream
 
@@ -62,7 +63,10 @@ def _render_overrides(state: WizardState) -> None:
         )
     df = pd.DataFrame(rows)
 
-    st.caption("UPDATE is not offered — treat it as unsafe until replace-vs-merge semantics are verified.")
+    st.caption(
+        "Only create and skip are offered. Whether a Put with a reference replaces or "
+        "merges is unverified against a live tenant, so update is treated as unsafe."
+    )
     edited = st.data_editor(
         df,
         hide_index=True,
@@ -90,7 +94,7 @@ def render(state: WizardState) -> None:
     )
 
     if state.closure is None:
-        st.error("No resolved closure — go back to Resolve.")
+        theme.banner("danger", "No resolved closure", remedy="Go back to Resolve.")
         return
 
     if state.existence_job is None and state.plan is None:
@@ -104,14 +108,19 @@ def render(state: WizardState) -> None:
         return
 
     counts = state.plan.counts()
-    st.write("**Plan:** " + ", ".join(f"{v} {k}" for k, v in counts.items()))
     unknown = state.plan.unknown_nodes()
+    theme.figures(
+        [(k.capitalize(), v) for k, v in counts.items()] + [("Unknown", len(unknown))],
+        tones={"Create": "write", "Unknown": "danger" if unknown else "muted"},
+    )
     if unknown:
-        st.error(
-            f"{len(unknown)} object(s) have an UNKNOWN destination state — the probe "
-            "hit something other than a clean found/not-found fault. These block "
-            "progress until resolved.",
-            icon="🚫",
+        theme.banner(
+            "danger",
+            f"{len(unknown)} object(s) have an unknown destination state",
+            "The probe hit something other than a clean found or not-found fault. "
+            "Unknown is never treated as missing — creating something that already "
+            "exists is exactly the duplicate this refuses to risk.",
+            remedy="Re-check below; if it persists, investigate the fault before continuing.",
         )
 
     _render_overrides(state)
@@ -120,15 +129,9 @@ def render(state: WizardState) -> None:
         _start_probe(state)
         st.rerun()
 
-    blockers = validate_plan(state.plan)
     st.divider()
-    st.subheader("Validation")
-    if blockers:
-        for b in blockers:
-            where = f" ({b.node_id})" if b.node_id else ""
-            st.error(f"**{b.title}{where}**\n\n{b.detail}\n\n*Remedy:* {b.remedy}", icon="🚫")
-    else:
-        st.success("No blockers.")
+    theme.section("Validation", eyebrow="Plan check")
+    render_blockers(validate_plan(state.plan), empty_message="Plan is valid")
 
 
 def gate(state: WizardState) -> list[Blocker]:

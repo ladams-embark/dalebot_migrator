@@ -13,43 +13,30 @@ from __future__ import annotations
 import streamlit as st
 
 from wdmigrator.api import Guard, Level
+from wdmigrator.ui import theme
 
 
 def render_guards(guards: list[Guard], *, key_prefix: str = "") -> set[str]:
     """Render guard findings as banners.
 
-    BLOCK guards render as errors with no way to dismiss them — they clear
-    only when the underlying condition does. WARN guards render as a
-    checkbox; returns the set of guard ids the user has ticked "I
-    understand" for, so the caller can fold that into
-    ``WriteGuard.warnings_acknowledged``.
+    BLOCK guards render with no way to dismiss them — they clear only when the
+    underlying condition does. WARN guards render as a checkbox; returns the
+    set of guard ids the user has ticked "I understand" for, so the caller can
+    fold that into ``WriteGuard.warnings_acknowledged``.
     """
     acknowledged: set[str] = set()
     if not guards:
-        st.success("No blockers.")
+        theme.banner("success", "No blockers", "Nothing is standing between this plan and a live run.")
         return acknowledged
 
     for guard in guards:
         if guard.level is Level.BLOCK:
-            st.error(
-                f"**{guard.title}**\n\n{guard.detail}\n\n*Remedy:* {guard.remedy}",
-                icon="🚫",
-            )
+            theme.banner("danger", guard.title, guard.detail, remedy=guard.remedy or None)
         else:
-            checked = st.checkbox(
-                f"I understand — **{guard.title}**: {guard.detail}",
+            theme.banner("warning", guard.title, guard.detail, remedy=guard.remedy or None)
+            if st.checkbox(
+                f"I understand: {guard.title}",
                 key=f"{key_prefix}ack_{guard.id}",
-            )
-            if checked:
+            ):
                 acknowledged.add(guard.id)
-            else:
-                st.warning(guard.title, icon="⚠️")
     return acknowledged
-
-
-def has_blockers(guards: list[Guard]) -> bool:
-    return any(g.level is Level.BLOCK for g in guards)
-
-
-def blocker_count(guards: list[Guard]) -> int:
-    return sum(1 for g in guards if g.level is Level.BLOCK)

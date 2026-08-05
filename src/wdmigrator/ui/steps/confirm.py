@@ -25,7 +25,7 @@ from wdmigrator.api import (
     evaluate_guards,
     iter_execute,
 )
-from wdmigrator.ui import safety_ui
+from wdmigrator.ui import safety_ui, theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import DEFAULT_REPORT_OWNER_USERNAME, WizardState, build_guard, owner_reference
@@ -42,12 +42,14 @@ def _plan_has_report_creates(state: WizardState) -> bool:
 
 
 def _render_owner_remap(state: WizardState) -> None:
-    st.subheader("Report owner")
-    st.caption(
-        "Reports carry a System_User_Reference for their owner — the source "
-        f"owner almost certainly doesn't exist in the destination tenant. "
-        f"Every report this tool creates is owned by **{DEFAULT_REPORT_OWNER_USERNAME}** "
-        "on the destination, resolved by WorkdayUserName at write time."
+    theme.section("Report owner", eyebrow="Remapped automatically")
+    theme.checklist(
+        [
+            "Reports carry a System_User_Reference for their owner, and the source "
+            "owner almost certainly doesn't exist in the destination tenant.",
+            f"Every report this tool creates is owned by {DEFAULT_REPORT_OWNER_USERNAME} "
+            "on the destination, resolved by WorkdayUserName at write time.",
+        ]
     )
 
 
@@ -82,7 +84,11 @@ def _pump_dry_run(state: WizardState) -> None:
 
 
 def _render_dry_run_results(state: WizardState) -> None:
-    st.write(f"{len(state.dry_run_records)} object(s) serialized. No calls were made to the destination.")
+    theme.banner(
+        "info",
+        f"{len(state.dry_run_records)} object(s) serialized",
+        "No calls were made to the destination tenant.",
+    )
     rows = [
         {
             "name": r.name,
@@ -94,11 +100,20 @@ def _render_dry_run_results(state: WizardState) -> None:
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
     with st.expander("Inspect a serialized envelope"):
-        names = [r.name or r.node_id for r in state.dry_run_records]
-        if names:
-            choice = st.selectbox("Object", names, key="dry_run_envelope_choice")
-            record = next(r for r in state.dry_run_records if (r.name or r.node_id) == choice)
-            st.code(record.envelope or "(no envelope)", language="xml")
+        # Keyed by node_id, not by name. Report names are not unique in Workday
+        # (7 of 999 sampled reports shared one), so a name-keyed lookup would
+        # quietly show the first match's envelope while the user believed they
+        # were reviewing the second — on the screen whose entire job is
+        # confirming what is about to be written.
+        by_node = {r.node_id: r for r in state.dry_run_records}
+        if by_node:
+            choice = st.selectbox(
+                "Object",
+                list(by_node),
+                format_func=lambda node_id: by_node[node_id].name or node_id,
+                key="dry_run_envelope_choice",
+            )
+            st.code(by_node[choice].envelope or "(no envelope)", language="xml")
 
     state.dry_run_reviewed = st.checkbox(
         "I have reviewed this dry run's output.",
@@ -111,19 +126,27 @@ def render(state: WizardState) -> None:
     st.header("Confirm")
 
     if state.plan is None:
-        st.error("No plan — go back to Conflicts.")
+        theme.banner("danger", "No plan", remedy="Go back to Conflicts.")
         return
 
     counts = state.plan.counts()
-    st.write("**Plan:** " + ", ".join(f"{v} {k}" for k, v in counts.items()))
-    st.write(f"**{state.plan.writes_planned} write(s) planned** against `{state.dest.target.tenant}`.")
+    theme.figures(
+        [("Writes planned", state.plan.writes_planned)]
+        + [(k.capitalize(), v) for k, v in counts.items()],
+        tones={"Writes planned": "write"},
+    )
+    st.caption(f"Destination: `{state.dest.target.tenant}`")
 
     if _plan_has_report_creates(state):
         _render_owner_remap(state)
 
     st.divider()
-    st.subheader("Dry run")
-    st.caption("Required before a live run — and pinned to this exact plan; any override above invalidates it.")
+    theme.section(
+        "Dry run",
+        "Required before a live run, and pinned to this exact plan — any override back "
+        "in Conflicts invalidates it and it has to be run again.",
+        eyebrow="Step 1 of 2",
+    )
 
     if st.button("Run dry run", key="confirm_dry_run_start"):
         _run_dry_run(state)
@@ -134,17 +157,27 @@ def render(state: WizardState) -> None:
     elif state.dry_run_records and state.dry_run_plan_hash == state.plan.plan_hash():
         _render_dry_run_results(state)
     elif state.dry_run_records:
-        st.warning("The plan changed since this dry run — it no longer applies. Run it again.", icon="⚠️")
+        theme.banner(
+            "warning",
+            "The plan changed since this dry run",
+            "It no longer applies to what would be written.",
+            remedy="Run the dry run again.",
+        )
 
     dry_guard = build_guard(state, dry_run=True)
     dry_findings = evaluate_guards(dry_guard)
     if dry_findings:
-        st.caption("For reference, what a live run would hit right now:")
-        for g in dry_findings:
-            st.caption(f"- {g.title}: {g.detail}")
+        with st.expander(f"What a live run would hit right now ({len(dry_findings)})"):
+            theme.checklist([f"{g.title} — {g.detail}" for g in dry_findings])
 
     st.divider()
-    st.subheader("Live execution gate")
+    theme.section(
+        "Live execution gate",
+        "Everything below has to pass before the destination tenant is touched. "
+        "This service has no delete operation — nothing written here can be undone by "
+        "this tool, only by hand in the Workday UI, object by object.",
+        eyebrow="Step 2 of 2",
+    )
     state.confirmed_tenant_name = st.text_input(
         f"Type the destination tenant name to confirm (`{state.dest.target.tenant}`)",
         value=state.confirmed_tenant_name, key="confirm_tenant_name",

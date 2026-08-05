@@ -16,6 +16,7 @@ from __future__ import annotations
 import streamlit as st
 
 from wdmigrator.api import Blocker, CycleError, PartialIndexError, resolve, topological_sort
+from wdmigrator.ui import theme
 from wdmigrator.ui.state import WizardState, reset_downstream
 
 STEP_ID = "resolve"
@@ -52,27 +53,34 @@ def _compute(state: WizardState) -> None:
 def render(state: WizardState) -> None:
     st.header("Resolve")
     st.caption(
-        "Expands your selection into everything that must migrate with it, "
-        "in child-most-first order."
+        "Expands your selection into everything that must migrate with it, in "
+        "child-most-first order. Makes no tenant calls — the source index already "
+        "holds every calculated field, so this is an in-memory walk."
     )
 
     if state.closure is None or st.button("Recompute closure", key="resolve_recompute"):
         _compute(state)
 
     if state.closure_error:
-        st.error(state.closure_error, icon="🚫")
+        theme.banner(
+            "danger",
+            "Could not resolve dependencies",
+            state.closure_error,
+            remedy="Go back to Select and adjust the selection, or rebuild the "
+                   "calculated field index if it may be stale.",
+        )
         return
     if state.closure is None:
         return
 
     counts = state.closure.counts_by_kind()
-    st.write(
-        f"**{len(state.closure)} objects** to migrate: "
-        + ", ".join(f"{v} {k}" for k, v in counts.items())
-    )
-    st.caption(
-        f"{len(state.closure.selected_nodes)} explicitly selected, "
-        f"{len(state.closure.pulled_in_nodes)} pulled in as dependencies."
+    theme.figures(
+        [("Total objects", len(state.closure))]
+        + [(k.capitalize(), v) for k, v in counts.items()]
+        + [
+            ("Selected", len(state.closure.selected_nodes)),
+            ("Pulled in", len(state.closure.pulled_in_nodes)),
+        ]
     )
 
     ordered = topological_sort(state.closure.nodes)

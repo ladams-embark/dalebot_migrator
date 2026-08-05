@@ -26,6 +26,7 @@ from wdmigrator.api import (
     verify_connection,
 )
 from wdmigrator.ui import secrets as secrets_ui
+from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_connection_status, render_target_card
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import ConnectionState, WizardState, reset_downstream
@@ -48,20 +49,21 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
     try:
         target = parse_tenant_url(side.target_raw)
     except TenantURLError as exc:
-        st.error(f"Could not parse the {label} tenant URL: {exc}")
+        theme.banner("danger", f"Could not parse the {label.lower()} tenant URL", str(exc))
         side.target = None
         return
 
     side.target = target
 
     if not side.username or not side.password:
-        st.error(f"{label}: username and password are both required.")
+        theme.banner("danger", f"{label}: credentials incomplete",
+                     "Username and password are both required.")
         return
 
     try:
         connection = connect(target, side.username, side.password, role=role)
     except AuthError as exc:
-        st.error(f"{label}: could not build a connection: {exc}")
+        theme.banner("danger", f"{label}: could not build a connection", str(exc))
         return
 
     status = verify_connection(connection)
@@ -71,7 +73,12 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
         # tenant/user. Everything built from it (indexes, closure, plan,
         # dry run, guard) may no longer be valid.
         reset_downstream(state, from_step="select")
-        st.info(f"{label} credentials changed — downstream selections and plan were cleared.")
+        theme.banner(
+            "info",
+            f"{label} credentials changed",
+            "This side now points at a different tenant or user, so the selections, "
+            "closure, and plan built from the old one were cleared.",
+        )
 
     side.status = status
     if status.ok:
@@ -92,11 +99,11 @@ def _pump_discovery(side: ConnectionState, *, target_widget_key: str) -> None:
     pump(job, time_budget=0.8)
 
     for event in job.events:
-        icon = "✅" if event.ok else "❌"
-        st.caption(f"{icon} `{event.data_center}` ({event.services_host}) — {event.detail}")
+        outcome = "found" if event.ok else "no match"
+        st.caption(f"`{event.data_center}` ({event.services_host}) — {outcome}: {event.detail}")
 
     if job.error is not None:
-        st.error(f"Discovery failed: {job.error}")
+        theme.banner("danger", "Discovery failed", str(job.error))
         side.discovery_job = None
         return
 
@@ -107,10 +114,12 @@ def _pump_discovery(side: ConnectionState, *, target_widget_key: str) -> None:
     found = next((e for e in job.events if e.ok), None)
     side.discovery_job = None
     if found is None:
-        st.error(
-            "Not found in any known Implementation/Sandbox data center. "
-            "This tenant's data center may not be one this tool knows about yet — "
-            "see auth/endpoint_discovery.py's KNOWN_IMPL_DATA_CENTERS."
+        theme.banner(
+            "danger",
+            "Not found in any known data center",
+            "This tenant's data center may not be one this tool knows about yet.",
+            remedy="Add it to KNOWN_IMPL_DATA_CENTERS in auth/endpoint_discovery.py, "
+                   "or paste the full services-host URL below instead.",
         )
         return
 
@@ -131,7 +140,11 @@ def _pump_discovery(side: ConnectionState, *, target_widget_key: str) -> None:
         side.target = parse_tenant_url(side.target_raw)
     except TenantURLError:
         side.target = None
-    st.success(f"Found on `{found.data_center}` ({found.services_host}) — filled in below.")
+    theme.banner(
+        "success",
+        f"Found on {found.data_center}",
+        f"{found.services_host} — filled in below.",
+    )
     st.rerun()
 
 
@@ -150,7 +163,10 @@ def _quick_fill(side: ConnectionState, *, target_widget_key: str) -> None:
 
 
 def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
-    st.subheader(label)
+    theme.section(
+        label,
+        eyebrow="Reads from" if role is Role.SOURCE else "Writes to",
+    )
 
     if st.button(f"Quick fill: {_QUICK_FILL_TENANT}", key=f"{key}_quick_fill"):
         _quick_fill(side, target_widget_key=f"{key}_target")
@@ -192,10 +208,14 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
 
 def render(state: WizardState) -> None:
     st.header("Connect")
-    st.caption(
-        "Both sides need a verified connection before you can pick anything to migrate. "
-        "Both ISUs need Get and Put on the Configuration Set: Custom Reports and Fields "
-        "domain — Special OX Web Services access is not required."
+    theme.checklist(
+        [
+            "Both sides need a verified connection before you can pick anything to migrate.",
+            "Both ISUs need Get and Put on the Configuration Set: Custom Reports and Fields "
+            "domain. Special OX Web Services access is not required.",
+            "After any permission change in Workday, run Activate Pending Security Policy "
+            "Changes — until you do, the ISU returns empty data rather than an error.",
+        ]
     )
 
     col1, col2 = st.columns(2)
@@ -206,10 +226,12 @@ def render(state: WizardState) -> None:
 
     if state.source.target is not None and state.dest.target is not None:
         if state.source.target.identity() == state.dest.target.identity():
-            st.warning(
-                "Source and destination are the same tenant. Dry runs work fine; "
-                "a live migration will be blocked with no override.",
-                icon="⚠️",
+            theme.banner(
+                "warning",
+                "Source and destination are the same tenant",
+                "Dry runs work fine against a single tenant — that's how the whole flow "
+                "gets exercised without a second one.",
+                remedy="A live migration will be blocked here with no override available.",
             )
 
 

@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 
-from wdmigrator.config.targets import Environment, TenantTarget
+from wdmigrator.config.targets import TenantTarget
 
 #: Process-environment escape hatch for writing to a non-implementation tenant.
 #: Deliberately an env var rather than a UI control: it cannot be clicked

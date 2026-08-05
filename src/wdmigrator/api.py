@@ -32,7 +32,7 @@ synchronous.
 
 from __future__ import annotations
 
-from typing import Iterator, Mapping
+from typing import Mapping
 
 # ── Targeting: which tenant, how dangerous ──────────────────────────────────
 from wdmigrator.config import (

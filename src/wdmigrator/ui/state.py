@@ -23,7 +23,6 @@ from typing import Optional
 import streamlit as st
 
 from wdmigrator.api import (
-    Action,
     Closure,
     Connection,
     ConnectionStatus,
@@ -31,7 +30,6 @@ from wdmigrator.api import (
     MigrationPlan,
     TenantTarget,
     WriteGuard,
-    WriteRecord,
 )
 from wdmigrator.ui.runner import JobState
 
