@@ -104,6 +104,10 @@ class WizardState:
     plan: Optional[MigrationPlan] = None
     # node_id -> Action, user overrides on top of default_action()
     action_overrides: dict = field(default_factory=dict)
+    # source WID -> ReferenceDecision, for references the destination cannot
+    # resolve. Held on the wizard rather than the plan so a re-probe does not
+    # discard answers the user has already given.
+    reference_decisions: dict = field(default_factory=dict)
 
     dry_run_job: Optional[JobState] = None
     dry_run_records: list = field(default_factory=list)
@@ -142,6 +146,7 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.selected_field_wids = set()
         state.selected_reports_manual = {}
         state.selected_reports = {}
+        state.reference_decisions = {}
 
     if idx <= STEP_ORDER.index("resolve"):
         state.closure = None

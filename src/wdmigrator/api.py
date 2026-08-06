@@ -106,6 +106,10 @@ from wdmigrator.migrate import (
     NodeKind,
     PartialIndexError,
     ProbeProgress,
+    BlockingReference,
+    ReferenceAction,
+    ReferenceDecision,
+    ReferenceSite,
     WriteError,
     WriteProgress,
     WriteRecord,
@@ -117,8 +121,11 @@ from wdmigrator.migrate import (
     build_report_payload,
     default_action,
     extract_exceptions,
+    find_reference_sites,
+    parse_blocking_reference,
     extract_measure_refs,
     extract_reference_id_refs,
+    extract_report_refs,
     extract_wid_refs,
     is_failure,
     iter_check_existence,
@@ -198,6 +205,7 @@ __all__ = [
     "lookup_calculated_field",
     "lookup_calculated_measure",
     "measure_loader_for",
+    "report_loader_for",
     "lookup_report",
     "lookup_report_by_name",
     "save_index",
@@ -213,6 +221,10 @@ __all__ = [
     "NodeKind",
     "PartialIndexError",
     "ProbeProgress",
+    "BlockingReference",
+    "ReferenceAction",
+    "ReferenceDecision",
+    "ReferenceSite",
     "WriteError",
     "WriteProgress",
     "WriteRecord",
@@ -224,8 +236,11 @@ __all__ = [
     "build_report_payload",
     "default_action",
     "extract_exceptions",
+    "find_reference_sites",
+    "parse_blocking_reference",
     "extract_measure_refs",
     "extract_reference_id_refs",
+    "extract_report_refs",
     "extract_wid_refs",
     "is_failure",
     "iter_check_existence",
@@ -308,6 +323,28 @@ def measure_loader_for(connection: Connection):
     return load
 
 
+def report_loader_for(connection: Connection):
+    """A ``wid -> payload`` loader for sub-reports, backed by a tenant.
+
+    Pass to :func:`resolve` so a composite report pulls in the sub-reports it
+    renders. Memoised for the life of the loader, misses included.
+
+    Fetched on demand rather than read from the report index for two reasons:
+    the index is optional (it costs ~158s to build and a user may never have
+    asked for one), and a sub-report reached this way needs its *full* payload,
+    which a reference-only sweep does not carry.
+    """
+    cache: dict[str, dict | None] = {}
+
+    def load(wid: str) -> dict | None:
+        if wid not in cache:
+            result = lookup_report(connection, wid=wid)
+            cache[wid] = result.data if result.outcome is LookupOutcome.FOUND else None
+        return cache[wid]
+
+    return load
+
+
 def resolve(
     cf_index: Index,
     *,
@@ -316,6 +353,7 @@ def resolve(
     expected_index_size: int | None = None,
     allow_partial_index: bool = False,
     measure_loader=None,
+    report_loader=None,
 ) -> Closure:
     """Expand a selection into the full set of objects that must migrate.
 
@@ -341,4 +379,5 @@ def resolve(
         expected_index_size=expected_index_size,
         allow_partial_index=allow_partial_index,
         measure_loader=measure_loader,
+        report_loader=report_loader,
     )

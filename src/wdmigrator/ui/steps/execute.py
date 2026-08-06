@@ -12,13 +12,138 @@ from __future__ import annotations
 
 import streamlit as st
 
-from wdmigrator.api import Blocker, GuardViolation, iter_execute
+from wdmigrator.api import (
+    Blocker,
+    GuardViolation,
+    ReferenceAction,
+    ReferenceDecision,
+    find_reference_sites,
+    iter_execute,
+)
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.runner import pump, start_job
-from wdmigrator.ui.state import WizardState, build_guard, owner_reference
+from wdmigrator.ui.state import (
+    WizardState,
+    build_guard,
+    owner_reference,
+    reset_downstream,
+)
 
 STEP_ID = "execute"
+
+
+def _blocked_record(state: WizardState):
+    """The failed record naming a reference the destination could not resolve.
+
+    Only ``Invalid ID value`` faults produce one — a schema error or an
+    entitlement problem is not fixable by substituting a reference, and must not
+    be offered as though it were.
+    """
+    for record in reversed(state.execute_records):
+        if record.blocking_reference is not None:
+            return record
+    return None
+
+
+def _render_reference_resolution(state: WizardState, record) -> None:
+    """Ask what to do about one unresolvable reference, then retry.
+
+    Fault-driven rather than pre-flight on purpose: a real report carries ~90
+    references the tool does not migrate, and almost all of them are delivered
+    objects that pass through fine. Asking about all of them would bury the
+    handful that actually break. Workday names the offending identifier in the
+    fault, so this asks about exactly that one.
+    """
+    blocking = record.blocking_reference
+    node = next(
+        (n for n in state.plan.ordered_nodes if n.node_id == record.node_id), None
+    )
+    sites = find_reference_sites(node, blocking.value) if node is not None else []
+
+    theme.section(
+        "Unresolvable reference",
+        f"{record.name!r} could not be written because the destination has no "
+        f"object matching this {blocking.id_type}.",
+        eyebrow="Needs a decision",
+    )
+    theme.card(
+        blocking.id_type,
+        meta=blocking.value,
+        note=(f"Appears at {len(sites)} place(s) in this object."
+              if sites else "Not located in this object's payload."),
+    )
+
+    if sites:
+        others = {}
+        for site in sites:
+            for id_type, value in site.ids.items():
+                if id_type != "WID":
+                    others[id_type] = value
+        st.caption("Where it appears: " + ", ".join(
+            sorted({s.element for s in sites})
+        ))
+        if others:
+            st.caption("Also identified as: " + ", ".join(
+                f"`{k}` = {v}" for k, v in others.items()
+            ))
+
+    choice = st.radio(
+        "What should this reference become?",
+        ["Leave it blank", "Point it at something else"],
+        key=f"refdec_choice_{blocking.value}",
+        help="Blanking drops the value — a prompt default disappears, a filter "
+             "loses its comparison value. The object still migrates.",
+    )
+
+    replacement_type = replacement_value = None
+    if choice == "Point it at something else":
+        cols = st.columns(2)
+        with cols[0]:
+            replacement_type = st.text_input(
+                "ID type",
+                value=next(iter(k for k in (
+                    t for s in sites for t in s.ids if t != "WID"
+                )), ""),
+                key=f"refdec_type_{blocking.value}",
+                help="e.g. Organization_Reference_ID",
+            )
+        with cols[1]:
+            replacement_value = st.text_input(
+                "ID value in the destination",
+                key=f"refdec_value_{blocking.value}",
+                help="Look this up in the destination tenant — there is no "
+                     "generic way for this tool to list candidates.",
+            )
+
+    ready = choice == "Leave it blank" or (replacement_type and replacement_value)
+    if st.button("Apply and re-check destination",
+                 key=f"refdec_apply_{blocking.value}",
+                 type="primary", disabled=not ready):
+        state.reference_decisions[blocking.value] = ReferenceDecision(
+            source_wid=blocking.value,
+            action=(ReferenceAction.BLANK if choice == "Leave it blank"
+                    else ReferenceAction.REPLACE),
+            replacement_type=replacement_type or None,
+            replacement_value=replacement_value or None,
+        )
+        # Back to Conflicts, deliberately, rather than retrying in place.
+        # Two reasons, both safety: the decision changes the payload and
+        # therefore the plan hash, which invalidates the reviewed dry run
+        # exactly as a Conflicts override does; and objects written before the
+        # failure need a fresh probe so they come back as SKIP instead of being
+        # written a second time.
+        reset_downstream(state, from_step="conflicts")
+        st.rerun()
+
+    st.caption(
+        "Applying a decision returns you to Conflicts to re-probe. Objects already "
+        "written come back as SKIP, and the changed payload needs a fresh dry run "
+        "before it can go live — the same rule an action override follows."
+    )
+    if state.reference_decisions:
+        st.caption(f"{len(state.reference_decisions)} decision(s) recorded so far. "
+                   "They survive re-probing and are covered by the plan hash.")
 
 
 def _start(state: WizardState) -> None:
@@ -112,10 +237,20 @@ def render(state: WizardState) -> None:
         elif job.done:
             state.execute_records = [p.record for p in job.events]
             state.execute_job = None
-            state.step = "results"
+            # Stay here if something stopped on an unresolvable reference —
+            # that is answerable in place, and bouncing to Results would hide
+            # the one question that would let the run finish.
+            if _blocked_record(state) is None:
+                state.step = "results"
             st.rerun()
         elif not state.execute_paused:
             st.rerun()
+        return
+
+    blocked = _blocked_record(state)
+    if blocked is not None:
+        st.divider()
+        _render_reference_resolution(state, blocked)
         return
 
     theme.banner(
