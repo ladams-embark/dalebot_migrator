@@ -121,6 +121,15 @@ class WizardState:
     execute_job: Optional[JobState] = None
     execute_paused: bool = False
     execute_records: list = field(default_factory=list)
+    # source WID -> {"reference", "node_id", "node_name", "sites"} for every
+    # reference the destination could not resolve. Accumulates across attempts:
+    # Workday reports one failure at a time, so the complete picture only
+    # emerges over several, and losing the earlier ones would make the table
+    # flicker between single rows instead of building up.
+    blocking_references: dict = field(default_factory=dict)
+    # Re-probe kicked off by submitting the mapping table, so a decision does
+    # not cost a trip back through Conflicts and Confirm.
+    reprobe_job: Optional[JobState] = None
 
 
 def get_state() -> WizardState:
@@ -168,6 +177,8 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
     if idx <= STEP_ORDER.index("execute"):
         state.execute_job = None
         state.execute_records = []
+        state.blocking_references = {}
+        state.reprobe_job = None
 
     # Never leave the user parked past the point their data just got wiped.
     if STEP_ORDER.index(state.step) > idx:
