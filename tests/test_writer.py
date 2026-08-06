@@ -28,6 +28,7 @@ from wdmigrator.migrate.planner import (
 )
 from wdmigrator.migrate.resolver import Node, NodeKind, node_id_for, resolve_closure
 from wdmigrator.migrate.writer import (
+    build_calculated_measure_payload,
     _defer_summary_calculations,
     find_reference_sites,
     parse_blocking_reference,
@@ -1060,3 +1061,91 @@ class TestReferenceDecisionsOnRepeatingReferences:
             },
         )["Tenanted_Report_Definition_Data"]
         assert "Instance_Reference" not in data["Abstract_Value_Data"][0]
+
+
+class TestDecisionsApplyToEveryObjectKind:
+    """Regression: decisions reached only reports. A calculated field with an
+    unresolvable instance reference could be asked about and answered, and the
+    answer changed nothing."""
+
+    def _cf_node(self):
+        return Node(
+            node_id="calculated_field:F1", kind=NodeKind.CALCULATED_FIELD,
+            source_wid="F1", reference_id="CF_A", name="Field",
+            payload={"Calculated_Field_Data": {
+                "Name": "Field",
+                "Condition_Item_Data": [
+                    {"Instance_Reference": [{"ID": [
+                        {"type": "WID", "_value_1": "ORG_WID"},
+                        {"type": "Organization_Reference_ID", "_value_1": "TOP"},
+                    ]}]}
+                ],
+            }},
+        )
+
+    def _measure_node(self):
+        return Node(
+            node_id="calculated_measure:M1", kind=NodeKind.CALCULATED_MEASURE,
+            source_wid="M1", reference_id="ARITH-1", name="Measure",
+            payload={"Calculated_Measure_Data": {
+                "Name": "Measure",
+                "Scope_Reference": {"ID": [{"type": "WID", "_value_1": "ORG_WID"}]},
+            }},
+        )
+
+    def _blank(self):
+        return {"ORG_WID": ReferenceDecision("ORG_WID", ReferenceAction.BLANK)}
+
+    def test_calculated_field_honours_a_decision(self):
+        data = build_calculated_field_payload(
+            self._cf_node(), {}, action=Action.CREATE,
+            reference_decisions=self._blank(),
+        )["Calculated_Field_Data"]
+        assert "Instance_Reference" not in data["Condition_Item_Data"][0]
+
+    def test_calculated_measure_honours_a_decision(self):
+        data = build_calculated_measure_payload(
+            self._measure_node(), {}, action=Action.CREATE,
+            reference_decisions=self._blank(),
+        )["Calculated_Measure_Data"]
+        assert "Scope_Reference" not in data
+
+    def test_calculated_field_replace_works(self):
+        data = build_calculated_field_payload(
+            self._cf_node(), {}, action=Action.CREATE,
+            reference_decisions={"ORG_WID": ReferenceDecision(
+                "ORG_WID", ReferenceAction.REPLACE,
+                replacement_type="Organization_Reference_ID",
+                replacement_value="DEST_ORG",
+            )},
+        )["Calculated_Field_Data"]
+        refs = data["Condition_Item_Data"][0]["Instance_Reference"]
+        assert refs[0]["ID"] == [
+            {"type": "Organization_Reference_ID", "_value_1": "DEST_ORG"}
+        ]
+
+    def test_no_decisions_leaves_a_field_untouched(self):
+        data = build_calculated_field_payload(
+            self._cf_node(), {}, action=Action.CREATE
+        )["Calculated_Field_Data"]
+        refs = data["Condition_Item_Data"][0]["Instance_Reference"]
+        assert refs[0]["ID"][0]["_value_1"] == "ORG_WID"
+
+
+class TestBlockingReferenceFromExceptionsBlock:
+    """Put_Calculated_Field reports failure through Exceptions_Response_Data on
+    an HTTP 200 rather than raising. Parsing only SOAP faults meant a field
+    failed without ever offering the resolution a report gets — which is exactly
+    what was observed running the wizard."""
+
+    def test_an_invalid_id_exception_yields_a_blocking_reference(self):
+        message = ("Invalid ID value.  '17c5d82e3e801001734fc9c785360000' is not "
+                   "a valid ID value for type = 'WID'")
+        assert parse_blocking_reference(message).value == (
+            "17c5d82e3e801001734fc9c785360000"
+        )
+
+    def test_a_non_reference_exception_yields_nothing(self):
+        assert parse_blocking_reference(
+            "The calculated field could not be saved."
+        ) is None

@@ -172,6 +172,7 @@ def build_calculated_field_payload(
     *,
     action: Action,
     dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
 ) -> dict:
     """Arguments for ``Put_Calculated_Field``.
 
@@ -182,7 +183,10 @@ def build_calculated_field_payload(
     if not data:
         raise WriteError(f"{node.name!r} has no Calculated_Field_Data to write.")
 
-    payload: dict = {"Calculated_Field_Data": substitute_wids(data, wid_map)}
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+    payload: dict = {"Calculated_Field_Data": remapped}
 
     if action is Action.UPDATE:
         if not dest_wid:
@@ -552,6 +556,7 @@ def build_calculated_measure_payload(
     *,
     action: Action,
     dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
 ) -> dict:
     """Arguments for ``Put_Global_Calculated_Measure``.
 
@@ -568,7 +573,10 @@ def build_calculated_measure_payload(
     if not data:
         raise WriteError(f"{node.name!r} has no Calculated_Measure_Data to write.")
 
-    payload: dict = {"Calculated_Measure_Data": substitute_wids(data, wid_map)}
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+    payload: dict = {"Calculated_Measure_Data": remapped}
 
     if action is Action.UPDATE:
         if not dest_wid:
@@ -782,11 +790,13 @@ def write_node(
             )
         elif node.kind is NodeKind.CALCULATED_MEASURE:
             payload = build_calculated_measure_payload(
-                node, plan.wid_map, action=action, dest_wid=dest_wid
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
             )
         else:
             payload = build_calculated_field_payload(
-                node, plan.wid_map, action=action, dest_wid=dest_wid
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
             )
     except WriteError as exc:
         record.status = WriteStatus.FAILED
@@ -839,6 +849,21 @@ def write_node(
     returned_wid = _reference_wid(response, node)
 
     if is_failure(record.exceptions):
+        # Put_Calculated_Field reports failure HERE rather than by raising —
+        # the asymmetry described at the top of this module. Parsing the
+        # exception messages too is what lets a calculated field reach the same
+        # guided resolution a report gets; without it a field with an
+        # unresolvable instance reference simply failed, unasked.
+        record.blocking_reference = next(
+            (
+                found
+                for found in (
+                    parse_blocking_reference(e.message) for e in record.exceptions
+                )
+                if found is not None
+            ),
+            None,
+        )
         # Deliberately do NOT record the WID: registering it would let
         # downstream payloads reference an object that may not be valid.
         record.status = WriteStatus.FAILED
