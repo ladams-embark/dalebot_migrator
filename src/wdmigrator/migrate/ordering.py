@@ -225,6 +225,53 @@ def _collect_reference_ids(obj: Any, found: set[str], *, at_root: bool) -> None:
             _collect_reference_ids(item, found, at_root=False)
 
 
+#: The ID type that marks a reference as pointing at a calculated measure.
+#: Matching on this rather than on element names is deliberate: the same object
+#: is reached through at least three differently-named elements
+#: (``Summary_Calculation_Reference``, ``Matrix_Measure__All__Reference``,
+#: ``Calculated_Measure_Reference``), and a name-based list would silently miss
+#: whichever one nobody thought of.
+_MEASURE_ID_TYPE = "BI_Calculated_Measure_ID"
+
+
+def extract_measure_refs(obj: Any) -> dict[str, str]:
+    """Every calculated-measure reference inside ``obj``, as ``{wid: business_id}``.
+
+    Both identifiers are returned because both are needed and they do different
+    jobs: the **WID** is how the source payload names the measure and therefore
+    what :func:`substitute_wids` has to rewrite, while the
+    ``BI_Calculated_Measure_ID`` is the stable cross-tenant identity used to
+    look the measure up and to decide whether the destination already has it.
+
+    A reference carrying only a WID is not returned — without a business ID
+    there is nothing to match on in the destination, so it cannot be resolved
+    into a migratable dependency.
+    """
+    found: dict[str, str] = {}
+    _collect_measures(obj, found)
+    return found
+
+
+def _collect_measures(obj: Any, found: dict[str, str]) -> None:
+    if isinstance(obj, dict):
+        entries = obj.get("ID")
+        if isinstance(entries, list):
+            ids = {
+                e.get("type"): e.get("_value_1")
+                for e in entries
+                if isinstance(e, dict) and e.get("type")
+            }
+            business = ids.get(_MEASURE_ID_TYPE)
+            wid = ids.get("WID")
+            if business and wid:
+                found[wid] = business
+        for value in obj.values():
+            _collect_measures(value, found)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_measures(item, found)
+
+
 def unmapped_wids(obj: Any, wid_map: Mapping[str, str], custom: Iterable[str]) -> set[str]:
     """Custom WIDs still present in ``obj`` that have no destination mapping.
 

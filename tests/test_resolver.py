@@ -415,3 +415,160 @@ class TestNestedReferenceByReferenceId:
         )
         closure = resolve_closure(cf_index=index, selected_field_wids=["W1"])
         assert closure.unresolved_reference_ids == set()
+
+
+def measure_payload(wid, business_id, name="Measure", field_wids=(), measure_refs=()):
+    """A calculated measure as the tenant actually returns one.
+
+    Shape confirmed live on `commitconsulting` (wd501) 2026-08-05: measures
+    reference calculated fields AND other measures, so they need the same
+    transitive expansion and child-most-first ordering as fields.
+    """
+    related = []
+    for fw in field_wids:
+        related.append(
+            {"External_Field": {"Class_Report_Field_Reference": {
+                "ID": [{"type": "WID", "_value_1": fw}]}}}
+        )
+    for mw, mid in measure_refs:
+        related.append(
+            {"Calculated_Measure_Reference": {"ID": [
+                {"type": "WID", "_value_1": mw},
+                {"type": "BI_Calculated_Measure_ID", "_value_1": mid},
+            ]}}
+        )
+    return {
+        "Calculated_Measure_Reference": {
+            "ID": [
+                {"type": "WID", "_value_1": wid},
+                {"type": "BI_Calculated_Measure_ID", "_value_1": business_id},
+            ]
+        },
+        "Calculated_Measure_Data": {
+            "Name": name,
+            "ID": business_id,
+            "Arithmetic_Calculated_Measure_Data": [
+                {"BI_Calculated_Measure_Related_Content_Data": related}
+            ],
+        },
+    }
+
+
+def report_using_measure(wid, report_id, name, measure_wid, measure_id):
+    """A report whose column summarises via a calculated measure."""
+    return {
+        "Tenanted_Report_Definition_Reference": {
+            "ID": [
+                {"type": "WID", "_value_1": wid},
+                {"type": "Custom_Report_ID", "_value_1": report_id},
+            ]
+        },
+        "Tenanted_Report_Definition_Data": {
+            "Name": name,
+            "Tenanted_Report_Column_Data": [
+                {"Summary_Calculation_Reference": {"ID": [
+                    {"type": "WID", "_value_1": measure_wid},
+                    {"type": "BI_Calculated_Measure_ID", "_value_1": measure_id},
+                ]}}
+            ],
+        },
+    }
+
+
+class TestCalculatedMeasures:
+    """Measures are dependency-only: never selected, never indexed, fetched on
+    demand when a report being migrated uses one."""
+
+    def test_report_pulls_in_the_measure_it_uses(self):
+        loader = {"MW1": measure_payload("MW1", "ARITH-Turnover-1")}
+        report = report_using_measure("R1", "RPT", "R", "MW1", "ARITH-Turnover-1")
+        closure = resolve_closure(
+            cf_index=cf_index(),
+            selected_reports={"R1": report},
+            measure_loader=loader.get,
+        )
+        assert len(closure) == 2
+        node = closure.nodes[node_id_for(NodeKind.CALCULATED_MEASURE, "MW1")]
+        assert node.kind is NodeKind.CALCULATED_MEASURE
+        assert node.reference_id == "ARITH-Turnover-1"
+        assert not node.selected
+
+    def test_measure_is_ordered_before_the_report(self):
+        loader = {"MW1": measure_payload("MW1", "ARITH-Turnover-1")}
+        report = report_using_measure("R1", "RPT", "R", "MW1", "ARITH-Turnover-1")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"R1": report},
+            measure_loader=loader.get,
+        )
+        order = [n.source_wid for n in topological_sort(closure.nodes)]
+        assert order.index("MW1") < order.index("R1")
+
+    def test_measure_depending_on_another_measure_expands_transitively(self):
+        loader = {
+            "MW1": measure_payload("MW1", "ARITH-Turnover-1",
+                                   measure_refs=[("MW2", "ARITH-AvgHeadcount-2")]),
+            "MW2": measure_payload("MW2", "ARITH-AvgHeadcount-2"),
+        }
+        report = report_using_measure("R1", "RPT", "R", "MW1", "ARITH-Turnover-1")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"R1": report},
+            measure_loader=loader.get,
+        )
+        assert len(closure) == 3
+        order = [n.source_wid for n in topological_sort(closure.nodes)]
+        assert order.index("MW2") < order.index("MW1") < order.index("R1")
+
+    def test_measure_pulls_in_the_calculated_fields_it_uses(self):
+        index = cf_index(cf_payload("W2", "CF_B"))
+        loader = {"MW1": measure_payload("MW1", "ARITH-1", field_wids=["W2"])}
+        report = report_using_measure("R1", "RPT", "R", "MW1", "ARITH-1")
+        closure = resolve_closure(
+            cf_index=index, selected_reports={"R1": report},
+            measure_loader=loader.get,
+        )
+        assert len(closure) == 3
+        order = [n.source_wid for n in topological_sort(closure.nodes)]
+        assert order.index("W2") < order.index("MW1") < order.index("R1")
+
+    def test_a_measure_the_source_cannot_return_is_recorded(self):
+        report = report_using_measure("R1", "RPT", "R", "MW1", "ARITH-Turnover-1")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"R1": report},
+            measure_loader=lambda wid: None,
+        )
+        assert closure.unresolved_measure_ids == {"ARITH-Turnover-1"}
+        assert len(closure) == 1
+
+    def test_without_a_loader_measures_are_skipped_entirely(self):
+        """No loader means no tenant calls — resolution stays pure."""
+        report = report_using_measure("R1", "RPT", "R", "MW1", "ARITH-Turnover-1")
+        closure = resolve_closure(cf_index=cf_index(), selected_reports={"R1": report})
+        assert len(closure) == 1
+        assert closure.unresolved_measure_ids == set()
+        assert "MW1" in closure.passthrough_wids
+
+    def test_a_measure_wid_is_not_also_recorded_as_a_passthrough(self):
+        loader = {"MW1": measure_payload("MW1", "ARITH-Turnover-1")}
+        report = report_using_measure("R1", "RPT", "R", "MW1", "ARITH-Turnover-1")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"R1": report},
+            measure_loader=loader.get,
+        )
+        assert "MW1" not in closure.passthrough_wids
+
+    def test_each_measure_is_fetched_once_even_when_referenced_repeatedly(self):
+        calls = []
+
+        def loader(wid):
+            calls.append(wid)
+            return measure_payload("MW1", "ARITH-Turnover-1")
+
+        report = report_using_measure("R1", "RPT", "R", "MW1", "ARITH-Turnover-1")
+        report["Tenanted_Report_Definition_Data"]["Tenanted_Report_Column_Data"].append(
+            report["Tenanted_Report_Definition_Data"]["Tenanted_Report_Column_Data"][0]
+        )
+        resolve_closure(
+            cf_index=cf_index(), selected_reports={"R1": report},
+            measure_loader=loader,
+        )
+        assert calls == ["MW1"]

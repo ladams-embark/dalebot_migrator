@@ -22,15 +22,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from wdmigrator.discovery.inventory import Index, ids_of
-from wdmigrator.migrate.ordering import extract_reference_id_refs, extract_wid_refs
+from wdmigrator.migrate.ordering import (
+    extract_measure_refs,
+    extract_reference_id_refs,
+    extract_wid_refs,
+)
 
 
 class NodeKind(str, Enum):
     CALCULATED_FIELD = "calculated_field"
     REPORT = "report"
+    CALCULATED_MEASURE = "calculated_measure"
 
 
 class PartialIndexError(ValueError):
@@ -75,6 +80,11 @@ class Closure:
     #: field, so failing to find it means a genuinely missing dependency, not a
     #: delivered object passing through. A write referencing one will fail.
     unresolved_reference_ids: set[str] = field(default_factory=set)
+    #: ``BI_Calculated_Measure_ID`` values that could not be fetched from the
+    #: source. Same reasoning as ``unresolved_reference_ids``: the reference
+    #: names the object as a calculated measure, so not finding it is a real
+    #: gap rather than a pass-through.
+    unresolved_measure_ids: set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
         return len(self.nodes)
@@ -133,15 +143,34 @@ def _report_node(wid: str, payload: dict, *, selected: bool) -> Node:
     )
 
 
+def _measure_node(wid: str, payload: dict) -> Node:
+    data = payload.get("Calculated_Measure_Data") or {}
+    ids = ids_of(payload.get("Calculated_Measure_Reference"))
+    return Node(
+        node_id=node_id_for(NodeKind.CALCULATED_MEASURE, wid),
+        kind=NodeKind.CALCULATED_MEASURE,
+        source_wid=wid,
+        reference_id=ids.get("BI_Calculated_Measure_ID") or data.get("ID"),
+        name=data.get("Name"),
+        payload=payload,
+        selected=False,
+    )
+
+
+_DATA_BLOCK = {
+    NodeKind.REPORT: "Tenanted_Report_Definition_Data",
+    NodeKind.CALCULATED_FIELD: "Calculated_Field_Data",
+    NodeKind.CALCULATED_MEASURE: "Calculated_Measure_Data",
+}
+
+
 def _dependency_payload(node: Node) -> dict:
     """The part of a node worth scanning for references.
 
     Scoped to the data block so the object's own reference block does not
     register as a dependency on itself.
     """
-    if node.kind is NodeKind.REPORT:
-        return node.payload.get("Tenanted_Report_Definition_Data") or {}
-    return node.payload.get("Calculated_Field_Data") or {}
+    return node.payload.get(_DATA_BLOCK[node.kind]) or {}
 
 
 def resolve_closure(
@@ -151,6 +180,7 @@ def resolve_closure(
     selected_reports: Mapping[str, dict] | None = None,
     allow_partial_index: bool = False,
     expected_index_size: int | None = None,
+    measure_loader: Callable[[str], dict | None] | None = None,
 ) -> Closure:
     """Expand a selection into every object that has to be written.
 
@@ -162,10 +192,24 @@ def resolve_closure(
         allow_partial_index: Opt out of the completeness check. Only for tests.
         expected_index_size: Total the index claims the tenant has, when known,
             so a truncated sweep can be caught.
+        measure_loader: ``wid -> payload`` for calculated measures, or None to
+            skip them entirely. **This is the one argument that can make this
+            function touch the network** — measures are not indexed, so each
+            one is fetched on demand (see below). Pass None, or a dict-backed
+            stub, to keep resolution offline.
 
     Returns:
         A :class:`Closure` whose nodes carry ``depends_on`` edges, ready for
         :func:`~wdmigrator.migrate.ordering.topological_sort`.
+
+    **On measures and the "no tenant calls" rule.** Calculated fields are
+    resolved against a complete in-memory index, which is what lets this
+    function stay pure. Measures deliberately are not indexed: a tenant holds a
+    handful of them, they are only ever reached as a dependency of a report
+    that uses one, and a sweep would be almost entirely wasted. So they are
+    fetched one at a time through ``measure_loader``. The caller supplies it,
+    which keeps the network dependency explicit and this function testable with
+    a plain dict.
     """
     selected_reports = selected_reports or {}
 
@@ -213,32 +257,58 @@ def resolve_closure(
     pending = list(closure.nodes.values())
     edges: dict[str, set[str]] = {n.node_id: set() for n in pending}
 
-    def _link(dep_wid: str, from_node: Node) -> None:
+    def _link(dep: Node | None, dep_id: str, from_node: Node) -> None:
         """Record an edge, adding the dependency to the closure if it's new."""
-        if dep_wid == from_node.source_wid:
+        if dep_id == from_node.node_id:
             return
-        dep_id = node_id_for(NodeKind.CALCULATED_FIELD, dep_wid)
         if dep_id not in closure.nodes:
-            dep = _calculated_field_node(dep_wid, cf_index, selected=False)
             if dep is None:
-                # In the index but without a payload. Recording an edge to a
-                # node that will never exist would leave a dangling dependency
-                # that `build_dag` silently drops, so refuse the edge too.
+                # Recording an edge to a node that will never exist would leave
+                # a dangling dependency that `build_dag` silently drops.
                 return
             closure.nodes[dep_id] = dep
             edges.setdefault(dep_id, set())
             pending.append(dep)
         edges.setdefault(from_node.node_id, set()).add(dep_id)
 
+    def _link_field(dep_wid: str, from_node: Node) -> None:
+        dep_id = node_id_for(NodeKind.CALCULATED_FIELD, dep_wid)
+        existing = closure.nodes.get(dep_id)
+        _link(
+            existing or _calculated_field_node(dep_wid, cf_index, selected=False),
+            dep_id,
+            from_node,
+        )
+
     while pending:
         node = pending.pop()
         payload = _dependency_payload(node)
 
+        # Measures first, so their WIDs are known before the generic WID walk
+        # below would otherwise record them as pass-throughs.
+        measures: dict[str, str] = (
+            extract_measure_refs(payload) if measure_loader is not None else {}
+        )
+        for measure_wid, business_id in measures.items():
+            if measure_wid == node.source_wid:
+                continue
+            dep_id = node_id_for(NodeKind.CALCULATED_MEASURE, measure_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = measure_loader(measure_wid)
+                if fetched is None:
+                    closure.unresolved_measure_ids.add(business_id)
+                    continue
+                dep = _measure_node(measure_wid, fetched)
+            _link(dep, dep_id, node)
+
         for ref_wid in extract_wid_refs(payload, exclude=[node.source_wid]):
+            if ref_wid in measures:
+                continue  # already handled as a measure
             if ref_wid not in cf_index:
                 closure.passthrough_wids.add(ref_wid)
                 continue
-            _link(ref_wid, node)
+            _link_field(ref_wid, node)
 
         for ref_id in extract_reference_id_refs(payload):
             summary = by_reference_id.get(ref_id)
@@ -247,7 +317,7 @@ def resolve_closure(
                 # unmatched WID this is not a delivered object passing through.
                 closure.unresolved_reference_ids.add(ref_id)
                 continue
-            _link(summary.wid, node)
+            _link_field(summary.wid, node)
 
     # Freeze edges onto the nodes, and record the reverse direction so review
     # can answer "why is this object in my migration?".

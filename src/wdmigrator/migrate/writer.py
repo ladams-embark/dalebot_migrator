@@ -202,6 +202,111 @@ def _strip_filter_instance_references(obj: object) -> None:
             _strip_filter_instance_references(item)
 
 
+#: Who a migrated report is visible to, and where it appears. All optional in
+#: the schema, all cleared on write — see :func:`_strip_sharing_and_placement`.
+_SHARING_FIELDS = (
+    "Restricted_to_Metadata_Security_Groups_Reference",
+    "Restricted_to_Tenanted_Security_Groups_Reference",
+    "Restricted_to_System_User_Reference",
+)
+#: Every field on ``Tenanted_Report_Definition_DataType`` that only means
+#: something on a worklet. Enumerated from the WSDL rather than discovered one
+#: failure at a time — several of these are not merely ignorable when
+#: ``Enable_As_Worklet`` is False, they are conditionally *invalid*, and Workday
+#: rejects the entire write:
+#:
+#:   "A Refresh Data Reference can only be specified for a Custom Report
+#:    Definition that is enabled as a worklet"
+#:   "Worklet Max Rows can only be specified for a Custom Report Definition
+#:    that is enabled as a Worklet"
+#:
+#: Both confirmed live. Clearing the flag without clearing all of these is a
+#: self-inflicted failure, so keep this list in step with the schema.
+_PLACEMENT_FIELDS = (
+    "Worklet_Landing_Page_Reference",
+    "Worklet_Max_Rows",
+    "Worklet_Help_Text",
+    "Worklet_Icon_Reference",
+    "Refresh_Data_Reference",
+    "Maximized_Custom_Report_Definition_Reference",
+    "Maximized_Worklet_Report_Definition_Reference",
+    "Tenanted_Report_Worklet_Layout_Data",
+)
+
+
+def _strip_self_references(obj: object, source_wid: str) -> int:
+    """Remove references to the object's own source WID, in place.
+
+    A report can point at itself. Confirmed live on `commitconsulting`: the
+    "Monthly Annualized Turnover Calendar YTD Sub-Report" carries five
+    ``Matrix_Measures_Data[n].Matrix_Drilldown_Override_Data.Report_Definition_Reference``
+    entries naming the report itself — clicking a measure drills back into the
+    same report.
+
+    On a CREATE that is unresolvable by construction: the destination object
+    does not exist yet, so there is no WID to remap to and the source WID means
+    nothing there. Workday rejects the whole write with ``Invalid ID value``.
+
+    Keeping the accompanying ``Custom_Report_ID`` instead is not an option —
+    it is returned by the API but rejected as a lookup key (verified on 18/18
+    sampled reports; see CLAUDE.md). Dropping the reference is the only move
+    that lets the report exist at all. The cost is the drill-down override
+    reverting to its default, which is recoverable by hand; the alternative is
+    no report.
+
+    Returns the number of references removed, so the caller can report it.
+    """
+    removed = 0
+    if isinstance(obj, dict):
+        for key, value in list(obj.items()):
+            if isinstance(value, dict) and any(
+                isinstance(entry, dict)
+                and entry.get("type") == "WID"
+                and entry.get("_value_1") == source_wid
+                for entry in (value.get("ID") or [])
+            ):
+                obj.pop(key, None)
+                removed += 1
+                continue
+            removed += _strip_self_references(value, source_wid)
+    elif isinstance(obj, list):
+        for item in obj:
+            removed += _strip_self_references(item, source_wid)
+    return removed
+
+
+def _strip_sharing_and_placement(data: dict) -> None:
+    """Migrate every report unshared and unplaced, in place.
+
+    Two reasons, and the second is the one that actually forces it.
+
+    **Sharing does not survive a tenant hop meaningfully.** The security groups
+    a report is restricted to are tenant-specific: the source's
+    ``HR_Administrator`` is not the destination's, even when both exist. Copying
+    the restriction would either fail or — worse — silently grant a different
+    population than the source intended. Landing the report visible only to its
+    owner is the safe default; whoever adopts it decides who else sees it.
+
+    **These references are a large share of what makes a report unmigratable.**
+    Confirmed live on `commitconsulting` -> `web`: the sub-report carried three
+    ``Restricted_to_Tenanted_Security_Groups_Reference`` entries
+    (``HR_Administrator``, ``HR_Auditor``, ``HR_Executive``) and a
+    ``Worklet_Landing_Page_Reference`` to a custom landing page, none of which
+    exist in the destination. Each is an ``Invalid ID value`` fault.
+
+    Worklet placement is cleared for the same reason sharing is: it is about
+    where the report is exposed, not what it computes, and it points at
+    destination objects (landing pages, icons) that a config migration has no
+    business inventing. ``Shared`` and ``Enable_As_Worklet`` are set to False
+    explicitly rather than removed, so the destination cannot inherit a default
+    that is more permissive than intended.
+    """
+    data["Shared"] = False
+    data["Enable_As_Worklet"] = False
+    for key in _SHARING_FIELDS + _PLACEMENT_FIELDS:
+        data.pop(key, None)
+
+
 def build_report_payload(
     node: Node,
     wid_map: Mapping[str, str],
@@ -217,7 +322,8 @@ def build_report_payload(
     stripped rather than passed through, so the destination assigns its own
     default instead of the write failing on an unresolvable user. Filter
     condition instance references are stripped for the same reason — see
-    :func:`_strip_filter_instance_references`.
+    :func:`_strip_filter_instance_references` — and sharing and worklet
+    placement are cleared by :func:`_strip_sharing_and_placement`.
     """
     data = node.payload.get("Tenanted_Report_Definition_Data")
     if not data:
@@ -227,6 +333,11 @@ def build_report_payload(
 
     remapped = substitute_wids(data, wid_map)
     _strip_filter_instance_references(remapped)
+    _strip_sharing_and_placement(remapped)
+    if action is Action.CREATE:
+        # Only on CREATE: an UPDATE addresses an object that already exists, so
+        # a self-reference there is resolvable and must be left alone.
+        _strip_self_references(remapped, node.source_wid)
 
     if owner_reference is not None:
         remapped["Tenanted_Report_Definition_System_User_Reference"] = owner_reference
@@ -247,12 +358,52 @@ def build_report_payload(
     return payload
 
 
+_OPERATIONS = {
+    NodeKind.REPORT: "Put_Tenanted_Report_Definition",
+    NodeKind.CALCULATED_FIELD: "Put_Calculated_Field",
+    NodeKind.CALCULATED_MEASURE: "Put_Global_Calculated_Measure",
+}
+
+
 def operation_for(node: Node) -> str:
-    return (
-        "Put_Tenanted_Report_Definition"
-        if node.kind is NodeKind.REPORT
-        else "Put_Calculated_Field"
-    )
+    return _OPERATIONS[node.kind]
+
+
+def build_calculated_measure_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+) -> dict:
+    """Arguments for ``Put_Global_Calculated_Measure``.
+
+    Same create/update contract as a calculated field: omit the reference to
+    create, and refuse an UPDATE without the destination's own WID, since a
+    source WID addresses nothing there.
+
+    A measure's payload can reference calculated fields *and* other measures,
+    so ``wid_map`` matters here exactly as much as it does for a field — the
+    measures this one depends on were written first and their destination WIDs
+    are already in the map.
+    """
+    data = node.payload.get("Calculated_Measure_Data")
+    if not data:
+        raise WriteError(f"{node.name!r} has no Calculated_Measure_Data to write.")
+
+    payload: dict = {"Calculated_Measure_Data": substitute_wids(data, wid_map)}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE {node.name!r} without the destination's WID. "
+                "A source WID does not address anything in the destination."
+            )
+        payload["Calculated_Measure_Reference"] = {
+            "ID": [{"type": "WID", "_value_1": dest_wid}]
+        }
+
+    return payload
 
 
 def serialize_envelope(connection: Connection, operation: str, payload: dict) -> str:
@@ -314,13 +465,15 @@ def is_failure(exceptions: list[ExceptionDetail]) -> bool:
     )
 
 
+_RESPONSE_REFERENCE_KEY = {
+    NodeKind.REPORT: "Tenanted_Report_Definition_Reference",
+    NodeKind.CALCULATED_FIELD: "Calculated_Field_Reference",
+    NodeKind.CALCULATED_MEASURE: "Calculated_Measure_Reference",
+}
+
+
 def _reference_wid(response: dict, node: Node) -> str | None:
-    key = (
-        "Tenanted_Report_Definition_Reference"
-        if node.kind is NodeKind.REPORT
-        else "Calculated_Field_Reference"
-    )
-    return ids_of(response.get(key)).get("WID")
+    return ids_of(response.get(_RESPONSE_REFERENCE_KEY[node.kind])).get("WID")
 
 
 def _is_transport_failure(exc: Exception) -> bool:
@@ -378,6 +531,10 @@ def write_node(
                 action=action,
                 owner_reference=owner_reference,
                 dest_wid=dest_wid,
+            )
+        elif node.kind is NodeKind.CALCULATED_MEASURE:
+            payload = build_calculated_measure_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid
             )
         else:
             payload = build_calculated_field_payload(

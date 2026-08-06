@@ -257,6 +257,67 @@ def lookup_calculated_field(
     )
 
 
+def lookup_calculated_measure(
+    connection: Connection,
+    *,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one calculated measure by ``BI_Calculated_Measure_ID`` or WID.
+
+    Measures are never swept into an index the way calculated fields are. A
+    tenant holds a handful of them (9 on the source tenant, 18 on the
+    destination) and they are only ever reached as a dependency of a report
+    that uses one, so a targeted lookup per reference is cheaper than a sweep
+    and cannot go stale mid-run.
+
+    ``BI_Calculated_Measure_ID`` is the cross-tenant identity — the WID is
+    tenant-specific, and measures created by a report PUT get a fresh one.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    ref = (
+        _reference("BI_Calculated_Measure_ID", reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        response = connection.service.Get_Calculated_Measures(
+            Request_References={"Calculated_Measure_Reference": [ref]},
+            Response_Group={
+                "Include_Reference": True,
+                "Include_Calculated_Measure_Data": True,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - classified, never blindly swallowed
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get("Calculated_Measure") or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get("Calculated_Measure_Reference"))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get("BI_Calculated_Measure_ID") or reference_id,
+    )
+
+
 def lookup_report(
     connection: Connection,
     *,
