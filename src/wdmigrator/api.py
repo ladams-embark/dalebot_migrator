@@ -87,6 +87,7 @@ from wdmigrator.discovery import (
     iter_report_index,
     load_index,
     lookup_calculated_field,
+    lookup_calculated_measure,
     lookup_report,
     lookup_report_by_name,
     save_index,
@@ -110,11 +111,13 @@ from wdmigrator.migrate import (
     WriteRecord,
     WriteStatus,
     build_calculated_field_payload,
+    build_calculated_measure_payload,
     build_owner_reference,
     build_plan,
     build_report_payload,
     default_action,
     extract_exceptions,
+    extract_measure_refs,
     extract_reference_id_refs,
     extract_wid_refs,
     is_failure,
@@ -193,6 +196,8 @@ __all__ = [
     "iter_report_index",
     "load_index",
     "lookup_calculated_field",
+    "lookup_calculated_measure",
+    "measure_loader_for",
     "lookup_report",
     "lookup_report_by_name",
     "save_index",
@@ -213,11 +218,13 @@ __all__ = [
     "WriteRecord",
     "WriteStatus",
     "build_calculated_field_payload",
+    "build_calculated_measure_payload",
     "build_owner_reference",
     "build_plan",
     "build_report_payload",
     "default_action",
     "extract_exceptions",
+    "extract_measure_refs",
     "extract_reference_id_refs",
     "extract_wid_refs",
     "is_failure",
@@ -278,6 +285,29 @@ def connect(
     return make_client(target, credentials, role=role, **kwargs)
 
 
+def measure_loader_for(connection: Connection):
+    """A ``wid -> payload`` loader for calculated measures, backed by a tenant.
+
+    Pass to :func:`resolve` to make reports pull in the calculated measures they
+    use. Results are memoised for the life of the loader, including misses — a
+    measure referenced by four columns is fetched once, and a measure that is
+    not there is not re-requested on every reference.
+
+    Measures are fetched rather than indexed on purpose: a tenant holds a
+    handful, and they are only ever reached as a dependency of a report that
+    uses one. See :func:`~wdmigrator.migrate.resolver.resolve_closure`.
+    """
+    cache: dict[str, dict | None] = {}
+
+    def load(wid: str) -> dict | None:
+        if wid not in cache:
+            result = lookup_calculated_measure(connection, wid=wid)
+            cache[wid] = result.data if result.outcome is LookupOutcome.FOUND else None
+        return cache[wid]
+
+    return load
+
+
 def resolve(
     cf_index: Index,
     *,
@@ -285,15 +315,23 @@ def resolve(
     selected_reports: Mapping[str, dict] | None = None,
     expected_index_size: int | None = None,
     allow_partial_index: bool = False,
+    measure_loader=None,
 ) -> Closure:
     """Expand a selection into the full set of objects that must migrate.
 
-    Not a generator, unlike almost everything else in this module — and that
-    is deliberate rather than an inconsistency. ``cf_index`` already holds
-    every calculated field in the source tenant, so classifying a reference as
-    "is this a calculated field" is a free set lookup, not a tenant call. There
-    is nothing here that takes long enough to need progress reporting. See
-    :func:`~wdmigrator.migrate.resolver.resolve_closure` for the full story,
+    Not a generator, unlike almost everything else in this module. ``cf_index``
+    already holds every calculated field in the source tenant, so classifying a
+    reference as "is this a calculated field" is a free set lookup rather than a
+    tenant call.
+
+    The one exception is ``measure_loader``. Calculated measures are not
+    indexed, so if you pass a loader — see :func:`measure_loader_for` — this
+    function will make one targeted call per distinct measure referenced. That
+    is a handful of calls for a typical report, not a sweep, which is why it
+    stays synchronous. Pass nothing and measures are skipped entirely, and
+    resolution makes no tenant calls at all.
+
+    See :func:`~wdmigrator.migrate.resolver.resolve_closure` for the rest,
     including why a partial index is refused unless explicitly overridden.
     """
     return resolve_closure(
@@ -302,4 +340,5 @@ def resolve(
         selected_reports=selected_reports,
         expected_index_size=expected_index_size,
         allow_partial_index=allow_partial_index,
+        measure_loader=measure_loader,
     )

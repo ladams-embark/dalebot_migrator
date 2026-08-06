@@ -15,7 +15,14 @@ from __future__ import annotations
 
 import streamlit as st
 
-from wdmigrator.api import Blocker, CycleError, PartialIndexError, resolve, topological_sort
+from wdmigrator.api import (
+    Blocker,
+    CycleError,
+    PartialIndexError,
+    measure_loader_for,
+    resolve,
+    topological_sort,
+)
 from wdmigrator.ui import theme
 from wdmigrator.ui.state import WizardState, reset_downstream
 
@@ -28,6 +35,10 @@ def _compute(state: WizardState) -> None:
             state.cf_index,
             selected_field_wids=state.selected_field_wids,
             selected_reports=state.selected_reports,
+            # Reports that use calculated measures pull them in as dependencies.
+            # Measures are not indexed, so this makes a targeted source call per
+            # distinct measure — a handful per report, not a sweep.
+            measure_loader=measure_loader_for(state.source.connection),
         )
     except PartialIndexError as exc:
         state.closure = None
@@ -83,6 +94,17 @@ def render(state: WizardState) -> None:
         ]
     )
 
+    if state.closure.unresolved_measure_ids:
+        missing = sorted(state.closure.unresolved_measure_ids)
+        theme.banner(
+            "danger",
+            f"{len(missing)} calculated measure(s) could not be fetched from the source",
+            "A report being migrated uses these, but the source tenant did not "
+            "return them: " + ", ".join(missing[:3])
+            + (f", and {len(missing) - 3} more" if len(missing) > 3 else ""),
+            remedy="Check that the source ISU can call Get_Calculated_Measures.",
+        )
+
     # A payload that names a calculated field by Calculated_Field_Reference_ID
     # states outright that the target IS a calculated field. Not finding it in
     # the source index therefore means a genuinely missing dependency, and a
@@ -129,21 +151,36 @@ def gate(state: WizardState) -> list[Blocker]:
         )
         return blockers
 
-    if state.closure.unresolved_reference_ids:
-        missing = sorted(state.closure.unresolved_reference_ids)
-        blockers.append(
-            Blocker(
-                node_id=None,
-                title=f"{len(missing)} dependency(ies) missing from the source index",
-                detail=(
-                    "Something being migrated names these as calculated fields, but "
-                    f"they are not in the index: {', '.join(missing[:3])}"
-                    + (f" (+{len(missing) - 3} more)" if len(missing) > 3 else "")
-                    + ". Writing an object that references a field the destination "
-                    "does not have will fail."
-                ),
-                remedy="Rebuild the calculated field index, or promote the field(s) to "
-                       "global in Workday if they are report-scoped.",
+    # `validate_plan` checks these too, and is the real backstop for every
+    # caller. Repeating them here is not redundancy: this gate runs before a
+    # plan exists, so the user hears about a missing dependency at Resolve
+    # rather than a step later at Conflicts.
+    for missing, kind, remedy in (
+        (
+            sorted(state.closure.unresolved_reference_ids),
+            "calculated field",
+            "Rebuild the calculated field index, or promote the field to global in "
+            "Workday if it is report-scoped.",
+        ),
+        (
+            sorted(state.closure.unresolved_measure_ids),
+            "calculated measure",
+            "A report-scoped measure cannot be created by this tool — it has to be "
+            "removed from the report, or the report migrated without it.",
+        ),
+    ):
+        if missing:
+            blockers.append(
+                Blocker(
+                    node_id=None,
+                    title=f"{len(missing)} {kind}(s) could not be resolved",
+                    detail=(
+                        f"Something being migrated names these as a {kind}, but they "
+                        f"are not available on the source: {', '.join(missing[:3])}"
+                        + (f" (+{len(missing) - 3} more)" if len(missing) > 3 else "")
+                        + ". Writing an object that references one will fail."
+                    ),
+                    remedy=remedy,
+                )
             )
-        )
     return blockers

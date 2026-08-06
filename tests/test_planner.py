@@ -25,7 +25,7 @@ from wdmigrator.migrate.planner import (
     probe_node,
     validate_plan,
 )
-from wdmigrator.migrate.resolver import NodeKind, node_id_for, resolve_closure
+from wdmigrator.migrate.resolver import Closure, NodeKind, node_id_for, resolve_closure
 
 NOT_FOUND_FAULT = (
     "Validation error occurred. Invalid ID value.  'X' is not a valid ID "
@@ -525,3 +525,35 @@ class TestLiveProbing:
         assert lookup_report_by_name(
             live_source_connection, "WDMIGRATOR No Such Report XYZ 123"
         ).outcome is LookupOutcome.NOT_FOUND
+
+
+class TestUnresolvedDependenciesBlockThePlan:
+    """The check used to live only in the Streamlit Resolve step, so a CLI or a
+    script could build a plan with known-missing dependencies and write it."""
+
+    def test_unresolved_calculated_field_blocks(self):
+        closure = Closure(nodes={}, unresolved_reference_ids={"CF_GONE"})
+        plan = build_plan(closure, {})
+        titles = [b.title for b in validate_plan(plan)]
+        assert any("calculated field(s) could not be resolved" in t for t in titles)
+
+    def test_unresolved_measure_blocks(self):
+        closure = Closure(nodes={}, unresolved_measure_ids={"ARITH-Gone-1"})
+        plan = build_plan(closure, {})
+        blockers = validate_plan(plan)
+        assert any("calculated measure(s) could not be resolved" in b.title for b in blockers)
+        assert any("ARITH-Gone-1" in b.detail for b in blockers)
+
+    def test_a_clean_closure_adds_no_such_blocker(self):
+        closure = Closure(nodes={})
+        plan = build_plan(closure, {})
+        titles = [b.title for b in validate_plan(plan)]
+        assert not any("could not be resolved" in t for t in titles)
+
+    def test_the_ids_are_carried_onto_the_plan(self):
+        closure = Closure(
+            nodes={}, unresolved_reference_ids={"A"}, unresolved_measure_ids={"B"}
+        )
+        plan = build_plan(closure, {})
+        assert plan.unresolved_reference_ids == frozenset({"A"})
+        assert plan.unresolved_measure_ids == frozenset({"B"})

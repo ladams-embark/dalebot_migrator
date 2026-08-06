@@ -34,6 +34,7 @@ from wdmigrator.auth.client import Connection
 from wdmigrator.discovery.inventory import (
     LookupOutcome,
     lookup_calculated_field,
+    lookup_calculated_measure,
     lookup_report_by_name,
 )
 from wdmigrator.migrate.ordering import topological_sort
@@ -98,6 +99,12 @@ class MigrationPlan:
     #: source WID -> destination WID, pre-seeded with objects that already
     #: exist in the destination. Grows as the writer creates things.
     wid_map: dict[str, str] = field(default_factory=dict)
+    #: Carried forward from the closure so `validate_plan` can refuse a plan
+    #: with known-missing dependencies. Without this the check lived only in the
+    #: Streamlit Resolve step, and any other caller — a CLI, a script — would
+    #: happily write objects referencing things that were never resolved.
+    unresolved_reference_ids: frozenset[str] = frozenset()
+    unresolved_measure_ids: frozenset[str] = frozenset()
 
     def action_for(self, node: Node) -> Action:
         return self.actions.get(node.node_id, Action.SKIP)
@@ -157,7 +164,18 @@ def probe_node(connection: Connection, node: Node) -> Existence:
       weaker identity, and a duplicated name resolves to UNKNOWN rather than a
       guess.
     """
-    if node.kind is NodeKind.REPORT:
+    if node.kind is NodeKind.CALCULATED_MEASURE:
+        if not node.reference_id:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Calculated measure has no BI_Calculated_Measure_ID, so it "
+                    "cannot be matched against the destination."
+                ),
+            )
+        result = lookup_calculated_measure(connection, reference_id=node.reference_id)
+    elif node.kind is NodeKind.REPORT:
         result = lookup_report_by_name(connection, node.name or "")
     else:
         if not node.reference_id:
@@ -214,7 +232,12 @@ def build_plan(
     overrides = overrides or {}
     ordered = topological_sort(closure.nodes)
 
-    plan = MigrationPlan(ordered_nodes=ordered, existence=dict(existence))
+    plan = MigrationPlan(
+        ordered_nodes=ordered,
+        existence=dict(existence),
+        unresolved_reference_ids=frozenset(closure.unresolved_reference_ids),
+        unresolved_measure_ids=frozenset(closure.unresolved_measure_ids),
+    )
 
     for node in ordered:
         found = existence.get(node.node_id)
@@ -247,6 +270,39 @@ def validate_plan(plan: MigrationPlan) -> list[Blocker]:
     """
     blockers: list[Blocker] = []
     by_id = {node.node_id: node for node in plan.ordered_nodes}
+
+    # Dependencies the closure could not account for. Unlike an unmatched WID —
+    # usually a delivered object passing through — these were named outright as
+    # calculated fields or measures, so a write referencing one will fail.
+    for missing, kind, remedy in (
+        (
+            sorted(plan.unresolved_reference_ids),
+            "calculated field",
+            "Rebuild the calculated field index, or promote the field to global "
+            "in Workday if it is report-scoped.",
+        ),
+        (
+            sorted(plan.unresolved_measure_ids),
+            "calculated measure",
+            "Confirm the source ISU can call Get_Calculated_Measures. A "
+            "report-scoped measure cannot be created by this tool and must be "
+            "removed from the report.",
+        ),
+    ):
+        if missing:
+            blockers.append(
+                Blocker(
+                    node_id=None,
+                    title=f"{len(missing)} {kind}(s) could not be resolved",
+                    detail=(
+                        "Something being written names these as a "
+                        f"{kind}, but they are not available on the source: "
+                        + ", ".join(missing[:3])
+                        + (f" (+{len(missing) - 3} more)" if len(missing) > 3 else "")
+                    ),
+                    remedy=remedy,
+                )
+            )
 
     for node in plan.ordered_nodes:
         found = plan.existence.get(node.node_id)

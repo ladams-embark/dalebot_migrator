@@ -11,6 +11,7 @@ import pytest
 from wdmigrator.migrate.ordering import (
     CycleError,
     build_dag,
+    extract_measure_refs,
     extract_reference_id_refs,
     extract_wid_refs,
     substitute_wids,
@@ -281,3 +282,50 @@ class TestExtractReferenceIdRefs:
             "Business_Object_Field_Add_or_Reference_Data"
         ]["Business_Object_Field"][0]
         assert block["Calculated_Field_Reference_ID"] == "NESTED"
+
+
+class TestExtractMeasureRefs:
+    """Measure references are identified by their ID TYPE, not element name.
+
+    The same measure is reached through at least three differently-named
+    elements — Summary_Calculation_Reference, Matrix_Measure__All__Reference,
+    Calculated_Measure_Reference — so a name-based list would miss whichever
+    one nobody thought of.
+    """
+
+    def measure_ref(self, wid, business_id):
+        return {"ID": [
+            {"type": "WID", "_value_1": wid},
+            {"type": "BI_Calculated_Measure_ID", "_value_1": business_id},
+        ]}
+
+    def test_finds_a_measure_under_any_element_name(self):
+        payload = {
+            "Summary_Calculation_Reference": self.measure_ref("W1", "M1"),
+            "Matrix_Measure__All__Reference": self.measure_ref("W2", "M2"),
+            "Calculated_Measure_Reference": self.measure_ref("W3", "M3"),
+        }
+        assert extract_measure_refs(payload) == {"W1": "M1", "W2": "M2", "W3": "M3"}
+
+    def test_returns_wid_to_business_id(self):
+        payload = {"X": self.measure_ref("W1", "ARITH-Turnover-1")}
+        assert extract_measure_refs(payload) == {"W1": "ARITH-Turnover-1"}
+
+    def test_ignores_references_with_no_business_id(self):
+        """Nothing to match on in the destination, so not a resolvable dependency."""
+        payload = {"X": {"ID": [{"type": "WID", "_value_1": "W1"}]}}
+        assert extract_measure_refs(payload) == {}
+
+    def test_ignores_non_measure_references(self):
+        payload = {"X": {"ID": [
+            {"type": "WID", "_value_1": "W1"},
+            {"type": "Calculated_Field_ID", "_value_1": "CF_A"},
+        ]}}
+        assert extract_measure_refs(payload) == {}
+
+    def test_finds_measures_nested_in_lists(self):
+        payload = {"A": [{"B": [{"C": self.measure_ref("W9", "M9")}]}]}
+        assert extract_measure_refs(payload) == {"W9": "M9"}
+
+    def test_empty_payload_yields_nothing(self):
+        assert extract_measure_refs({}) == {}

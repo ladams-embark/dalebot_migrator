@@ -19,7 +19,7 @@ from wdmigrator.auth.client import Role
 from wdmigrator.config.targets import target_from_parts
 from wdmigrator.discovery.inventory import CalculatedFieldSummary, Index, LookupOutcome
 from wdmigrator.migrate.planner import Action, Existence, build_plan
-from wdmigrator.migrate.resolver import NodeKind, node_id_for, resolve_closure
+from wdmigrator.migrate.resolver import Node, NodeKind, node_id_for, resolve_closure
 from wdmigrator.migrate.writer import (
     ExceptionDetail,
     WriteError,
@@ -670,3 +670,147 @@ class TestNoLiveTestsExist:
             "the write path must never be exercised against a real tenant: "
             f"{offenders}"
         )
+
+
+class TestSharingAndPlacementAreStripped:
+    """A migrated report lands visible only to its owner and placed nowhere.
+
+    Security groups are tenant-specific — the source's HR_Administrator is not
+    the destination's — so copying a restriction either fails or silently grants
+    a different population. Confirmed live: these references were three of the
+    blockers stopping a real sub-report from migrating.
+    """
+
+    def report_node_with_sharing(self):
+        return Node(
+            node_id="report:R1",
+            kind=NodeKind.REPORT,
+            source_wid="R1",
+            reference_id="RPT",
+            name="Shared report",
+            payload={
+                "Tenanted_Report_Definition_Data": {
+                    "Name": "Shared report",
+                    "Shared": True,
+                    "Enable_As_Worklet": True,
+                    "Restricted_to_Tenanted_Security_Groups_Reference": [
+                        {"ID": [{"type": "Tenant_Security_Group_ID",
+                                 "_value_1": "HR_Administrator"}]}
+                    ],
+                    "Restricted_to_Metadata_Security_Groups_Reference": [{"ID": []}],
+                    "Restricted_to_System_User_Reference": {"ID": []},
+                    "Worklet_Landing_Page_Reference": {
+                        "ID": [{"type": "Custom_Landing_Page_Group_ID",
+                                "_value_1": "Monthly HR Executive Overview"}]
+                    },
+                    "Worklet_Icon_Reference": {"ID": []},
+                    "Worklet_Help_Text": "help",
+                }
+            },
+        )
+
+    def payload(self):
+        return build_report_payload(
+            self.report_node_with_sharing(), {}, action=Action.CREATE
+        )["Tenanted_Report_Definition_Data"]
+
+    def test_shared_is_forced_false(self):
+        assert self.payload()["Shared"] is False
+
+    def test_worklet_is_disabled(self):
+        assert self.payload()["Enable_As_Worklet"] is False
+
+    def test_every_restriction_reference_is_removed(self):
+        data = self.payload()
+        for key in (
+            "Restricted_to_Tenanted_Security_Groups_Reference",
+            "Restricted_to_Metadata_Security_Groups_Reference",
+            "Restricted_to_System_User_Reference",
+        ):
+            assert key not in data
+
+    def test_worklet_placement_references_are_removed(self):
+        data = self.payload()
+        for key in (
+            "Worklet_Landing_Page_Reference",
+            "Worklet_Icon_Reference",
+            "Worklet_Help_Text",
+        ):
+            assert key not in data
+
+    def test_flags_are_set_rather_than_removed(self):
+        """Removing them could let the destination apply a more permissive
+        default; False states the intent."""
+        data = self.payload()
+        assert "Shared" in data and "Enable_As_Worklet" in data
+
+    def test_the_source_payload_is_not_mutated(self):
+        node = self.report_node_with_sharing()
+        build_report_payload(node, {}, action=Action.CREATE)
+        original = node.payload["Tenanted_Report_Definition_Data"]
+        assert original["Shared"] is True
+        assert "Worklet_Landing_Page_Reference" in original
+
+    def test_report_content_survives(self):
+        assert self.payload()["Name"] == "Shared report"
+
+
+class TestSelfReferencesAreStrippedOnCreate:
+    """A report can point at itself — matrix drill-down overrides do it — and on
+    a CREATE that is unresolvable: the destination object does not exist yet."""
+
+    def _node(self, wid="R1"):
+        return Node(
+            node_id=f"report:{wid}",
+            kind=NodeKind.REPORT,
+            source_wid=wid,
+            reference_id="RPT",
+            name="Self referencing report",
+            payload={
+                "Tenanted_Report_Definition_Data": {
+                    "Name": "Self referencing report",
+                    "Matrix_Measures_Data": [
+                        {"Matrix_Drilldown_Override_Data": {
+                            "Report_Definition_Reference": {"ID": [
+                                {"type": "WID", "_value_1": wid},
+                                {"type": "Custom_Report_ID", "_value_1": "RPT"},
+                            ]}
+                        }},
+                        {"Matrix_Drilldown_Override_Data": {
+                            "Report_Definition_Reference": {"ID": [
+                                {"type": "WID", "_value_1": "OTHER"},
+                            ]}
+                        }},
+                    ],
+                }
+            },
+        )
+
+    def _built(self, action=Action.CREATE, **kw):
+        return build_report_payload(self._node(), {}, action=action, **kw)[
+            "Tenanted_Report_Definition_Data"
+        ]
+
+    def test_self_reference_is_removed(self):
+        block = self._built()["Matrix_Measures_Data"][0]["Matrix_Drilldown_Override_Data"]
+        assert "Report_Definition_Reference" not in block
+
+    def test_a_reference_to_a_different_report_survives(self):
+        """Only the object's OWN wid is unresolvable — others may well exist."""
+        block = self._built()["Matrix_Measures_Data"][1]["Matrix_Drilldown_Override_Data"]
+        assert block["Report_Definition_Reference"]["ID"][0]["_value_1"] == "OTHER"
+
+    def test_update_keeps_self_references(self):
+        """An UPDATE addresses an object that already exists, so a self
+        reference there resolves fine."""
+        block = self._built(action=Action.UPDATE, dest_wid="DEST")[
+            "Matrix_Measures_Data"
+        ][0]["Matrix_Drilldown_Override_Data"]
+        assert "Report_Definition_Reference" in block
+
+    def test_the_source_payload_is_not_mutated(self):
+        node = self._node()
+        build_report_payload(node, {}, action=Action.CREATE)
+        original = node.payload["Tenanted_Report_Definition_Data"]
+        block = original["Matrix_Measures_Data"][0]["Matrix_Drilldown_Override_Data"]
+        assert "Report_Definition_Reference" in block
