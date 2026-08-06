@@ -12,23 +12,22 @@ from __future__ import annotations
 
 import streamlit as st
 
+import pandas as pd
+
 from wdmigrator.api import (
     Blocker,
     GuardViolation,
     ReferenceAction,
     ReferenceDecision,
+    build_plan,
     find_reference_sites,
+    iter_check_existence,
     iter_execute,
 )
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.runner import pump, start_job
-from wdmigrator.ui.state import (
-    WizardState,
-    build_guard,
-    owner_reference,
-    reset_downstream,
-)
+from wdmigrator.ui.state import WizardState, build_guard, owner_reference
 
 STEP_ID = "execute"
 
@@ -36,9 +35,9 @@ STEP_ID = "execute"
 def _blocked_record(state: WizardState):
     """The failed record naming a reference the destination could not resolve.
 
-    Only ``Invalid ID value`` faults produce one — a schema error or an
-    entitlement problem is not fixable by substituting a reference, and must not
-    be offered as though it were.
+    Only ``Invalid ID value`` faults and exceptions produce one — a schema error
+    or an entitlement problem is not fixable by substituting a reference, and
+    must not be offered as though it were.
     """
     for record in reversed(state.execute_records):
         if record.blocking_reference is not None:
@@ -46,104 +45,197 @@ def _blocked_record(state: WizardState):
     return None
 
 
-def _render_reference_resolution(state: WizardState, record) -> None:
-    """Ask what to do about one unresolvable reference, then retry.
+def _collect_blockers(state: WizardState) -> None:
+    """Fold any newly-discovered unresolvable reference into the running table.
 
-    Fault-driven rather than pre-flight on purpose: a real report carries ~90
-    references the tool does not migrate, and almost all of them are delivered
-    objects that pass through fine. Asking about all of them would bury the
-    handful that actually break. Workday names the offending identifier in the
-    fault, so this asks about exactly that one.
+    Workday reports one bad reference per attempt, so the full set only emerges
+    over several. Accumulating means the table grows into the complete picture
+    instead of flickering between single rows, and a decision already made is
+    never asked about twice.
     """
-    blocking = record.blocking_reference
-    node = next(
-        (n for n in state.plan.ordered_nodes if n.node_id == record.node_id), None
-    )
-    sites = find_reference_sites(node, blocking.value) if node is not None else []
+    for record in state.execute_records:
+        blocking = record.blocking_reference
+        if blocking is None or blocking.value in state.blocking_references:
+            continue
+        node = next(
+            (n for n in state.plan.ordered_nodes if n.node_id == record.node_id), None
+        )
+        sites = find_reference_sites(node, blocking.value) if node is not None else []
+        business = {}
+        for site in sites:
+            for id_type, id_value in site.ids.items():
+                if id_type != "WID":
+                    business[id_type] = id_value
+        state.blocking_references[blocking.value] = {
+            "reference": blocking,
+            "node_name": record.name or record.node_id,
+            "elements": sorted({s.element for s in sites}),
+            "business": business,
+        }
 
+
+def _decision_rows(state: WizardState) -> list:
+    rows = []
+    for value, info in state.blocking_references.items():
+        existing = state.reference_decisions.get(value)
+        business_type = next(iter(info["business"]), "")
+        rows.append({
+            "Object": info["node_name"],
+            "Where": ", ".join(info["elements"]) or "(not located)",
+            "Identified as": ", ".join(
+                f"{k} = {v}" for k, v in info["business"].items()
+            ) or info["reference"].id_type,
+            "Decision": (
+                existing.action.value if existing else ReferenceAction.BLANK.value
+            ),
+            "Replacement ID type": (
+                (existing.replacement_type if existing else None) or business_type
+            ),
+            "Replacement value": (
+                (existing.replacement_value if existing else None) or ""
+            ),
+            "_wid": value,
+        })
+    return rows
+
+
+def _apply_decisions(state: WizardState, rows: list, edited) -> None:
+    """Fold the edited table back into decisions.
+
+    Rows are matched to their source WID **positionally**, against the list the
+    table was built from, rather than by reading a hidden ``_wid`` column back
+    out of the editor. Whether a column hidden through ``column_config`` still
+    appears in the returned frame is a Streamlit implementation detail, and
+    depending on it would fail silently — every decision would land on the wrong
+    reference, or raise a KeyError. Row order is guaranteed; that is enough.
+    """
+    for row, source in zip(edited.to_dict("records"), rows):
+        action = ReferenceAction(row["Decision"])
+        if action is ReferenceAction.REPLACE and not (
+            row["Replacement ID type"] and row["Replacement value"]
+        ):
+            continue  # incomplete; the submit button is gated on these
+        state.reference_decisions[source["_wid"]] = ReferenceDecision(
+            source_wid=source["_wid"],
+            action=action,
+            replacement_type=row["Replacement ID type"] or None,
+            replacement_value=row["Replacement value"] or None,
+        )
+
+
+def _start_reprobe(state: WizardState) -> None:
+    state.reprobe_job = start_job(
+        iter_check_existence(state.dest.connection, state.closure)
+    )
+    state.execute_records = []
+    state.execute_job = None
+
+
+def _pump_reprobe(state: WizardState) -> None:
+    """Re-probe in place, then rebuild the plan carrying the new decisions.
+
+    Re-probing is not optional: objects written before the failure now exist,
+    and without a fresh probe they would be planned as CREATE and written a
+    second time. Doing it here rather than sending the user back to Conflicts
+    is the only change — the safety property is identical.
+    """
+    job = state.reprobe_job
+    pump(job, time_budget=0.8)
+    last = job.last_event
+    render_job_progress(
+        job,
+        label="Re-checking the destination",
+        fraction=last.fraction if last is not None else 0.0,
+    )
+
+    if job.error is not None:
+        state.reprobe_job = None
+        return
+    if not job.done:
+        st.rerun()
+        return
+
+    existence = {p.node.node_id: p.existence for p in job.events}
+    state.plan = build_plan(
+        state.closure,
+        existence,
+        overrides=state.action_overrides,
+        reference_decisions=state.reference_decisions,
+    )
+    # The mapping table IS the review of this change. A decision alters the
+    # payload and therefore the plan hash, which would otherwise invalidate the
+    # dry-run approval and force the entire Confirm gate again for every single
+    # reference. Re-stamping here says: the user saw exactly what changed, in a
+    # table, and authorised it. Everything else the guard checks — tenant name
+    # retyped, irreversibility acknowledged, both sides verified, destination a
+    # safe environment — is untouched and still has to hold.
+    state.dry_run_plan_hash = state.plan.plan_hash()
+    state.reprobe_job = None
+    st.rerun()
+
+
+def _render_reference_resolution(state: WizardState) -> None:
+    """One table for every unresolvable reference found so far.
+
+    Fault-driven rather than pre-flight: a real report carries ~90 references
+    the tool does not migrate and almost all are delivered objects that pass
+    through fine, so triaging all of them would bury the handful that break.
+    Workday names the offending identifier, so only those appear here.
+    """
     theme.section(
-        "Unresolvable reference",
-        f"{record.name!r} could not be written because the destination has no "
-        f"object matching this {blocking.id_type}.",
+        "References the destination cannot resolve",
+        "These point at tenant data rather than configuration — a prompt default, "
+        "a filter value, a matrix pointer. They cannot be migrated, so each needs "
+        "a decision. Blanking drops the value; the object still migrates.",
         eyebrow="Needs a decision",
     )
-    theme.card(
-        blocking.id_type,
-        meta=blocking.value,
-        note=(f"Appears at {len(sites)} place(s) in this object."
-              if sites else "Not located in this object's payload."),
+
+    rows = _decision_rows(state)
+    edited = st.data_editor(
+        pd.DataFrame(rows).drop(columns=["_wid"]),
+        hide_index=True,
+        use_container_width=True,
+        disabled=["Object", "Where", "Identified as"],
+        column_config={
+            "Decision": st.column_config.SelectboxColumn(
+                options=[a.value for a in ReferenceAction], required=True,
+            ),
+            "Replacement ID type": st.column_config.TextColumn(
+                help="Only used when the decision is 'replace' — e.g. "
+                     "Organization_Reference_ID."
+            ),
+            "Replacement value": st.column_config.TextColumn(
+                help="The identifier in the DESTINATION tenant. There is no "
+                     "generic way for this tool to list candidates, so look it "
+                     "up in Workday."
+            ),
+        },
+        key="reference_decision_table",
     )
 
-    if sites:
-        others = {}
-        for site in sites:
-            for id_type, value in site.ids.items():
-                if id_type != "WID":
-                    others[id_type] = value
-        st.caption("Where it appears: " + ", ".join(
-            sorted({s.element for s in sites})
-        ))
-        if others:
-            st.caption("Also identified as: " + ", ".join(
-                f"`{k}` = {v}" for k, v in others.items()
-            ))
-
-    choice = st.radio(
-        "What should this reference become?",
-        ["Leave it blank", "Point it at something else"],
-        key=f"refdec_choice_{blocking.value}",
-        help="Blanking drops the value — a prompt default disappears, a filter "
-             "loses its comparison value. The object still migrates.",
-    )
-
-    replacement_type = replacement_value = None
-    if choice == "Point it at something else":
-        cols = st.columns(2)
-        with cols[0]:
-            replacement_type = st.text_input(
-                "ID type",
-                value=next(iter(k for k in (
-                    t for s in sites for t in s.ids if t != "WID"
-                )), ""),
-                key=f"refdec_type_{blocking.value}",
-                help="e.g. Organization_Reference_ID",
-            )
-        with cols[1]:
-            replacement_value = st.text_input(
-                "ID value in the destination",
-                key=f"refdec_value_{blocking.value}",
-                help="Look this up in the destination tenant — there is no "
-                     "generic way for this tool to list candidates.",
-            )
-
-    ready = choice == "Leave it blank" or (replacement_type and replacement_value)
-    if st.button("Apply and re-check destination",
-                 key=f"refdec_apply_{blocking.value}",
-                 type="primary", disabled=not ready):
-        state.reference_decisions[blocking.value] = ReferenceDecision(
-            source_wid=blocking.value,
-            action=(ReferenceAction.BLANK if choice == "Leave it blank"
-                    else ReferenceAction.REPLACE),
-            replacement_type=replacement_type or None,
-            replacement_value=replacement_value or None,
+    incomplete = [
+        r["Object"] for r in edited.to_dict("records")
+        if r["Decision"] == ReferenceAction.REPLACE.value
+        and not (r["Replacement ID type"] and r["Replacement value"])
+    ]
+    if incomplete:
+        theme.banner(
+            "warning",
+            f"{len(incomplete)} row(s) set to replace with no value",
+            "Fill in both the ID type and the value, or set those rows back to blank.",
         )
-        # Back to Conflicts, deliberately, rather than retrying in place.
-        # Two reasons, both safety: the decision changes the payload and
-        # therefore the plan hash, which invalidates the reviewed dry run
-        # exactly as a Conflicts override does; and objects written before the
-        # failure need a fresh probe so they come back as SKIP instead of being
-        # written a second time.
-        reset_downstream(state, from_step="conflicts")
+
+    if st.button("Apply and re-check destination", key="refdec_apply",
+                 type="primary", disabled=bool(incomplete)):
+        _apply_decisions(state, rows, edited)
+        _start_reprobe(state)
         st.rerun()
 
     st.caption(
-        "Applying a decision returns you to Conflicts to re-probe. Objects already "
-        "written come back as SKIP, and the changed payload needs a fresh dry run "
-        "before it can go live — the same rule an action override follows."
+        "Re-checking picks up anything already written so it is skipped rather than "
+        "written twice. Your other approvals stay in place — you can start execution "
+        "again straight afterwards."
     )
-    if state.reference_decisions:
-        st.caption(f"{len(state.reference_decisions)} decision(s) recorded so far. "
-                   "They survive re-probing and are covered by the plan hash.")
 
 
 def _start(state: WizardState) -> None:
@@ -168,9 +260,21 @@ def render(state: WizardState) -> None:
         theme.banner("danger", "No plan", remedy="Go back to Conflicts.")
         return
 
+    # A re-probe kicked off from the mapping table owns the page while it runs.
+    if state.reprobe_job is not None:
+        _pump_reprobe(state)
+        return
+
+    _collect_blockers(state)
     job = state.execute_job
 
     if job is None and not state.execute_records:
+        # The table outlives a failed attempt: decisions already made stay
+        # visible and editable, so a second reference does not hide the first.
+        if state.blocking_references:
+            _render_reference_resolution(state)
+            st.divider()
+
         theme.figures(
             [("Objects to write", state.plan.writes_planned)], tones={"Objects to write": "write"}
         )
@@ -247,10 +351,9 @@ def render(state: WizardState) -> None:
             st.rerun()
         return
 
-    blocked = _blocked_record(state)
-    if blocked is not None:
+    if state.blocking_references:
         st.divider()
-        _render_reference_resolution(state, blocked)
+        _render_reference_resolution(state)
         return
 
     theme.banner(
