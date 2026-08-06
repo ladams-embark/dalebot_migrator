@@ -20,6 +20,7 @@ from wdmigrator.api import (
     CycleError,
     PartialIndexError,
     measure_loader_for,
+    report_loader_for,
     resolve,
     topological_sort,
 )
@@ -39,6 +40,9 @@ def _compute(state: WizardState) -> None:
             # Measures are not indexed, so this makes a targeted source call per
             # distinct measure — a handful per report, not a sweep.
             measure_loader=measure_loader_for(state.source.connection),
+            # Composite reports render sub-reports, which must exist in the
+            # destination first. Same on-demand contract as measures.
+            report_loader=report_loader_for(state.source.connection),
         )
     except PartialIndexError as exc:
         state.closure = None
@@ -167,6 +171,12 @@ def gate(state: WizardState) -> list[Blocker]:
             "calculated measure",
             "A report-scoped measure cannot be created by this tool — it has to be "
             "removed from the report, or the report migrated without it.",
+        ),
+        (
+            sorted(state.closure.unresolved_report_ids),
+            "sub-report",
+            "Check the source ISU can read the sub-report. A composite cannot "
+            "render a sub-report the destination does not have.",
         ),
     ):
         if missing:

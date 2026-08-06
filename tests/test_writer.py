@@ -18,9 +18,19 @@ from zeep.exceptions import Fault
 from wdmigrator.auth.client import Role
 from wdmigrator.config.targets import target_from_parts
 from wdmigrator.discovery.inventory import CalculatedFieldSummary, Index, LookupOutcome
-from wdmigrator.migrate.planner import Action, Existence, build_plan
+from wdmigrator.migrate.planner import (
+    Action,
+    Existence,
+    MigrationPlan,
+    ReferenceAction,
+    ReferenceDecision,
+    build_plan,
+)
 from wdmigrator.migrate.resolver import Node, NodeKind, node_id_for, resolve_closure
 from wdmigrator.migrate.writer import (
+    _defer_summary_calculations,
+    find_reference_sites,
+    parse_blocking_reference,
     ExceptionDetail,
     WriteError,
     WriteStatus,
@@ -814,3 +824,239 @@ class TestSelfReferencesAreStrippedOnCreate:
         original = node.payload["Tenanted_Report_Definition_Data"]
         block = original["Matrix_Measures_Data"][0]["Matrix_Drilldown_Override_Data"]
         assert "Report_Definition_Reference" in block
+
+
+class TestSummaryCalculationsAreDeferred:
+    """Workday refuses a Summary_Calculation_Reference on the write that CREATES
+    the report, and accepts the identical payload once it exists. Confirmed
+    live — an ordering rule, not a validity one. Without deferring, a matrix
+    report migrates looking complete while silently losing every measure."""
+
+    def _payload(self, with_refs=True):
+        ref = {"ID": [{"type": "WID", "_value_1": "M1"},
+                      {"type": "BI_Calculated_Measure_ID", "_value_1": "ARITH-1"}]}
+        measure = {"Order": "a"}
+        if with_refs:
+            measure["Summary_Calculation_Reference"] = ref
+        return {
+            "Tenanted_Report_Definition_Data": {
+                "Name": "Matrix report",
+                "Matrix_Measures_Data": [measure, {"Order": "b"}],
+            }
+        }
+
+    def test_references_are_removed_from_the_first_write(self):
+        payload = self._payload()
+        _defer_summary_calculations(payload)
+        measure = payload["Tenanted_Report_Definition_Data"]["Matrix_Measures_Data"][0]
+        assert "Summary_Calculation_Reference" not in measure
+
+    def test_the_deferred_copy_keeps_them(self):
+        payload = self._payload()
+        deferred = _defer_summary_calculations(payload)
+        measure = deferred["Tenanted_Report_Definition_Data"]["Matrix_Measures_Data"][0]
+        assert measure["Summary_Calculation_Reference"]["ID"][0]["_value_1"] == "M1"
+
+    def test_everything_else_survives_the_first_write(self):
+        payload = self._payload()
+        _defer_summary_calculations(payload)
+        data = payload["Tenanted_Report_Definition_Data"]
+        assert data["Name"] == "Matrix report"
+        assert len(data["Matrix_Measures_Data"]) == 2
+        assert data["Matrix_Measures_Data"][0]["Order"] == "a"
+
+    def test_a_report_without_measures_defers_nothing(self):
+        """The common case — only matrix reports carry these, and a needless
+        second write would double the traffic for every report."""
+        payload = self._payload(with_refs=False)
+        assert _defer_summary_calculations(payload) is None
+
+    def test_a_non_report_payload_defers_nothing(self):
+        assert _defer_summary_calculations({"Calculated_Field_Data": {}}) is None
+
+    def test_nested_references_are_all_found(self):
+        payload = {
+            "Tenanted_Report_Definition_Data": {
+                "A": [{"B": {"Summary_Calculation_Reference": {"ID": []}}}],
+                "C": {"Summary_Calculation_Reference": {"ID": [{"_value_1": "x"}]}},
+            }
+        }
+        deferred = _defer_summary_calculations(payload)
+        assert deferred is not None
+        data = payload["Tenanted_Report_Definition_Data"]
+        assert "Summary_Calculation_Reference" not in data["C"]
+        assert "Summary_Calculation_Reference" not in data["A"][0]["B"]
+
+
+class TestBlockingReferenceParsing:
+    """The fault names the offending identifier; that is what makes the guided
+    resolution loop possible at all — the user is asked about exactly the
+    reference that broke, not the ~89 un-migrated references a real report
+    carries, almost all of which pass through fine."""
+
+    def test_parses_a_wid_fault(self):
+        fault = ("Validation error occurred. Invalid ID value.  "
+                 "'17c5d82e3e801001734fc9c785360000' is not a valid ID value "
+                 "for type = 'WID'")
+        ref = parse_blocking_reference(fault)
+        assert ref.value == "17c5d82e3e801001734fc9c785360000"
+        assert ref.id_type == "WID"
+
+    def test_parses_a_business_id_fault(self):
+        fault = ("Validation error occurred. Invalid ID value.  'TOP' is not a "
+                 "valid ID value for type = 'Organization_Reference_ID'")
+        ref = parse_blocking_reference(fault)
+        assert ref.value == "TOP"
+        assert ref.id_type == "Organization_Reference_ID"
+
+    def test_other_faults_are_not_misread_as_resolvable(self):
+        """A schema or entitlement problem cannot be fixed by substituting a
+        reference, so it must not be offered as though it could."""
+        for fault in (
+            "Validation error occurred. The entered information does not meet "
+            "the restrictions defined for this field. (Summary_Calculation_Reference).",
+            "Processing error occurred. The task submitted is not authorized.",
+            "invalid username or password",
+        ):
+            assert parse_blocking_reference(fault) is None
+
+    def test_no_fault_is_none(self):
+        assert parse_blocking_reference(None) is None
+        assert parse_blocking_reference("") is None
+
+
+class TestReferenceDecisions:
+    def _node(self):
+        return Node(
+            node_id="report:R1", kind=NodeKind.REPORT, source_wid="R1",
+            reference_id="RPT", name="R",
+            payload={"Tenanted_Report_Definition_Data": {
+                "Name": "R",
+                "Tenanted_Report_Parameter_Options_Data": [
+                    {"Abstract_Value_Data": [
+                        {"Instance_Reference": {"ID": [
+                            {"type": "WID", "_value_1": "ORG_WID"},
+                            {"type": "Organization_Reference_ID", "_value_1": "TOP"},
+                        ]}}
+                    ]}
+                ],
+            }},
+        )
+
+    def _build(self, decision):
+        return build_report_payload(
+            self._node(), {}, action=Action.CREATE,
+            reference_decisions={"ORG_WID": decision} if decision else None,
+        )["Tenanted_Report_Definition_Data"]
+
+    def _instance(self, data):
+        return data["Tenanted_Report_Parameter_Options_Data"][0][
+            "Abstract_Value_Data"
+        ][0].get("Instance_Reference")
+
+    def test_blank_removes_the_reference(self):
+        data = self._build(ReferenceDecision("ORG_WID", ReferenceAction.BLANK))
+        assert self._instance(data) is None
+
+    def test_replace_swaps_in_the_chosen_identifier(self):
+        data = self._build(ReferenceDecision(
+            "ORG_WID", ReferenceAction.REPLACE,
+            replacement_type="Organization_Reference_ID",
+            replacement_value="DEST_ORG",
+        ))
+        assert self._instance(data)["ID"] == [
+            {"type": "Organization_Reference_ID", "_value_1": "DEST_ORG"}
+        ]
+
+    def test_no_decision_leaves_the_reference_alone(self):
+        data = self._build(None)
+        assert self._instance(data)["ID"][0]["_value_1"] == "ORG_WID"
+
+    def test_replace_without_a_value_is_refused_at_construction(self):
+        with pytest.raises(ValueError, match="replacement_type"):
+            ReferenceDecision("W", ReferenceAction.REPLACE)
+
+    def test_find_reference_sites_reports_where_and_what(self):
+        sites = find_reference_sites(self._node(), "ORG_WID")
+        assert len(sites) == 1
+        assert sites[0].element == "Instance_Reference"
+        assert sites[0].ids["Organization_Reference_ID"] == "TOP"
+
+    def test_a_decision_changes_the_plan_hash(self):
+        """So a dry run reviewed before the decision cannot authorise it."""
+        plan = MigrationPlan(ordered_nodes=[], actions={})
+        before = plan.plan_hash()
+        plan.reference_decisions["ORG_WID"] = ReferenceDecision(
+            "ORG_WID", ReferenceAction.BLANK
+        )
+        assert plan.plan_hash() != before
+
+
+class TestReferenceDecisionsOnRepeatingReferences:
+    """Several references are a LIST of reference dicts rather than one dict.
+    Instance_Reference — the case this feature exists for — is one of them, and
+    a matcher written only for the single-dict shape silently does nothing."""
+
+    def _node(self, decided_wid="ORG_WID"):
+        return Node(
+            node_id="report:R1", kind=NodeKind.REPORT, source_wid="R1",
+            reference_id="RPT", name="R",
+            payload={"Tenanted_Report_Definition_Data": {
+                "Name": "R",
+                "Abstract_Value_Data": [{
+                    "Instance_Reference": [
+                        {"ID": [
+                            {"type": "WID", "_value_1": decided_wid},
+                            {"type": "Organization_Reference_ID", "_value_1": "TOP"},
+                        ]},
+                        {"ID": [{"type": "WID", "_value_1": "KEEP_ME"}]},
+                    ]
+                }],
+            }},
+        )
+
+    def _build(self, decision):
+        return build_report_payload(
+            self._node(), {}, action=Action.CREATE,
+            reference_decisions={"ORG_WID": decision},
+        )["Tenanted_Report_Definition_Data"]
+
+    def _refs(self, data):
+        return data["Abstract_Value_Data"][0].get("Instance_Reference")
+
+    def test_blank_removes_only_the_decided_entry(self):
+        data = self._build(ReferenceDecision("ORG_WID", ReferenceAction.BLANK))
+        refs = self._refs(data)
+        assert len(refs) == 1
+        assert refs[0]["ID"][0]["_value_1"] == "KEEP_ME"
+
+    def test_replace_rewrites_only_the_decided_entry(self):
+        data = self._build(ReferenceDecision(
+            "ORG_WID", ReferenceAction.REPLACE,
+            replacement_type="Organization_Reference_ID", replacement_value="DEST",
+        ))
+        refs = self._refs(data)
+        assert refs[0]["ID"] == [
+            {"type": "Organization_Reference_ID", "_value_1": "DEST"}
+        ]
+        assert refs[1]["ID"][0]["_value_1"] == "KEEP_ME"
+
+    def test_the_key_is_dropped_when_nothing_survives(self):
+        node = Node(
+            node_id="report:R1", kind=NodeKind.REPORT, source_wid="R1",
+            reference_id="RPT", name="R",
+            payload={"Tenanted_Report_Definition_Data": {
+                "Abstract_Value_Data": [{
+                    "Instance_Reference": [
+                        {"ID": [{"type": "WID", "_value_1": "ORG_WID"}]}
+                    ]
+                }],
+            }},
+        )
+        data = build_report_payload(
+            node, {}, action=Action.CREATE,
+            reference_decisions={
+                "ORG_WID": ReferenceDecision("ORG_WID", ReferenceAction.BLANK)
+            },
+        )["Tenanted_Report_Definition_Data"]
+        assert "Instance_Reference" not in data["Abstract_Value_Data"][0]

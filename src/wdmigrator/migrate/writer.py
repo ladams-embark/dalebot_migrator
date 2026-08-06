@@ -33,6 +33,8 @@ do here.
 
 from __future__ import annotations
 
+import copy
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -44,7 +46,12 @@ from zeep.helpers import serialize_object
 from wdmigrator.auth.client import Connection, Role
 from wdmigrator.discovery.inventory import ids_of
 from wdmigrator.migrate.ordering import substitute_wids
-from wdmigrator.migrate.planner import Action, MigrationPlan
+from wdmigrator.migrate.planner import (
+    Action,
+    MigrationPlan,
+    ReferenceAction,
+    ReferenceDecision,
+)
 from wdmigrator.migrate.resolver import Node, NodeKind
 from wdmigrator.safety import WriteGuard, assert_write_allowed
 from wdmigrator.secrets import redact_envelope
@@ -75,6 +82,23 @@ class WriteError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class BlockingReference:
+    """The identifier a failed write named as unresolvable."""
+
+    value: str
+    id_type: str
+
+
+@dataclass(frozen=True)
+class ReferenceSite:
+    """Where a blocking reference sits in a payload, and what else names it."""
+
+    path: str
+    element: str
+    ids: dict
+
+
+@dataclass(frozen=True)
 class ExceptionDetail:
     classification: str | None
     message: str | None
@@ -93,6 +117,9 @@ class WriteRecord:
     dest_wid: str | None = None
     exceptions: list[ExceptionDetail] = field(default_factory=list)
     fault: str | None = None
+    #: Set when the fault named a specific unresolvable identifier, so the UI
+    #: can ask about exactly that reference instead of the whole payload.
+    blocking_reference: "BlockingReference | None" = None
     envelope: str | None = None
     duration_ms: int = 0
     dry_run: bool = True
@@ -234,6 +261,153 @@ _PLACEMENT_FIELDS = (
 )
 
 
+#: The fault Workday raises for a reference the destination cannot resolve. It
+#: names the offending value and its ID type, which is the whole basis of the
+#: guided-resolution loop: the user is asked about exactly the reference that
+#: broke, rather than triaging the 89 un-migrated references a real report
+#: carries, almost all of which are delivered objects that pass through fine.
+_INVALID_ID_PATTERN = re.compile(
+    r"Invalid ID value\.\s*'(?P<value>[^']+)' is not a valid ID value "
+    r"for type = '(?P<id_type>[^']+)'"
+)
+
+
+def parse_blocking_reference(fault: str | None) -> BlockingReference | None:
+    """Pull the offending identifier out of an ``Invalid ID value`` fault.
+
+    Returns None for any other fault — a schema error, an entitlement problem, a
+    timeout — because those are not resolvable by substituting a reference and
+    should not be presented as though they were.
+    """
+    if not fault:
+        return None
+    match = _INVALID_ID_PATTERN.search(fault)
+    if match is None:
+        return None
+    return BlockingReference(
+        value=match.group("value"), id_type=match.group("id_type")
+    )
+
+
+def find_reference_sites(node: Node, value: str) -> list[ReferenceSite]:
+    """Every place ``value`` appears in a node's payload, with context.
+
+    The fault says *what* broke but not *where*, and "where" is what makes the
+    question answerable: a prompt's default value and a filter's comparison
+    value need different answers, and the sibling business ids often name the
+    object in a way a WID never will.
+    """
+    sites: list[ReferenceSite] = []
+
+    def walk(obj: object, path: str = "") -> None:
+        if isinstance(obj, dict):
+            entries = obj.get("ID")
+            if isinstance(entries, list):
+                ids = {
+                    e.get("type"): e.get("_value_1")
+                    for e in entries
+                    if isinstance(e, dict) and e.get("type")
+                }
+                if value in ids.values():
+                    sites.append(
+                        ReferenceSite(
+                            path=path,
+                            element=path.split(".")[-1].split("[")[0],
+                            ids=ids,
+                        )
+                    )
+            for key, item in obj.items():
+                walk(item, f"{path}.{key}" if path else key)
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                walk(item, f"{path}[{i}]")
+
+    walk(node.payload)
+    return sites
+
+
+def _decision_for(reference: object, decisions: Mapping[str, ReferenceDecision]):
+    """The decision covering this reference dict, if any."""
+    if not isinstance(reference, dict):
+        return None
+    entries = reference.get("ID")
+    if not isinstance(entries, list):
+        return None
+    return next(
+        (
+            decisions[e["_value_1"]]
+            for e in entries
+            if isinstance(e, dict)
+            and e.get("type") == "WID"
+            and e.get("_value_1") in decisions
+        ),
+        None,
+    )
+
+
+def _apply_reference_decisions(
+    obj: object, decisions: Mapping[str, ReferenceDecision]
+) -> int:
+    """Blank or replace decided references, in place. Returns the count applied.
+
+    Handles both shapes a reference appears in, which is the whole subtlety
+    here. Most are a single dict under a key::
+
+        "Data_Source_Reference": {"ID": [...]}
+
+    but several repeat, and are a *list* of reference dicts::
+
+        "Instance_Reference": [{"ID": [...]}, {"ID": [...]}]
+
+    A matcher written for only the first shape silently does nothing to the
+    second — and ``Instance_Reference``, the very case this feature exists for,
+    is the second. Blanking a list entry removes just that entry; the key is
+    dropped only once nothing is left.
+    """
+    applied = 0
+    if isinstance(obj, dict):
+        for key, value in list(obj.items()):
+            decision = _decision_for(value, decisions)
+            if decision is not None:
+                if decision.action is ReferenceAction.BLANK:
+                    obj.pop(key, None)
+                else:
+                    value["ID"] = [{
+                        "type": decision.replacement_type,
+                        "_value_1": decision.replacement_value,
+                    }]
+                applied += 1
+                continue
+
+            if isinstance(value, list) and any(
+                _decision_for(item, decisions) is not None for item in value
+            ):
+                kept = []
+                for item in value:
+                    hit = _decision_for(item, decisions)
+                    if hit is None:
+                        kept.append(item)
+                        continue
+                    applied += 1
+                    if hit.action is ReferenceAction.REPLACE:
+                        item["ID"] = [{
+                            "type": hit.replacement_type,
+                            "_value_1": hit.replacement_value,
+                        }]
+                        kept.append(item)
+                if kept:
+                    obj[key] = kept
+                else:
+                    obj.pop(key, None)
+                continue
+
+            applied += _apply_reference_decisions(value, decisions)
+    elif isinstance(obj, list):
+        for item in obj:
+            applied += _apply_reference_decisions(item, decisions)
+    return applied
+
+
 def _strip_self_references(obj: object, source_wid: str) -> int:
     """Remove references to the object's own source WID, in place.
 
@@ -314,6 +488,7 @@ def build_report_payload(
     action: Action,
     owner_reference: dict | None = None,
     dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
 ) -> dict:
     """Arguments for ``Put_Tenanted_Report_Definition``.
 
@@ -332,6 +507,8 @@ def build_report_payload(
         )
 
     remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
     _strip_filter_instance_references(remapped)
     _strip_sharing_and_placement(remapped)
     if action is Action.CREATE:
@@ -472,6 +649,76 @@ _RESPONSE_REFERENCE_KEY = {
 }
 
 
+def _strip_summary_calculations(obj: object) -> int:
+    """Remove every ``Summary_Calculation_Reference``, in place. Returns the count."""
+    removed = 0
+    if isinstance(obj, dict):
+        for key, value in list(obj.items()):
+            if key == "Summary_Calculation_Reference" and value:
+                obj.pop(key)
+                removed += 1
+                continue
+            removed += _strip_summary_calculations(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            removed += _strip_summary_calculations(item)
+    return removed
+
+
+def _defer_summary_calculations(payload: dict) -> dict | None:
+    """Hold a matrix report's summary calculations back for a second write.
+
+    Workday refuses a ``Summary_Calculation_Reference`` on the write that
+    *creates* the report:
+
+        "The entered information does not meet the restrictions defined for
+         this field. (Summary_Calculation_Reference)"
+
+    The identical payload succeeds once the report exists. Confirmed live on
+    `commitconsulting` -> `web`: creating without the references, then writing
+    again with them, attached all four measures. So this is an ordering rule,
+    not a validity one — the measures are perfectly valid, the report just has
+    to exist first.
+
+    Mutates ``payload`` to drop the references and returns the *original* for
+    the follow-up write, or None if there were none to defer (the common case —
+    only matrix reports carry them).
+
+    Without this a matrix report migrates looking complete while silently
+    losing every measure, which is worse than failing outright.
+    """
+    data = payload.get("Tenanted_Report_Definition_Data")
+    if not isinstance(data, dict):
+        return None
+    full = copy.deepcopy(payload)
+    if _strip_summary_calculations(data) == 0:
+        return None
+    return full
+
+
+def _attach_summary_calculations(connection: Connection, full_payload: dict) -> str | None:
+    """Second write, carrying the summary calculations. Returns a fault or None.
+
+    Deliberately reference-less, exactly like the first write: a Put with no
+    reference upserts on ``Custom_Report_ID`` rather than creating a duplicate
+    (verified live — one row before, one row after, same WID).
+    """
+    try:
+        connection.limiter.wait()
+        raw = connection.service.Put_Tenanted_Report_Definition(**full_payload)
+    except Exception as exc:  # noqa: BLE001 - surfaced on the record
+        return (
+            "Report was created but its summary calculations could not be "
+            f"attached: {connection.redact(str(exc))}"
+        )
+    response = serialize_object(raw) or {}
+    exceptions = extract_exceptions(response)
+    if is_failure(exceptions):
+        detail = "; ".join(f"{e.classification}: {e.message}" for e in exceptions)
+        return f"Report was created but its summary calculations were rejected: {detail}"
+    return None
+
+
 def _reference_wid(response: dict, node: Node) -> str | None:
     return ids_of(response.get(_RESPONSE_REFERENCE_KEY[node.kind])).get("WID")
 
@@ -531,6 +778,7 @@ def write_node(
                 action=action,
                 owner_reference=owner_reference,
                 dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
             )
         elif node.kind is NodeKind.CALCULATED_MEASURE:
             payload = build_calculated_measure_payload(
@@ -544,6 +792,11 @@ def write_node(
         record.status = WriteStatus.FAILED
         record.fault = str(exc)
         return record
+
+    # A matrix report cannot carry its summary calculations on the write that
+    # creates it — see _defer_summary_calculations. Holding them back turns one
+    # node into two SOAP calls, still one record.
+    deferred = _defer_summary_calculations(payload) if node.kind is NodeKind.REPORT else None
 
     if guard.dry_run:
         # Serialize through the real binding but never send. This is where
@@ -572,6 +825,7 @@ def write_node(
         raw = getattr(connection.service, operation)(**payload)
     except Exception as exc:  # noqa: BLE001 - classified below
         record.fault = connection.redact(str(exc))
+        record.blocking_reference = parse_blocking_reference(record.fault)
         record.status = (
             WriteStatus.INDETERMINATE
             if _is_transport_failure(exc)
@@ -601,6 +855,19 @@ def write_node(
         )
         record.duration_ms = int((time.monotonic() - started) * 1000)
         return record
+
+    # Phase two, for matrix reports only. See _defer_summary_calculations.
+    if deferred is not None:
+        attach_fault = _attach_summary_calculations(connection, deferred)
+        if attach_fault is not None:
+            record.status = WriteStatus.FAILED
+            record.fault = attach_fault
+            # The WID IS recorded here, unlike the exceptions case above: the
+            # report demonstrably exists, it is just missing its measures, and
+            # whoever cleans up needs to be able to find it.
+            record.dest_wid = returned_wid
+            record.duration_ms = int((time.monotonic() - started) * 1000)
+            return record
 
     record.status = WriteStatus.SUCCESS
     record.dest_wid = returned_wid

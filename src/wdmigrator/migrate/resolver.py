@@ -28,6 +28,7 @@ from wdmigrator.discovery.inventory import Index, ids_of
 from wdmigrator.migrate.ordering import (
     extract_measure_refs,
     extract_reference_id_refs,
+    extract_report_refs,
     extract_wid_refs,
 )
 
@@ -85,6 +86,9 @@ class Closure:
     #: names the object as a calculated measure, so not finding it is a real
     #: gap rather than a pass-through.
     unresolved_measure_ids: set[str] = field(default_factory=set)
+    #: ``Custom_Report_ID`` values for sub-reports that could not be fetched.
+    #: A composite cannot render a sub-report the destination does not have.
+    unresolved_report_ids: set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
         return len(self.nodes)
@@ -181,6 +185,7 @@ def resolve_closure(
     allow_partial_index: bool = False,
     expected_index_size: int | None = None,
     measure_loader: Callable[[str], dict | None] | None = None,
+    report_loader: Callable[[str], dict | None] | None = None,
 ) -> Closure:
     """Expand a selection into every object that has to be written.
 
@@ -192,6 +197,10 @@ def resolve_closure(
         allow_partial_index: Opt out of the completeness check. Only for tests.
         expected_index_size: Total the index claims the tenant has, when known,
             so a truncated sweep can be caught.
+        report_loader: ``wid -> payload`` for sub-reports, or None to skip
+            them. A composite report names its sub-reports inline, and each has
+            to exist in the destination first. Same on-demand contract as
+            ``measure_loader``.
         measure_loader: ``wid -> payload`` for calculated measures, or None to
             skip them entirely. **This is the one argument that can make this
             function touch the network** — measures are not indexed, so each
@@ -302,9 +311,25 @@ def resolve_closure(
                 dep = _measure_node(measure_wid, fetched)
             _link(dep, dep_id, node)
 
+        reports: dict[str, str] = (
+            extract_report_refs(payload) if report_loader is not None else {}
+        )
+        for report_wid, report_id in reports.items():
+            if report_wid == node.source_wid:
+                continue  # a report can name itself; see writer._strip_self_references
+            dep_id = node_id_for(NodeKind.REPORT, report_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = report_loader(report_wid)
+                if fetched is None:
+                    closure.unresolved_report_ids.add(report_id)
+                    continue
+                dep = _report_node(report_wid, fetched, selected=False)
+            _link(dep, dep_id, node)
+
         for ref_wid in extract_wid_refs(payload, exclude=[node.source_wid]):
-            if ref_wid in measures:
-                continue  # already handled as a measure
+            if ref_wid in measures or ref_wid in reports:
+                continue  # already handled as a measure or a sub-report
             if ref_wid not in cf_index:
                 closure.passthrough_wids.add(ref_wid)
                 continue

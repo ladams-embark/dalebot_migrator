@@ -272,6 +272,53 @@ def _collect_measures(obj: Any, found: dict[str, str]) -> None:
             _collect_measures(item, found)
 
 
+#: The ID type marking a reference to another report. Same reasoning as
+#: :data:`_MEASURE_ID_TYPE` — sub-reports are reached through
+#: ``Report_Definition__All__Reference``, ``Report_Definition_Reference`` and
+#: ``Maximized_*_Reference``, so match on the ID type rather than the name.
+_REPORT_ID_TYPE = "Custom_Report_ID"
+
+
+def extract_report_refs(obj: Any) -> dict[str, str]:
+    """Every report-to-report reference inside ``obj``, as ``{wid: custom_report_id}``.
+
+    A composite report names its sub-reports this way, and a sub-report has to
+    exist in the destination before the composite that renders it. Measured on
+    `commitconsulting`: without following these, a composite resolves to a
+    closure of exactly one object — itself — and lands in the destination
+    referencing a report that was never created.
+
+    Both identifiers are returned, but note they are *not* symmetric. The WID is
+    what :func:`substitute_wids` must rewrite. The ``Custom_Report_ID`` is
+    returned for identification and display only — it is **rejected as a lookup
+    key** by this API (verified on 18/18 sampled reports), which is why reports
+    are matched across tenants by exact name instead.
+    """
+    found: dict[str, str] = {}
+    _collect_reports(obj, found)
+    return found
+
+
+def _collect_reports(obj: Any, found: dict[str, str]) -> None:
+    if isinstance(obj, dict):
+        entries = obj.get("ID")
+        if isinstance(entries, list):
+            ids = {
+                e.get("type"): e.get("_value_1")
+                for e in entries
+                if isinstance(e, dict) and e.get("type")
+            }
+            report_id = ids.get(_REPORT_ID_TYPE)
+            wid = ids.get("WID")
+            if report_id and wid:
+                found[wid] = report_id
+        for value in obj.values():
+            _collect_reports(value, found)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_reports(item, found)
+
+
 def unmapped_wids(obj: Any, wid_map: Mapping[str, str], custom: Iterable[str]) -> set[str]:
     """Custom WIDs still present in ``obj`` that have no destination mapping.
 

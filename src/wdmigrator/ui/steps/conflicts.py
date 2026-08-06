@@ -40,7 +40,9 @@ def _pump_probe(state: WizardState) -> None:
         state.existence_job = None
     elif job.done:
         existence = {p.node.node_id: p.existence for p in job.events}
-        state.plan = build_plan(state.closure, existence, overrides=state.action_overrides)
+        state.plan = build_plan(state.closure, existence,
+                                overrides=state.action_overrides,
+                                reference_decisions=state.reference_decisions)
         state.existence_job = None
         st.rerun()
     else:
@@ -80,7 +82,9 @@ def _render_overrides(state: WizardState) -> None:
     if st.button("Apply overrides", key="conflicts_apply"):
         for _, row in edited.iterrows():
             state.action_overrides[row["node_id"]] = Action(row["action"])
-        state.plan = build_plan(state.closure, plan.existence, overrides=state.action_overrides)
+        state.plan = build_plan(state.closure, plan.existence,
+                               overrides=state.action_overrides,
+                               reference_decisions=state.reference_decisions)
         reset_downstream(state, from_step="confirm")
         st.rerun()
 

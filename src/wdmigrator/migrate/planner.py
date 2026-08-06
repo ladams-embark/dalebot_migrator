@@ -65,6 +65,46 @@ class Existence:
         return self.state is LookupOutcome.UNKNOWN
 
 
+class ReferenceAction(str, Enum):
+    """What to do with a reference the destination cannot resolve."""
+
+    BLANK = "blank"
+    REPLACE = "replace"
+
+
+@dataclass(frozen=True)
+class ReferenceDecision:
+    """A human's answer to "the destination has no such object".
+
+    Some references point at tenant *data* rather than configuration — a prompt
+    defaulting to a particular Organization, a filter comparing against a
+    specific Cost Center. Those cannot migrate: the instance simply is not there,
+    and no amount of dependency resolution will conjure it. Confirmed live, an
+    Organization reference failed by WID *and* by its ``Organization_Reference_ID``
+    business id, because that organization does not exist in the destination at
+    all.
+
+    So the choice is genuinely the user's: drop the value, or point it at
+    something that does exist. Keyed on the **source** WID, which is what
+    appears in the payload before any remapping and what the fault names.
+    """
+
+    source_wid: str
+    action: ReferenceAction
+    replacement_type: str | None = None
+    replacement_value: str | None = None
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if self.action is ReferenceAction.REPLACE and not (
+            self.replacement_type and self.replacement_value
+        ):
+            raise ValueError(
+                "A REPLACE decision needs both replacement_type and "
+                "replacement_value — e.g. ('Organization_Reference_ID', 'TOP')."
+            )
+
+
 @dataclass(frozen=True)
 class Blocker:
     """A reason the plan cannot be executed live, phrased for the UI."""
@@ -105,6 +145,11 @@ class MigrationPlan:
     #: happily write objects referencing things that were never resolved.
     unresolved_reference_ids: frozenset[str] = frozenset()
     unresolved_measure_ids: frozenset[str] = frozenset()
+    unresolved_report_ids: frozenset[str] = frozenset()
+    #: source WID -> what to do with a reference the destination cannot resolve.
+    #: Survives a retry, so the same question is never asked twice, and is
+    #: included in the plan hash so a decision invalidates a prior dry run.
+    reference_decisions: dict[str, ReferenceDecision] = field(default_factory=dict)
 
     def action_for(self, node: Node) -> Action:
         return self.actions.get(node.node_id, Action.SKIP)
@@ -134,6 +179,12 @@ class MigrationPlan:
             {
                 "order": [n.node_id for n in self.ordered_nodes],
                 "actions": {k: v.value for k, v in sorted(self.actions.items())},
+                # A reference decision changes the bytes on the wire, so it has
+                # to invalidate a dry run reviewed before it was made.
+                "reference_decisions": {
+                    wid: [d.action.value, d.replacement_type, d.replacement_value]
+                    for wid, d in sorted(self.reference_decisions.items())
+                },
             },
             sort_keys=True,
         )
@@ -223,11 +274,14 @@ def build_plan(
     closure: Closure,
     existence: Mapping[str, Existence],
     overrides: Mapping[str, Action] | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
 ) -> MigrationPlan:
     """Assemble the reviewable plan from a closure and its probe results.
 
     ``overrides`` are the user's per-object decisions from the conflict table
-    and win over the defaults.
+    and win over the defaults. ``reference_decisions`` are answers to
+    "the destination has no such object", carried in so they survive a plan
+    rebuild — otherwise re-probing would discard every answer already given.
     """
     overrides = overrides or {}
     ordered = topological_sort(closure.nodes)
@@ -237,6 +291,8 @@ def build_plan(
         existence=dict(existence),
         unresolved_reference_ids=frozenset(closure.unresolved_reference_ids),
         unresolved_measure_ids=frozenset(closure.unresolved_measure_ids),
+        unresolved_report_ids=frozenset(closure.unresolved_report_ids),
+        reference_decisions=dict(reference_decisions or {}),
     )
 
     for node in ordered:
@@ -287,6 +343,12 @@ def validate_plan(plan: MigrationPlan) -> list[Blocker]:
             "Confirm the source ISU can call Get_Calculated_Measures. A "
             "report-scoped measure cannot be created by this tool and must be "
             "removed from the report.",
+        ),
+        (
+            sorted(plan.unresolved_report_ids),
+            "sub-report",
+            "Confirm the source ISU can read the sub-report; a composite cannot "
+            "render one the destination does not have.",
         ),
     ):
         if missing:

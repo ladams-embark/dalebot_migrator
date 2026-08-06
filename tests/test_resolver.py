@@ -572,3 +572,104 @@ class TestCalculatedMeasures:
             measure_loader=loader,
         )
         assert calls == ["MW1"]
+
+
+def composite_using_subreport(wid, report_id, name, sub_wid, sub_report_id):
+    """A composite report naming a sub-report the way Workday actually does —
+    inside Tenanted_Composite_Sub-Report_Data, by WID plus Custom_Report_ID."""
+    return {
+        "Tenanted_Report_Definition_Reference": {
+            "ID": [
+                {"type": "WID", "_value_1": wid},
+                {"type": "Custom_Report_ID", "_value_1": report_id},
+            ]
+        },
+        "Tenanted_Report_Definition_Data": {
+            "Name": name,
+            "Tenanted_Composite_Report_Data": {
+                "Composite_Report_Region_Data": [
+                    {"Tenanted_Composite_Data_Column_Data": [
+                        {"Tenanted_Composite_Sub-Report_Data": {
+                            "Report_Definition__All__Reference": {"ID": [
+                                {"type": "WID", "_value_1": sub_wid},
+                                {"type": "Custom_Report_ID", "_value_1": sub_report_id},
+                            ]}
+                        }}
+                    ]}
+                ]
+            },
+        },
+    }
+
+
+class TestSubReportResolution:
+    """A composite renders sub-reports, and each has to exist in the destination
+    first. Without following these a composite resolved to exactly one object —
+    itself — and landed referencing a report that was never created."""
+
+    def test_composite_pulls_in_its_subreport(self):
+        sub = report_payload("SUB", "SUB_ID", name="Sub")
+        composite = composite_using_subreport("C1", "COMP", "Composite", "SUB", "SUB_ID")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"C1": composite},
+            report_loader={"SUB": sub}.get,
+        )
+        assert len(closure) == 2
+        assert node_id_for(NodeKind.REPORT, "SUB") in closure.nodes
+
+    def test_subreport_is_ordered_first(self):
+        sub = report_payload("SUB", "SUB_ID", name="Sub")
+        composite = composite_using_subreport("C1", "COMP", "Composite", "SUB", "SUB_ID")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"C1": composite},
+            report_loader={"SUB": sub}.get,
+        )
+        order = [n.source_wid for n in topological_sort(closure.nodes)]
+        assert order.index("SUB") < order.index("C1")
+
+    def test_subreport_dependencies_are_expanded_too(self):
+        """The user's whole point: sub-reports need their calc fields built first."""
+        index = cf_index(cf_payload("W2", "CF_B"))
+        sub = report_payload("SUB", "SUB_ID", name="Sub", refs=["W2"])
+        composite = composite_using_subreport("C1", "COMP", "Composite", "SUB", "SUB_ID")
+        closure = resolve_closure(
+            cf_index=index, selected_reports={"C1": composite},
+            report_loader={"SUB": sub}.get,
+        )
+        assert len(closure) == 3
+        order = [n.source_wid for n in topological_sort(closure.nodes)]
+        assert order.index("W2") < order.index("SUB") < order.index("C1")
+
+    def test_a_report_naming_itself_creates_no_cycle(self):
+        """Matrix drill-down overrides point back at the report itself."""
+        composite = composite_using_subreport("C1", "COMP", "Composite", "C1", "COMP")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"C1": composite},
+            report_loader=lambda wid: None,
+        )
+        assert len(closure) == 1
+        assert closure.unresolved_report_ids == set()
+        topological_sort(closure.nodes)  # must not raise
+
+    def test_an_unfetchable_subreport_is_recorded(self):
+        composite = composite_using_subreport("C1", "COMP", "Composite", "SUB", "SUB_ID")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"C1": composite},
+            report_loader=lambda wid: None,
+        )
+        assert closure.unresolved_report_ids == {"SUB_ID"}
+
+    def test_without_a_loader_subreports_are_skipped(self):
+        composite = composite_using_subreport("C1", "COMP", "Composite", "SUB", "SUB_ID")
+        closure = resolve_closure(cf_index=cf_index(), selected_reports={"C1": composite})
+        assert len(closure) == 1
+        assert "SUB" in closure.passthrough_wids
+
+    def test_a_subreport_is_not_also_a_passthrough(self):
+        sub = report_payload("SUB", "SUB_ID", name="Sub")
+        composite = composite_using_subreport("C1", "COMP", "Composite", "SUB", "SUB_ID")
+        closure = resolve_closure(
+            cf_index=cf_index(), selected_reports={"C1": composite},
+            report_loader={"SUB": sub}.get,
+        )
+        assert "SUB" not in closure.passthrough_wids
