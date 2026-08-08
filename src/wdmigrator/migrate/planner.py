@@ -35,10 +35,17 @@ from wdmigrator.discovery.inventory import (
     LookupOutcome,
     lookup_calculated_field,
     lookup_calculated_measure,
+    lookup_dashboard,
+    lookup_prompt_set,
     lookup_report_by_name,
 )
 from wdmigrator.migrate.ordering import topological_sort
-from wdmigrator.migrate.resolver import Closure, Node, NodeKind
+from wdmigrator.migrate.resolver import (
+    DASHBOARD_TABBED_BY_KIND,
+    Closure,
+    Node,
+    NodeKind,
+)
 
 
 class Action(str, Enum):
@@ -146,6 +153,8 @@ class MigrationPlan:
     unresolved_reference_ids: frozenset[str] = frozenset()
     unresolved_measure_ids: frozenset[str] = frozenset()
     unresolved_report_ids: frozenset[str] = frozenset()
+    unresolved_prompt_set_ids: frozenset[str] = frozenset()
+    unresolved_dashboard_ids: frozenset[str] = frozenset()
     #: source WID -> what to do with a reference the destination cannot resolve.
     #: Survives a retry, so the same question is never asked twice, and is
     #: included in the plan hash so a decision invalidates a prior dry run.
@@ -214,8 +223,38 @@ def probe_node(connection: Connection, node: Node) -> Existence:
       :func:`~wdmigrator.discovery.inventory.lookup_report_by_name`). Name is a
       weaker identity, and a duplicated name resolves to UNKNOWN rather than a
       guess.
+    - **Dashboards and prompt sets** match on their business ID, which for both
+      is the object's own name and — unlike ``Custom_Report_ID`` — genuinely
+      works as a lookup key (confirmed live 2026-08-07). Dashboards additionally
+      carry their flavour, since the two are addressed by different operations.
     """
-    if node.kind is NodeKind.CALCULATED_MEASURE:
+    if node.kind in DASHBOARD_TABBED_BY_KIND:
+        if not node.reference_id:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Dashboard has no Custom_Landing_Page ID, so it cannot be "
+                    "matched against the destination."
+                ),
+            )
+        result = lookup_dashboard(
+            connection,
+            tabbed=DASHBOARD_TABBED_BY_KIND[node.kind],
+            reference_id=node.reference_id,
+        )
+    elif node.kind is NodeKind.PROMPT_SET:
+        if not node.reference_id:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Prompt set has no Prompt_Set_ID, so it cannot be matched "
+                    "against the destination."
+                ),
+            )
+        result = lookup_prompt_set(connection, reference_id=node.reference_id)
+    elif node.kind is NodeKind.CALCULATED_MEASURE:
         if not node.reference_id:
             return Existence(
                 node_id=node.node_id,
@@ -292,6 +331,8 @@ def build_plan(
         unresolved_reference_ids=frozenset(closure.unresolved_reference_ids),
         unresolved_measure_ids=frozenset(closure.unresolved_measure_ids),
         unresolved_report_ids=frozenset(closure.unresolved_report_ids),
+        unresolved_prompt_set_ids=frozenset(closure.unresolved_prompt_set_ids),
+        unresolved_dashboard_ids=frozenset(closure.unresolved_dashboard_ids),
         reference_decisions=dict(reference_decisions or {}),
     )
 
@@ -349,6 +390,18 @@ def validate_plan(plan: MigrationPlan) -> list[Blocker]:
             "sub-report",
             "Confirm the source ISU can read the sub-report; a composite cannot "
             "render one the destination does not have.",
+        ),
+        (
+            sorted(plan.unresolved_prompt_set_ids),
+            "prompt set",
+            "Rebuild the prompt set index. Reading prompt sets requires an "
+            "implementer account, so check the source connection is one.",
+        ),
+        (
+            sorted(plan.unresolved_dashboard_ids),
+            "nested dashboard",
+            "Rebuild the dashboard index. Reading dashboards requires an "
+            "implementer account, so check the source connection is one.",
         ),
     ):
         if missing:

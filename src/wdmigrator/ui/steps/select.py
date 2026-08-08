@@ -13,14 +13,18 @@ import pandas as pd
 import streamlit as st
 
 from wdmigrator.api import (
+    IMPLEMENTER_REQUIRED_REMEDY,
     Blocker,
     LookupOutcome,
     cache_path,
     iter_calculated_field_index,
+    iter_dashboard_index,
+    iter_prompt_set_index,
     iter_report_index,
     load_index,
     lookup_report,
     lookup_report_by_name,
+    requires_implementer,
     save_index,
 )
 from wdmigrator.ui import theme
@@ -41,7 +45,22 @@ _REPORT_MAX_ROWS = 5000
 #: at Count=999). Shown up front so a first-time user knows which button is
 #: the 25-second one and which is the two-and-a-half-minute one before
 #: clicking, not after.
-_BUILD_ESTIMATE = {"calculated_field": "about 25 seconds", "report": "about 2.5 minutes"}
+_BUILD_ESTIMATE = {
+    "calculated_field": "about 25 seconds",
+    "report": "about 2.5 minutes",
+    # Both single-page on the test tenant (179 dashboards, 57 prompt sets).
+    "dashboard": "a few seconds",
+    "prompt_set": "a few seconds",
+}
+
+#: What the user picks first. Dashboards are listed last deliberately — they sit
+#: at the end of the dependency chain, and they are the only kind with an
+#: account-level prerequisite.
+_OBJECT_KINDS = {
+    "reports": "Reports",
+    "calculated_fields": "Calculated fields",
+    "dashboards": "Custom dashboards",
+}
 
 
 def _age_label(seconds: float) -> str:
@@ -106,6 +125,12 @@ def _load_or_prompt_index(state, *, kind, iterator_fn, job_attr, index_attr, lab
         render_job_progress(job, label=f"{label} index", fraction=fraction)
         if job.error is not None:
             setattr(state, job_attr, None)
+            # A dashboard or prompt-set sweep failing this way is not a bug and
+            # not a transient error — it means the connected account is not an
+            # implementer. Recorded once so the picker can explain it, rather
+            # than surfacing a raw SOAP fault the user cannot act on.
+            if requires_implementer(str(job.error)):
+                state.implementer_required = True
             st.rerun()
         elif job.cancelled:
             # A partial sweep is real data but it is not the whole tenant, and
@@ -287,6 +312,71 @@ def _render_reports(state: WizardState) -> None:
             st.rerun()
 
 
+def _render_dashboards(state: WizardState) -> None:
+    theme.section(
+        "Custom dashboards",
+        "A dashboard sits at the end of the chain: picking one pulls in the reports it "
+        "shows as worklets, the prompt sets those use, and every calculated field "
+        "underneath. Reading them requires an implementer account.",
+        eyebrow="Requires an implementer account",
+    )
+
+    if state.implementer_required:
+        theme.banner(
+            "warning",
+            "This account cannot read custom dashboards",
+            IMPLEMENTER_REQUIRED_REMEDY,
+            remedy="Reports and calculated fields are unaffected — you can migrate "
+                   "those with this connection.",
+        )
+        return
+
+    if state.dashboard_index is None:
+        theme.banner(
+            "neutral",
+            "Index not built",
+            "Build the dashboard index above. Both dashboard flavours are swept — "
+            "tabbed and untabbed are separate object types in Workday and nothing "
+            "identifies which a dashboard is ahead of time.",
+        )
+        return
+
+    df = pd.DataFrame(
+        [
+            {
+                "wid": wid,
+                "name": s.name,
+                "layout": "tabbed" if s.tabbed else "single page",
+                "items": s.worklet_count,
+            }
+            for wid, s in state.dashboard_index.summaries.items()
+        ]
+    )
+    query = st.text_input("Filter by name (substring, local)", key="dashboard_filter")
+    if query and not df.empty:
+        df = df[df["name"].fillna("").str.contains(query, case=False)]
+
+    event = st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="multi-row",
+        key="dashboard_table_select",
+    )
+    rows = event.selection["rows"] if event and event.selection else []
+    selected = {}
+    for i in rows:
+        wid = df.iloc[i]["wid"]
+        payload = state.dashboard_index.payload(wid)
+        if payload is not None:
+            selected[wid] = payload
+    state.selected_dashboards = selected
+
+    if state.selected_dashboards:
+        theme.figures([("Dashboards selected", len(state.selected_dashboards))])
+
+
 def render(state: WizardState) -> None:
     st.header("Select")
     connection = state.source.connection
@@ -294,6 +384,25 @@ def render(state: WizardState) -> None:
         theme.banner("danger", "Source is not connected", remedy="Go back to Connect.")
         return
 
+    theme.section(
+        "What are you migrating?",
+        "Pick the object kinds you want to work with. Each one you enable needs its "
+        "source index built first — dependencies are resolved from those indexes, "
+        "not by querying the tenant object by object.",
+        eyebrow="Start here",
+    )
+    chosen = st.multiselect(
+        "Object kinds",
+        options=list(_OBJECT_KINDS),
+        default=["reports"],
+        format_func=lambda key: _OBJECT_KINDS[key],
+        key="object_kinds",
+    )
+
+    # The calculated field index is built regardless of what is ticked. Resolving
+    # dependencies needs the complete index even when the user selected only a
+    # report or a dashboard — every WID they reference is classified against it,
+    # and a partial one silently under-resolves.
     _load_or_prompt_index(
         state,
         kind="calculated_field",
@@ -303,33 +412,83 @@ def render(state: WizardState) -> None:
         label="Calculated field",
         connection=connection,
     )
-    _load_or_prompt_index(
-        state,
-        kind="report",
-        iterator_fn=iter_report_index,
-        job_attr="report_index_job",
-        index_attr="report_index",
-        label="Report",
-        connection=connection,
-    )
+    if "reports" in chosen:
+        _load_or_prompt_index(
+            state,
+            kind="report",
+            iterator_fn=iter_report_index,
+            job_attr="report_index_job",
+            index_attr="report_index",
+            label="Report",
+            connection=connection,
+        )
+    if "dashboards" in chosen:
+        _load_or_prompt_index(
+            state,
+            kind="dashboard",
+            iterator_fn=iter_dashboard_index,
+            job_attr="dashboard_index_job",
+            index_attr="dashboard_index",
+            label="Dashboard",
+            connection=connection,
+        )
+        # Prompt sets are only ever reached as a dashboard dependency, so their
+        # index is built alongside rather than offered as its own choice.
+        _load_or_prompt_index(
+            state,
+            kind="prompt_set",
+            iterator_fn=iter_prompt_set_index,
+            job_attr="prompt_set_index_job",
+            index_attr="prompt_set_index",
+            label="Prompt set",
+            connection=connection,
+        )
 
     st.divider()
+    if "dashboards" in chosen:
+        _render_dashboards(state)
+        st.divider()
+
     col1, col2 = st.columns(2)
     with col1:
         _render_calculated_fields(state)
     with col2:
-        _render_reports(state)
+        if "reports" in chosen:
+            _render_reports(state)
+    if "reports" not in chosen:
+        state.selected_reports = {}
+    if "dashboards" not in chosen:
+        state.selected_dashboards = {}
 
 
 def gate(state: WizardState) -> list[Blocker]:
     blockers = []
-    if not state.selected_field_wids and not state.selected_reports:
+    if not (
+        state.selected_field_wids or state.selected_reports or state.selected_dashboards
+    ):
         blockers.append(
             Blocker(
                 node_id=None,
                 title="Nothing selected",
-                detail="Select at least one report or calculated field to migrate.",
-                remedy="Pick from the calculated field search or the report table/exact-name lookup.",
+                detail=(
+                    "Select at least one dashboard, report or calculated field to "
+                    "migrate."
+                ),
+                remedy="Pick from the tables above.",
+            )
+        )
+    if state.selected_dashboards and state.prompt_set_index is None:
+        blockers.append(
+            Blocker(
+                node_id=None,
+                title="Prompt set index not built",
+                detail=(
+                    "A dashboard binds its runtime prompts to prompt sets, and those "
+                    "have to exist in the destination first. They cannot be fetched "
+                    "on demand — the request criteria Workday exposes for them do "
+                    "not filter — so the index is the only way to resolve them."
+                ),
+                remedy="Build the prompt set index above (a few seconds).",
             )
         )
     if state.cf_index is None:

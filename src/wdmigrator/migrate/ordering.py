@@ -319,6 +319,87 @@ def _collect_reports(obj: Any, found: dict[str, str]) -> None:
             _collect_reports(item, found)
 
 
+def _collect_by_id_type(obj: Any, id_types: Iterable[str], found: dict) -> None:
+    """Every reference carrying a WID *and* one of ``id_types``.
+
+    Records ``{wid: (id_type, business_id)}``. Both halves are needed and do
+    different jobs — the WID is what :func:`substitute_wids` rewrites, the
+    business ID is the cross-tenant identity used to look the object up — and a
+    reference carrying only one of them cannot be resolved into a migratable
+    dependency, so it is skipped.
+    """
+    wanted = tuple(id_types)
+    if isinstance(obj, dict):
+        entries = obj.get("ID")
+        if isinstance(entries, list):
+            ids = {
+                e.get("type"): e.get("_value_1")
+                for e in entries
+                if isinstance(e, dict) and e.get("type")
+            }
+            wid = ids.get("WID")
+            if wid:
+                for id_type in wanted:
+                    if ids.get(id_type):
+                        found[wid] = (id_type, ids[id_type])
+                        break
+        for value in obj.values():
+            _collect_by_id_type(value, wanted, found)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_by_id_type(item, wanted, found)
+
+
+_PROMPT_SET_ID_TYPE = "Prompt_Set_ID"
+
+
+def extract_prompt_set_refs(obj: Any) -> dict[str, str]:
+    """Every prompt-set reference inside ``obj``, as ``{wid: Prompt_Set_ID}``.
+
+    A dashboard binds its runtime prompts to a prompt set, which has to exist in
+    the destination first. Measured live on `commitconsulting_dpt1`: 32 of 179
+    dashboards reference one, so this is a real but minority dependency.
+
+    ``Prompt_Set_ID`` is the prompt set's own name (`'Company'`, `'Start and End
+    Dates'`) and works as a lookup key, unlike ``Custom_Report_ID``.
+    """
+    collected: dict[str, tuple[str, str]] = {}
+    _collect_by_id_type(obj, (_PROMPT_SET_ID_TYPE,), collected)
+    return {wid: business for wid, (_, business) in collected.items()}
+
+
+#: The two dashboard ID spaces. Disjoint, and which one appears tells you the
+#: flavour — and therefore which Get/Put operation addresses the dashboard.
+_DASHBOARD_ID_TYPES = {
+    "Custom_Landing_Page_Group_ID": True,   # tabbed
+    "Custom_Landing_Page_ID": False,        # untabbed
+}
+
+
+def extract_dashboard_refs(obj: Any) -> dict[str, tuple[str, bool]]:
+    """Every dashboard reference inside ``obj``, as ``{wid: (reference_id, tabbed)}``.
+
+    Dashboards nest: a dashboard's worklet can be another dashboard, reached
+    through ``Landing_Page__All__Reference``. Measured live on
+    `commitconsulting_dpt1`, 226 such references across the untabbed dashboards
+    alone, so a dashboard closure that ignored them would write a dashboard
+    pointing at one that was never created.
+
+    ``tabbed`` is derived from which ID space the reference uses, and is carried
+    forward because the two flavours are addressed by different operations.
+    ``Landing_Page__All__Reference`` can also name a Workday-delivered landing
+    page (``Landing_Page_ID`` / ``Landing_Page_Group_ID``); those are not custom
+    dashboards, carry no custom ID, and are correctly skipped here — they pass
+    through as delivered objects.
+    """
+    collected: dict[str, tuple[str, str]] = {}
+    _collect_by_id_type(obj, tuple(_DASHBOARD_ID_TYPES), collected)
+    return {
+        wid: (business, _DASHBOARD_ID_TYPES[id_type])
+        for wid, (id_type, business) in collected.items()
+    }
+
+
 def unmapped_wids(obj: Any, wid_map: Mapping[str, str], custom: Iterable[str]) -> set[str]:
     """Custom WIDs still present in ``obj`` that have no destination mapping.
 

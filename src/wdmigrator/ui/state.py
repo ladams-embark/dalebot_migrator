@@ -86,6 +86,19 @@ class WizardState:
     cf_index_job: Optional[JobState] = None
     report_index: Optional[Index] = None
     report_index_job: Optional[JobState] = None
+    # Dashboards and prompt sets both require an implementer account to read at
+    # all — a normal ISU gets "The task submitted is not authorized" from every
+    # dashboard operation regardless of domain grants. Kept as separate indexes
+    # rather than folded into the others because they are cheap (one page each)
+    # and because a user without an implementer account should still be able to
+    # migrate reports and calculated fields with no degraded experience.
+    dashboard_index: Optional[Index] = None
+    dashboard_index_job: Optional[JobState] = None
+    prompt_set_index: Optional[Index] = None
+    prompt_set_index_job: Optional[JobState] = None
+    #: Set when a dashboard/prompt-set sweep failed with the implementer fault,
+    #: so the Select step can explain it once rather than showing a raw error.
+    implementer_required: bool = False
 
     # wid -> True for directly-selected calculated fields
     selected_field_wids: set = field(default_factory=set)
@@ -96,6 +109,10 @@ class WizardState:
     # row selection across reruns.
     selected_reports_manual: dict = field(default_factory=dict)
     selected_reports: dict = field(default_factory=dict)
+    # wid -> the dashboard's raw payload dict, from the dashboard index. Unlike
+    # reports there is no exact-name lookup to merge in: dashboards have no
+    # usable request criteria at all, so the index table is the only source.
+    selected_dashboards: dict = field(default_factory=dict)
 
     closure: Optional[Closure] = None
     closure_error: Optional[str] = None
@@ -152,9 +169,15 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.cf_index_job = None
         state.report_index = None
         state.report_index_job = None
+        state.dashboard_index = None
+        state.dashboard_index_job = None
+        state.prompt_set_index = None
+        state.prompt_set_index_job = None
+        state.implementer_required = False
         state.selected_field_wids = set()
         state.selected_reports_manual = {}
         state.selected_reports = {}
+        state.selected_dashboards = {}
         state.reference_decisions = {}
 
     if idx <= STEP_ORDER.index("resolve"):

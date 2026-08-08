@@ -65,6 +65,23 @@ class TestSelectStepGate:
         blockers = select.gate(state)
         assert any("index" in b.title.lower() for b in blockers)
 
+    def test_a_dashboard_selection_satisfies_the_selection_requirement(self):
+        state = ui_state.WizardState()
+        state.selected_dashboards = {"DB1": {}}
+        assert not any("Nothing selected" in b.title for b in select.gate(state))
+
+    def test_a_dashboard_selection_requires_the_prompt_set_index(self):
+        """Prompt sets cannot be fetched on demand — Workday's request criteria
+        for them do not filter — so the index is the only route, and a dashboard
+        that binds one would otherwise resolve as if it had no prompts."""
+        state = ui_state.WizardState()
+        state.cf_index = api.Index(kind="calculated_field", tenant="t", fetched_at=time.time())
+        state.selected_dashboards = {"DB1": {}}
+        assert any("Prompt set index" in b.title for b in select.gate(state))
+
+        state.prompt_set_index = api.Index(kind="prompt_set", tenant="t", fetched_at=time.time())
+        assert select.gate(state) == []
+
 
 class TestResolveStepGate:
     def test_blocks_without_a_closure(self):
@@ -226,6 +243,23 @@ class TestResetDownstream:
         assert state.plan is None
         assert state.dry_run_reviewed is False
         assert state.execute_records == []
+
+    def test_credential_scoped_reset_also_wipes_dashboard_state(self):
+        """A new credential can mean a different account entirely — including
+        one that is no longer an implementer — so the dashboard indexes and the
+        implementer flag must not survive it."""
+        state = ui_state.WizardState()
+        state.dashboard_index = api.Index(kind="dashboard", tenant="t", fetched_at=time.time())
+        state.prompt_set_index = api.Index(kind="prompt_set", tenant="t", fetched_at=time.time())
+        state.selected_dashboards = {"DB1": {}}
+        state.implementer_required = True
+
+        ui_state.reset_downstream(state, from_step="select")
+
+        assert state.dashboard_index is None
+        assert state.prompt_set_index is None
+        assert state.selected_dashboards == {}
+        assert state.implementer_required is False
 
     def test_resolve_scoped_reset_keeps_selections_and_indexes(self):
         """Re-resolving after an override shouldn't force rebuilding a
