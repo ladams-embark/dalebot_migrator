@@ -97,6 +97,75 @@ class ReportSummary:
     owner: str | None = None
 
 
+#: The two custom-dashboard flavours. There is no unified operation: a tabbed
+#: dashboard is a ``Custom_Landing_Page_Group`` and an untabbed one is a
+#: ``Custom_Landing_Page``, with separate Get, Put, data block, response
+#: reference and ID space. Nothing in a reference says which one you have, so
+#: both are always swept and the flavour is carried on the summary from there.
+DASHBOARD_FLAVOURS = {
+    # tabbed -> operation/keys
+    False: {
+        "get": "Get_Custom_Dashboards_without_Tabs",
+        "put": "Put_Custom_Dashboard_without_Tabs",
+        "collection": "Custom_Dashboard_without_Tabs",
+        "reference": "Custom_Dashboard_without_Tabs_Reference",
+        "data": "Custom_Dashboard_without_Tabs_Data",
+        "id_type": "Custom_Landing_Page_ID",
+    },
+    True: {
+        "get": "Get_Custom_Dashboards_with_Tabs",
+        "put": "Put_Custom_Dashboard_with_Tabs",
+        "collection": "Custom_Dashboard_with_Tabs",
+        "reference": "Custom_Dashboard_with_Tabs_Reference",
+        "data": "Custom_Dashboard_with_Tabs_Data",
+        "id_type": "Custom_Landing_Page_Group_ID",
+    },
+}
+
+#: The fault a non-implementer account gets from every dashboard operation.
+#: Distinct from the `Report_Metadata` entitlement failure ("the web service or
+#: version is invalid for the requested operation") — this one means the
+#: operation is valid and the *account* is not allowed to call it.
+IMPLEMENTER_REQUIRED_FRAGMENT = "task submitted is not authorized"
+
+#: What to tell a user who hits it. The dashboard, prompt-set, prompt-field and
+#: worklet-configuration operations are all gated this way; calculated fields,
+#: reports and calculated measures are not (confirmed live 2026-08-07 on
+#: commitconsulting_dpt1: the same ISU reads 9,716 fields and 5,197 reports
+#: fine, and fails all five dashboard-side operations).
+IMPLEMENTER_REQUIRED_REMEDY = (
+    "Custom dashboards require an implementer account. A normal Integration "
+    "System User cannot read or write them no matter which domains it is "
+    "granted — connect with an implementer account on both tenants, or migrate "
+    "reports and calculated fields only."
+)
+
+
+def requires_implementer(fault: str | None) -> bool:
+    """Whether a fault means "this account is not an implementer"."""
+    return IMPLEMENTER_REQUIRED_FRAGMENT in (fault or "").lower()
+
+
+@dataclass(frozen=True)
+class DashboardSummary:
+    wid: str
+    reference_id: str | None
+    name: str | None
+    #: Which flavour this is, and therefore which Get/Put operation addresses
+    #: it. Carried rather than re-derived: the two ID spaces are disjoint and
+    #: guessing wrong sends a write to the wrong operation.
+    tabbed: bool = False
+    worklet_count: int = 0
+
+
+@dataclass(frozen=True)
+class PromptSetSummary:
+    wid: str
+    reference_id: str | None
+    name: str | None
+    member_count: int = 0
+
+
 @dataclass
 class Index:
     """An in-memory index of one object kind for one tenant.
@@ -315,6 +384,123 @@ def lookup_calculated_measure(
         data=item,
         wid=ids.get("WID"),
         reference_id=ids.get("BI_Calculated_Measure_ID") or reference_id,
+    )
+
+
+def lookup_dashboard(
+    connection: Connection,
+    *,
+    tabbed: bool,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one custom dashboard by its business ID or WID.
+
+    ``tabbed`` picks the operation, and it is required rather than inferred:
+    ``Custom_Landing_Page_ID`` and ``Custom_Landing_Page_Group_ID`` are separate
+    ID spaces addressed by separate operations, and asking the wrong one returns
+    a clean "not found" that would be read as "safe to create".
+
+    Unlike reports, the business ID **works as a lookup key** — confirmed live
+    2026-08-07 on `commitconsulting_dpt1`, fetching
+    ``Custom_Landing_Page_Group_ID = 'Commit - Optimize Reporting Dashboard'``
+    resolved the same dashboard as its WID. So dashboards get real cross-tenant
+    identity, and none of the name-matching compromise
+    :func:`lookup_report_by_name` is forced into.
+
+    Requires an implementer account; see :data:`IMPLEMENTER_REQUIRED_REMEDY`.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    spec = DASHBOARD_FLAVOURS[bool(tabbed)]
+    ref = (
+        _reference(spec["id_type"], reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        response = getattr(connection.service, spec["get"])(
+            Request_References={spec["reference"]: [ref]},
+            Response_Group={"Include_Reference": True},
+        )
+    except Exception as exc:  # noqa: BLE001 - classified, never blindly swallowed
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get(spec["collection"]) or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get(spec["reference"]))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get(spec["id_type"]) or reference_id,
+    )
+
+
+def lookup_prompt_set(
+    connection: Connection,
+    *,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one prompt set by ``Prompt_Set_ID`` or WID.
+
+    ``Prompt_Set_ID`` is the prompt set's own name (`'Company'`, `'Start and End
+    Dates'`), which makes it a usable cross-tenant identity.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    ref = (
+        _reference("Prompt_Set_ID", reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        response = connection.service.Get_Prompt_Sets(
+            Request_References={"Prompt_Set_Reference": [ref]},
+            Response_Group={"Include_Reference": True},
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get("Prompt_Set") or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get("Prompt_Set_Reference"))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get("Prompt_Set_ID") or reference_id,
     )
 
 
@@ -585,6 +771,133 @@ def iter_report_index(
     )
 
 
+def _dashboard_summary(item: dict, *, tabbed: bool) -> DashboardSummary | None:
+    spec = DASHBOARD_FLAVOURS[tabbed]
+    ids = ids_of(item.get(spec["reference"]))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = item.get(spec["data"]) or {}
+    worklets = data.get("Worklets_Data") or data.get("Content_Data") or []
+    if isinstance(worklets, dict):
+        worklets = [worklets]
+    return DashboardSummary(
+        wid=wid,
+        reference_id=ids.get(spec["id_type"]),
+        name=data.get("Name"),
+        tabbed=tabbed,
+        worklet_count=len(worklets),
+    )
+
+
+def _prompt_set_summary(item: dict) -> PromptSetSummary | None:
+    ids = ids_of(item.get("Prompt_Set_Reference"))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = item.get("Prompt_Set_Data") or {}
+    members = data.get("Tenanted_Prompt_Set_Member_Data") or []
+    if isinstance(members, dict):
+        members = [members]
+    return PromptSetSummary(
+        wid=wid,
+        reference_id=ids.get("Prompt_Set_ID"),
+        name=data.get("Name"),
+        member_count=len(members),
+    )
+
+
+def iter_dashboard_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every custom dashboard, both flavours, into one index.
+
+    Both operations are swept because nothing identifies a dashboard's flavour
+    ahead of time, and the two ID spaces are disjoint. Cheap enough that this is
+    not a compromise: measured live on `commitconsulting_dpt1`, 52 untabbed and
+    127 tabbed dashboards, **one page each**, and the sweep carries full data
+    with only ``Include_Reference`` set — there is no ``Include_..._Data`` flag
+    on either Response_Group, and none is needed.
+
+    Requires an implementer account. A non-implementer gets "The task submitted
+    is not authorized" from both operations; see :data:`IMPLEMENTER_REQUIRED_REMEDY`.
+    """
+    started = time.monotonic()
+    index = Index(kind="dashboard", tenant=connection.target.tenant, fetched_at=time.time())
+
+    # Totals are only known after the first call of each flavour, so the
+    # progress fraction is against the running sum rather than a figure known
+    # up front. Both are single-page in practice.
+    grand_total = 0
+    for position, tabbed in enumerate(sorted(DASHBOARD_FLAVOURS)):
+        spec = DASHBOARD_FLAVOURS[tabbed]
+        page = 1
+        while True:
+            connection.limiter.wait()
+            response = getattr(connection.service, spec["get"])(
+                Response_Filter={"Page": page, "Count": page_size},
+                Response_Group={"Include_Reference": True},
+            )
+            data = serialize_object(response)
+            results = data.get("Response_Results") or {}
+            total_pages = max(1, int(results.get("Total_Pages") or 1))
+            if page == 1:
+                grand_total += int(results.get("Total_Results") or 0)
+
+            for item in (data.get("Response_Data") or {}).get(spec["collection"]) or []:
+                summary = _dashboard_summary(item, tabbed=tabbed)
+                if summary is None:
+                    continue
+                index.summaries[summary.wid] = summary
+                index.payloads[summary.wid] = item
+
+            last_flavour = position == len(DASHBOARD_FLAVOURS) - 1
+            final = page >= total_pages and last_flavour
+            yield IndexProgress(
+                page=page,
+                total_pages=total_pages,
+                fetched=len(index.summaries),
+                total=grand_total,
+                elapsed=time.monotonic() - started,
+                index=index,
+                complete=final,
+            )
+            if page >= total_pages:
+                break
+            page += 1
+
+
+def iter_prompt_set_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every prompt set. One page, ~57 items on the test tenant.
+
+    Swept rather than fetched on demand because **the request criteria do not
+    work**. ``Prompt_Set_Request_Criteria`` offers
+    ``Tenanted_Report_Definition_Reference`` and ``Custom_Dashboard_Reference``,
+    and neither is usable (both confirmed live 2026-08-07):
+
+    - The report-scoped criteria is *accepted and ignored*. Scoping to three
+      different reports returned all 57 prompt sets each time, with
+      ``Total_Results=57`` — the tenant-wide figure.
+    - The dashboard-scoped criteria is typed ``Custom_Landing_PageObjectType``,
+      i.e. untabbed dashboards only, and rejects a tabbed dashboard's WID
+      outright: "Invalid instance ... for Custom_Landing_Page_Request_References".
+
+    So the dependency edge comes from the dashboard payload's own
+    ``Prompt_Set_Reference``, resolved against this index.
+    """
+    return _iter_index(
+        connection,
+        kind="prompt_set",
+        operation_name="Get_Prompt_Sets",
+        response_group={"Include_Reference": True},
+        collection_key="Prompt_Set",
+        summarise=_prompt_set_summary,
+        page_size=page_size,
+    )
+
+
 def build_index(
     iterator: Iterator[IndexProgress],
     on_progress: Callable[[IndexProgress], None] | None = None,
@@ -628,6 +941,15 @@ def save_index(index: Index, path: Path) -> Path:
     return path
 
 
+#: Which summary dataclass a cached index rehydrates into, by ``kind``.
+_SUMMARY_TYPES = {
+    "calculated_field": CalculatedFieldSummary,
+    "report": ReportSummary,
+    "dashboard": DashboardSummary,
+    "prompt_set": PromptSetSummary,
+}
+
+
 def load_index(
     path: Path, *, tenant: str | None = None, max_age_seconds: float | None = None
 ) -> Index | None:
@@ -651,11 +973,7 @@ def load_index(
     if max_age_seconds is not None and (time.time() - fetched_at) > max_age_seconds:
         return None
 
-    summary_type = (
-        CalculatedFieldSummary
-        if document.get("kind") == "calculated_field"
-        else ReportSummary
-    )
+    summary_type = _SUMMARY_TYPES.get(document.get("kind"), ReportSummary)
     return Index(
         kind=document.get("kind", ""),
         tenant=document.get("tenant", ""),

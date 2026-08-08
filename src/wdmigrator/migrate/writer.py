@@ -44,7 +44,7 @@ from zeep.exceptions import Fault
 from zeep.helpers import serialize_object
 
 from wdmigrator.auth.client import Connection, Role
-from wdmigrator.discovery.inventory import ids_of
+from wdmigrator.discovery.inventory import DASHBOARD_FLAVOURS, ids_of
 from wdmigrator.migrate.ordering import substitute_wids
 from wdmigrator.migrate.planner import (
     Action,
@@ -52,7 +52,12 @@ from wdmigrator.migrate.planner import (
     ReferenceAction,
     ReferenceDecision,
 )
-from wdmigrator.migrate.resolver import Node, NodeKind
+from wdmigrator.migrate.resolver import (
+    DASHBOARD_TABBED_BY_KIND,
+    WORKLET_BACKREF_FIELDS,
+    Node,
+    NodeKind,
+)
 from wdmigrator.safety import WriteGuard, assert_write_allowed
 from wdmigrator.secrets import redact_envelope
 
@@ -263,6 +268,116 @@ _PLACEMENT_FIELDS = (
     "Maximized_Worklet_Report_Definition_Reference",
     "Tenanted_Report_Worklet_Layout_Data",
 )
+#: Dropped even when a report is kept as a worklet for a dashboard. These point
+#: from the report *back* at the landing page that shows it — the opposite of
+#: the direction the dashboard's own worklet data expresses. Keeping them means
+#: an unresolvable reference in the destination and a cycle in the closure.
+#:
+#: Defined in `resolver` and imported here rather than duplicated: the resolver
+#: has to exclude exactly what this strips, or it invents a dependency edge over
+#: bytes that never get written.
+_WORKLET_BACKREF_FIELDS = WORKLET_BACKREF_FIELDS
+
+#: References to objects this tool does not migrate and cannot create, which
+#: therefore block a write on a destination that has never seen them.
+#:
+#: **Report tags.** Confirmed live 2026-08-07, first real migration into
+#: `commitconsulting`: report 18 of 25 failed with ``Invalid ID value.
+#: 'd07f2203d8fc1001b64bf07d1d130000' is not a valid ID value for type = 'WID'``,
+#: and that WID is a ``Report_Tag_Reference`` carrying
+#: ``Custom_Report_Tag_ID = 'Commit - Reporting Optimization Report-NDc3...'``.
+#: Five of the ten reports in that closure share the same tag, so it would have
+#: blocked five times over.
+#:
+#: A tag is an organisational label — it groups reports for discoverability and
+#: nothing depends on it, so the reports land untagged and someone re-tags them
+#: by hand if they care. That is the same trade already made for sharing and for
+#: ``Filter_Instances_Reference``. The field is ``minOccurs=0``, so removing it
+#: is valid.
+#:
+#: Note this is a *choice*, not a limitation: ``Get_Report_Tags`` and
+#: ``Put_Report_Tag`` both exist on this service, so tags could be migrated as
+#: their own dependency kind. That is more scope than "make dashboards work",
+#: and it is a clean follow-up if tags turn out to matter.
+_UNMIGRATABLE_REPORT_REFERENCES = ("Report_Tag_Reference",)
+
+
+#: References to objects created *inside* another object's write, whose
+#: destination WID is never reported back, but which carry a business ID that is
+#: stable across tenants.
+#:
+#: ``{element: id_type}``. For these, a WID with no entry in ``wid_map`` is not
+#: a delivered object passing through — it is a dead source WID, and the write
+#: fails on it. The business ID beside it addresses the same object correctly,
+#: so the WID is dropped and the business ID left to resolve.
+#:
+#: **Matrix measures.** Confirmed live 2026-08-07, second pass of the first real
+#: migration: `Custom Report Exceptions by Owner` failed with ``Invalid ID value.
+#: 'd07f2203d8fc1001b86ccee64da00000' is not a valid ID value for type = 'WID'``.
+#: That WID is a ``Matrix_Measure__All__Reference`` naming
+#: ``MATRIX_MEASURE-6-4022``, a measure defined inline on the sub-report through
+#: ``Matrix_Measures_Data``. Read-back proved the measure was already in the
+#: destination — written moments earlier as part of the sub-report, **with the
+#: same business ID** — so nothing was missing. Only the WID was stale.
+#:
+#: This cannot be fixed by mapping the WID: ``Matrix_Measure_DataType`` has an
+#: ``ID`` string and no reference element, so reading the sub-report back does
+#: not reveal the measure's destination WID at all. Dropping the WID is the only
+#: route, and it is sound because the business ID is genuinely stable — the same
+#: reasoning that makes ``substitute_wids`` leave nested
+#: ``Calculated_Field_Reference_ID`` values alone.
+#: **Matrix dimensions.** Same failure, same report, one round trip later:
+#: ``'d07f2203d8fc1001b86ccd16e57b0001' is not a valid ID value for type =
+#: 'WID'``, a ``Matrix_Dimension_Reference`` naming
+#: ``MATRIX_DIMENSION-6-50350-1618554797`` inside
+#: ``Tenanted_Duplicate_BO_Mapping_Data``. Also inline on the sub-report.
+#:
+#: Deliberately **not** listed: ``Worklet_Icon_Reference``, which also carries a
+#: ``*_Reference_ID`` (``DEFAULT_WORKLET_ICON``). That is a Workday-delivered
+#: icon, not an inline child — its WID is almost certainly global, it has never
+#: failed, and adding it would be acting on shape rather than evidence. Add
+#: entries here when a write actually fails on one, not before.
+_INLINE_CHILD_REFERENCES = {
+    "Matrix_Measure__All__Reference": "Matrix_Measure_Reference_ID",
+    "Matrix_Dimension_Reference": "Matrix_Dimension_Reference_ID",
+}
+
+
+def _drop_stale_inline_wids(obj: object, wid_map: Mapping[str, str]) -> int:
+    """Strip unmapped WIDs from inline-child references, in place.
+
+    Only touches a reference that still carries its business ID, and only when
+    the WID has no mapping — a mapped WID is correct and must be kept, since the
+    destination resolves it directly without a second lookup.
+    """
+    dropped = 0
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            id_type = _INLINE_CHILD_REFERENCES.get(key)
+            for reference in value if isinstance(value, list) else [value]:
+                if id_type is None or not isinstance(reference, dict):
+                    continue
+                entries = reference.get("ID")
+                if not isinstance(entries, list):
+                    continue
+                ids = {
+                    e.get("type"): e.get("_value_1")
+                    for e in entries
+                    if isinstance(e, dict)
+                }
+                if not ids.get(id_type):
+                    continue
+                wid = ids.get("WID")
+                if wid and wid not in wid_map.values():
+                    reference["ID"] = [
+                        e for e in entries if e.get("type") != "WID"
+                    ]
+                    dropped += 1
+            dropped += _drop_stale_inline_wids(value, wid_map)
+    elif isinstance(obj, list):
+        for item in obj:
+            dropped += _drop_stale_inline_wids(item, wid_map)
+    return dropped
 
 
 #: The fault Workday raises for a reference the destination cannot resolve. It
@@ -453,10 +568,76 @@ def _strip_self_references(obj: object, source_wid: str) -> int:
     return removed
 
 
-def _strip_sharing_and_placement(data: dict) -> None:
-    """Migrate every report unshared and unplaced, in place.
+#: ID types on ``Worklet_Landing_Page_Reference`` that name a *custom* dashboard
+#: and are stable across tenants. The delivered ones (``Landing_Page_ID``,
+#: ``Landing_Page_Group_ID``) are left alone — they resolve on their own.
+_LANDING_PAGE_STABLE_IDS = ("Custom_Landing_Page_Group_ID", "Custom_Landing_Page_ID")
 
-    Two reasons, and the second is the one that actually forces it.
+
+def _rewrite_worklet_landing_pages(data: dict, wid_map: Mapping[str, str]) -> None:
+    """Keep a worklet's dashboard association **only once the dashboard exists**.
+
+    **This field is not merely a back-pointer, which is what it was first taken
+    for.** It is the declaration that the report may be used as a worklet *on
+    that dashboard*, and without it the dashboard write fails outright:
+
+        The worklet "Commit - Last Run Date Greater than 18 Months or Never Run"
+        is not valid for the assigned dashboard.
+
+    Confirmed live 2026-08-07. Read-back showed the destination reports were
+    otherwise correct — ``Enable_As_Worklet=True``, ``Worklet_Max_Rows=100`` —
+    and differed from the source only in having no landing page reference.
+
+    **The two objects are mutually dependent, and Workday validates both ends at
+    write time.** Referencing the dashboard by its stable business ID before it
+    exists does not work either — also confirmed live:
+
+        'Commit - Optimize Reporting Dashboard' is not a valid ID value for
+        type = 'Custom_Landing_Page_Group_ID'
+
+    So the association can only be written after the dashboard is created, which
+    means a report that a dashboard shows has to be written twice. This function
+    handles the second pass and is deliberately conservative about the first:
+    the reference survives only when ``wid_map`` already maps the source
+    dashboard's WID, i.e. the dashboard has been created in this run. Otherwise
+    it is dropped, exactly as before, and the report writes cleanly.
+
+    Note this does *not* make the resolver treat the field as a dependency edge —
+    see :data:`~wdmigrator.migrate.resolver.WORKLET_BACKREF_FIELDS`. The
+    dashboard still depends on the report; the second write is a follow-up, not
+    a reordering.
+    """
+    for key in _WORKLET_BACKREF_FIELDS:
+        value = data.get(key)
+        if value is None:
+            continue
+        references = value if isinstance(value, list) else [value]
+        kept = []
+        for reference in references:
+            entries = reference.get("ID") if isinstance(reference, dict) else None
+            if not isinstance(entries, list):
+                continue
+            wid = next(
+                (e.get("_value_1") for e in entries if e.get("type") == "WID"), None
+            )
+            # Tested against the map's *values*: ``substitute_wids`` has already
+            # run over this payload, so a dashboard created in this run appears
+            # here as its destination WID, not its source one. A WID that is not
+            # a mapped destination is still the source's, and writing it fails.
+            if wid and wid in set(wid_map.values()):
+                kept.append({"ID": [{"type": "WID", "_value_1": wid}]})
+        if kept:
+            data[key] = kept
+        else:
+            data.pop(key, None)
+
+
+def _strip_sharing_and_placement(
+    data: dict, *, keep_worklet: bool = False, wid_map: Mapping[str, str] = {}
+) -> None:
+    """Migrate a report unshared, and normally unplaced, in place.
+
+    Two reasons for clearing sharing, and the second is the one that forces it.
 
     **Sharing does not survive a tenant hop meaningfully.** The security groups
     a report is restricted to are tenant-specific: the source's
@@ -472,16 +653,53 @@ def _strip_sharing_and_placement(data: dict) -> None:
     ``Worklet_Landing_Page_Reference`` to a custom landing page, none of which
     exist in the destination. Each is an ``Invalid ID value`` fault.
 
-    Worklet placement is cleared for the same reason sharing is: it is about
-    where the report is exposed, not what it computes, and it points at
-    destination objects (landing pages, icons) that a config migration has no
-    business inventing. ``Shared`` and ``Enable_As_Worklet`` are set to False
-    explicitly rather than removed, so the destination cannot inherit a default
-    that is more permissive than intended.
+    ``keep_worklet`` is the dashboard case, and it exists because the default is
+    actively wrong there. **A report reaches a dashboard only as a worklet** —
+    the dashboard names it through ``Worklet__All__Reference`` — so clearing
+    ``Enable_As_Worklet`` on a report a dashboard depends on would migrate the
+    dashboard with a hole where that worklet should be. A worklet report is also
+    written ``Shared=True``, which Workday requires; see below. Either way the
+    ``Restricted_to_*`` security groups are stripped, which is the part that is
+    tenant-specific.
+
+    Note the asymmetry in what ``keep_worklet`` preserves. It keeps the flag and
+    the presentation fields, but ``Worklet_Landing_Page_Reference`` is dropped
+    regardless: it points back at the dashboard from the report, and the
+    dashboard's own worklet data is the authoritative direction. Keeping it
+    would be both an unresolvable source reference and a dependency cycle.
+
+    ``Shared`` and ``Enable_As_Worklet`` are set explicitly rather than removed,
+    so the destination cannot inherit a default more permissive than intended.
     """
+    # The security-group restrictions go in every case. They are the part that
+    # is tenant-specific and the part that actually failed live.
+    for key in _SHARING_FIELDS:
+        data.pop(key, None)
+
+    if keep_worklet:
+        # **A dashboard worklet must be a shared report.** Confirmed live
+        # 2026-08-07 by elimination: with Shared=False every worklet was
+        # rejected with "The worklet ... is not valid for the assigned
+        # dashboard", including when written as the dashboard's only worklet;
+        # re-writing the same report with Shared=True and retrying the same
+        # dashboard payload succeeded immediately.
+        #
+        # This is narrower than it sounds, and does not undo the intent behind
+        # landing reports unshared. ``Shared`` is a separate flag from the
+        # ``Restricted_to_*`` references stripped above — those name specific
+        # source-tenant security groups and are what actually made reports
+        # unmigratable. A worklet report lands shared but with **no** inherited
+        # restrictions, so who can see it is decided by the destination's own
+        # defaults, not by the source's security model.
+        data["Shared"] = True
+        data["Enable_As_Worklet"] = True
+        _rewrite_worklet_landing_pages(data, wid_map)
+        return
+
     data["Shared"] = False
+
     data["Enable_As_Worklet"] = False
-    for key in _SHARING_FIELDS + _PLACEMENT_FIELDS:
+    for key in _PLACEMENT_FIELDS:
         data.pop(key, None)
 
 
@@ -493,6 +711,7 @@ def build_report_payload(
     owner_reference: dict | None = None,
     dest_wid: str | None = None,
     reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+    keep_worklet: bool = False,
 ) -> dict:
     """Arguments for ``Put_Tenanted_Report_Definition``.
 
@@ -502,7 +721,8 @@ def build_report_payload(
     default instead of the write failing on an unresolvable user. Filter
     condition instance references are stripped for the same reason — see
     :func:`_strip_filter_instance_references` — and sharing and worklet
-    placement are cleared by :func:`_strip_sharing_and_placement`.
+    placement are cleared by :func:`_strip_sharing_and_placement`. Report tags
+    go too, on every report: see :data:`_UNMIGRATABLE_REPORT_REFERENCES`.
     """
     data = node.payload.get("Tenanted_Report_Definition_Data")
     if not data:
@@ -514,7 +734,14 @@ def build_report_payload(
     if reference_decisions:
         _apply_reference_decisions(remapped, reference_decisions)
     _strip_filter_instance_references(remapped)
-    _strip_sharing_and_placement(remapped)
+    _strip_sharing_and_placement(remapped, keep_worklet=keep_worklet, wid_map=wid_map)
+    # Unconditional, on every report — not just dashboard ones. A tag is
+    # tenant-specific by construction, so it fails on any destination that has
+    # not been tagged identically by hand first.
+    for key in _UNMIGRATABLE_REPORT_REFERENCES:
+        remapped.pop(key, None)
+    # Runs AFTER substitute_wids, so "unmapped" means what it says.
+    _drop_stale_inline_wids(remapped, wid_map)
     if action is Action.CREATE:
         # Only on CREATE: an UPDATE addresses an object that already exists, so
         # a self-reference there is resolvable and must be left alone.
@@ -539,10 +766,169 @@ def build_report_payload(
     return payload
 
 
+#: Tenant-specific references stripped from every dashboard, in place.
+#:
+#: ``Security_Group_Reference`` is a ``Tenanted_Security_Group`` — the source's
+#: ``Report_Administrator`` is not the destination's. This is the same call
+#: already made for report sharing, but at a very different scale: measured live
+#: on `commitconsulting_dpt1`, **23,707** of these across the tabbed dashboards,
+#: on essentially every worklet configuration.
+#:
+#: ``Workday-Delivered_Security_Group_Reference`` was initially **kept**, on the
+#: reasoning that a delivered ``Workday_Security_Group_ID`` resolves in any
+#: tenant — the class-1/class-2 WID split the rest of this tool is built on.
+#: **That reasoning is wrong, disproved live 2026-08-07.** The dashboard write
+#: failed with:
+#:
+#:     Worklet "Custom Report Exceptions by Owner" references one or more
+#:     invalid metadata security groups.
+#:
+#: The only such group on the dashboard is ``implementers_wkdyGroup``, and no
+#: dashboard in the destination tenant references any metadata security group at
+#: all. "Workday-delivered" evidently does not imply "referenceable from a
+#: dashboard in every tenant" — so both kinds are stripped, and a migrated
+#: dashboard lands with no per-worklet visibility configuration.
+#:
+#: The practical consequence: whoever adopts the dashboard sets worklet
+#: visibility in the Workday UI. That is the same trade already made for report
+#: sharing, and the alternative is a dashboard that cannot be written at all.
+_DASHBOARD_TENANT_DATA_FIELDS = (
+    "Security_Group_Reference",
+    "Workday-Delivered_Security_Group_Reference",
+)
+
+#: Announcements are content, not configuration, and every reference in one
+#: points at tenant data that a config migration cannot create: uploaded images
+#: (``File_ID``/``Image_ID``), media, quicklinks, and the Worker an announcement
+#: is "from". Confirmed present live on the test dashboard — two announcements,
+#: each with an ``ANNOUNCEMENT_IMAGE-*`` reference that exists in one tenant only.
+_DASHBOARD_CONTENT_FIELDS = ("Announcements_Data",)
+
+
+def _strip_dashboard_tenant_data(obj: object) -> int:
+    """Remove tenant-specific references from a dashboard payload, in place."""
+    removed = 0
+    if isinstance(obj, dict):
+        for key in _DASHBOARD_TENANT_DATA_FIELDS:
+            if obj.pop(key, None):
+                removed += 1
+        for value in obj.values():
+            removed += _strip_dashboard_tenant_data(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            removed += _strip_dashboard_tenant_data(item)
+    return removed
+
+
+def build_dashboard_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+) -> dict:
+    """Arguments for ``Put_Custom_Dashboard_with_Tabs`` / ``_without_Tabs``.
+
+    Which of the two is decided by ``node.kind``; the flavours have separate
+    data blocks, reference keys and ID spaces, and are never interchangeable.
+
+    Three things are stripped, all for the same underlying reason — they name
+    tenant *data* rather than configuration, and no amount of dependency
+    resolution conjures it in the destination:
+
+    - tenanted security groups on every worklet (see
+      :data:`_DASHBOARD_TENANT_DATA_FIELDS`),
+    - announcements and their uploaded images (see
+      :data:`_DASHBOARD_CONTENT_FIELDS`),
+    - the dashboard's own self-reference on CREATE.
+
+    Delivered security groups are kept, since their business IDs resolve
+    anywhere. Anything left that the destination cannot resolve surfaces through
+    the normal ``Invalid ID value`` path into the reference-decision table.
+    """
+    tabbed = DASHBOARD_TABBED_BY_KIND[node.kind]
+    spec = DASHBOARD_FLAVOURS[tabbed]
+
+    data = node.payload.get(spec["data"])
+    if not data:
+        raise WriteError(f"{node.name!r} has no {spec['data']} to write.")
+
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+    _strip_dashboard_tenant_data(remapped)
+    for key in _DASHBOARD_CONTENT_FIELDS:
+        remapped.pop(key, None)
+    if action is Action.CREATE:
+        _strip_self_references(remapped, node.source_wid)
+
+    payload: dict = {spec["data"]: remapped}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE dashboard {node.name!r} without the destination's WID."
+            )
+        payload[spec["reference"]] = {"ID": [{"type": "WID", "_value_1": dest_wid}]}
+    else:
+        # Create-only guard, unique to these two operations among every Put this
+        # tool calls. Belt and braces on top of the planner's CREATE/SKIP
+        # decision: if the probe was wrong and the dashboard does exist, this
+        # makes the server refuse rather than overwrite something that cannot be
+        # restored.
+        payload["Add_Only"] = True
+
+    return payload
+
+
+def build_prompt_set_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+) -> dict:
+    """Arguments for ``Put_Prompt_Set``.
+
+    A prompt set's members carry ``Instance_Reference`` defaults pointing at
+    specific tenant instances — Organizations, Ledger Accounts, Workers. Those
+    are left in place rather than stripped: unlike a report filter's comparison
+    value, a prompt default is often a delivered instance (currencies, ISO
+    country codes — 244 of the 306 instance references on this tenant's prompt
+    sets are exactly that) which resolves fine. The ones that do not surface
+    through the reference-decision table, which is where that judgement belongs.
+    """
+    data = node.payload.get("Prompt_Set_Data")
+    if not data:
+        raise WriteError(f"{node.name!r} has no Prompt_Set_Data to write.")
+
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+    if action is Action.CREATE:
+        _strip_self_references(remapped, node.source_wid)
+
+    payload: dict = {"Prompt_Set_Data": remapped}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE prompt set {node.name!r} without the destination's WID."
+            )
+        payload["Prompt_Set_Reference"] = {"ID": [{"type": "WID", "_value_1": dest_wid}]}
+
+    return payload
+
+
 _OPERATIONS = {
     NodeKind.REPORT: "Put_Tenanted_Report_Definition",
     NodeKind.CALCULATED_FIELD: "Put_Calculated_Field",
     NodeKind.CALCULATED_MEASURE: "Put_Global_Calculated_Measure",
+    NodeKind.PROMPT_SET: "Put_Prompt_Set",
+    NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["put"],
+    NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["put"],
 }
 
 
@@ -654,6 +1040,9 @@ _RESPONSE_REFERENCE_KEY = {
     NodeKind.REPORT: "Tenanted_Report_Definition_Reference",
     NodeKind.CALCULATED_FIELD: "Calculated_Field_Reference",
     NodeKind.CALCULATED_MEASURE: "Calculated_Measure_Reference",
+    NodeKind.PROMPT_SET: "Prompt_Set_Reference",
+    NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["reference"],
+    NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["reference"],
 }
 
 
@@ -727,6 +1116,95 @@ def _attach_summary_calculations(connection: Connection, full_payload: dict) -> 
     return None
 
 
+#: Node-id prefixes that identify a dashboard, for the dependent scan below.
+_DASHBOARD_NODE_PREFIXES = tuple(f"{kind.value}:" for kind in DASHBOARD_TABBED_BY_KIND)
+
+
+def is_dashboard_worklet(node: Node) -> bool:
+    """Whether a dashboard in this migration shows ``node`` as a worklet.
+
+    Decided from the closure's reverse edges rather than from anything on the
+    report itself, because the report does not know: the relationship is
+    expressed entirely on the dashboard, through ``Worklet__All__Reference``.
+
+    This is what stops :func:`_strip_sharing_and_placement` clearing
+    ``Enable_As_Worklet`` on a report a dashboard needs. A report reached only
+    as a sub-report or picked on its own still lands unplaced, as before.
+
+    Non-report nodes are always False. A dashboard depends on plenty of things
+    that are not worklets — calculated fields it uses in a runtime prompt, the
+    prompt set itself — and "has a dashboard among its dependents" would answer
+    True for every one of them. Only a report can be a worklet here.
+    """
+    if node.kind is not NodeKind.REPORT:
+        return False
+    return any(
+        dependent.startswith(_DASHBOARD_NODE_PREFIXES) for dependent in node.required_by
+    )
+
+
+def _map_prompt_set_members(
+    connection: Connection, node: Node, dest_wid: str, wid_map: dict
+) -> str | None:
+    """Register destination WIDs for a written prompt set's members.
+
+    Members are written inline as part of the prompt set and get fresh WIDs, but
+    ``Put_Prompt_Set`` returns only the set's own reference — so a dashboard
+    that names an individual member through ``Prompt_Set_Member__All__Reference``
+    (530 such references on this tenant's tabbed dashboards) would otherwise be
+    written pointing at a source WID that means nothing in the destination.
+
+    Reading the set back is the only way to learn them. Matching is on
+    ``Prompt_Set_Member_ID``, the member's own business ID.
+
+    Returns a fault string, or None. A failure here is reported but is **not**
+    treated as a failed write: the prompt set itself is written and correct, and
+    the consequence is a downstream dashboard reference that will not resolve —
+    which surfaces on its own, against the object that actually has the problem.
+    """
+    source_members = (node.payload.get("Prompt_Set_Data") or {}).get(
+        "Tenanted_Prompt_Set_Member_Data"
+    ) or []
+    if isinstance(source_members, dict):
+        source_members = [source_members]
+    if not source_members:
+        return None
+
+    from wdmigrator.discovery.inventory import LookupOutcome, lookup_prompt_set
+
+    result = lookup_prompt_set(connection, wid=dest_wid)
+    if result.outcome is not LookupOutcome.FOUND or not result.data:
+        return (
+            f"Prompt set {node.name!r} was written, but reading it back to map "
+            "its members failed. A dashboard referencing an individual member "
+            f"of it may not resolve: {result.fault or result.outcome.value}"
+        )
+
+    dest_members = (result.data.get("Prompt_Set_Data") or {}).get(
+        "Tenanted_Prompt_Set_Member_Data"
+    ) or []
+    if isinstance(dest_members, dict):
+        dest_members = [dest_members]
+
+    def by_business_id(members):
+        found = {}
+        for member in members:
+            ids = ids_of(member.get("Prompt_Set_Member_Reference"))
+            business = ids.get("Prompt_Set_Member_ID") or member.get(
+                "Reference_for_Webservices"
+            )
+            if business and ids.get("WID"):
+                found[business] = ids["WID"]
+        return found
+
+    source_by_id = by_business_id(source_members)
+    dest_by_id = by_business_id(dest_members)
+    for business, source_member_wid in source_by_id.items():
+        if business in dest_by_id:
+            wid_map[source_member_wid] = dest_by_id[business]
+    return None
+
+
 def _reference_wid(response: dict, node: Node) -> str | None:
     return ids_of(response.get(_RESPONSE_REFERENCE_KEY[node.kind])).get("WID")
 
@@ -739,6 +1217,138 @@ def _is_transport_failure(exc: Exception) -> bool:
     read) may have committed server-side and must be treated as indeterminate.
     """
     return not isinstance(exc, Fault)
+
+
+def _strip_dashboard_worklets(data: dict) -> int:
+    """Remove every worklet configuration from a dashboard payload, in place."""
+    removed = 0
+    for tab in data.get("Content_Data") or []:            # tabbed
+        tab_data = tab.get("Tab_Data") or {}
+        if tab_data.pop("Dashboard_Admin_Configuration", None):
+            removed += 1
+    if data.pop("Worklets_Data", None):                    # untabbed
+        removed += 1
+    return removed
+
+
+def _defer_dashboard_worklets(payload: dict, data_key: str) -> dict | None:
+    """Hold a dashboard's worklets back for a second write.
+
+    **The dashboard and its worklet reports are mutually dependent, and Workday
+    validates both ends at write time.** Confirmed live 2026-08-07:
+
+        The worklet "Commit - Last Run Date Greater than 18 Months or Never Run"
+        is not valid for the assigned dashboard.
+
+    A report is only a valid worklet for a dashboard once it carries a
+    ``Worklet_Landing_Page_Reference`` naming that dashboard — and the report
+    cannot be written with one before the dashboard exists, not even by the
+    dashboard's stable business ID (also confirmed live: ``'Commit - Optimize
+    Reporting Dashboard' is not a valid ID value for type =
+    'Custom_Landing_Page_Group_ID'``).
+
+    Neither object can go first, so the dashboard is written twice:
+
+    1. a shell with no worklet configurations — valid, since ``Content_Data``
+       and ``Dashboard_Admin_Configuration`` are both ``minOccurs=0``. Tabs,
+       menus and prompt bindings all survive;
+    2. the reports are re-written, now naming the real destination dashboard;
+    3. the dashboard is written again, complete.
+
+    Mutates ``payload`` to drop the worklets and returns the *original* for the
+    follow-up write, or None if there were none to defer.
+
+    Same shape as :func:`_defer_summary_calculations`, and the same reasoning:
+    an ordering constraint, not a validity one.
+    """
+    data = payload.get(data_key)
+    if not isinstance(data, dict):
+        return None
+    full = copy.deepcopy(payload)
+    if _strip_dashboard_worklets(data) == 0:
+        return None
+    return full
+
+
+def _worklet_reports_for(node: Node, plan: MigrationPlan) -> list[Node]:
+    """The report nodes this dashboard shows as worklets."""
+    return [
+        candidate
+        for candidate in plan.ordered_nodes
+        if candidate.kind is NodeKind.REPORT
+        and node.node_id in candidate.required_by
+    ]
+
+
+def _attach_dashboard_worklets(
+    connection: Connection,
+    node: Node,
+    plan: MigrationPlan,
+    full_payload: dict,
+    operation: str,
+    *,
+    owner_reference: dict | None = None,
+) -> str | None:
+    """Phases two and three. Returns a fault string, or None on success.
+
+    By the time this runs the dashboard exists and ``plan.wid_map`` maps its
+    source WID to the destination's, so rebuilding each worklet report's payload
+    now produces a real ``Worklet_Landing_Page_Reference`` — see
+    :func:`_rewrite_worklet_landing_pages`, which is a no-op until exactly that
+    mapping is present.
+
+    The report re-writes are reference-less, which **upserts** on
+    ``Custom_Report_ID`` rather than creating a duplicate (verified live earlier
+    in this project: one row before, one after, same WID). The final dashboard
+    write drops ``Add_Only``, which was set on the shell write and would now
+    make the server refuse the very object it just created.
+    """
+    for report_node in _worklet_reports_for(node, plan):
+        try:
+            payload = build_report_payload(
+                report_node,
+                plan.wid_map,
+                action=Action.CREATE,
+                owner_reference=owner_reference,
+                reference_decisions=plan.reference_decisions,
+                keep_worklet=True,
+            )
+        except WriteError as exc:
+            return f"Could not rebuild worklet report {report_node.name!r}: {exc}"
+
+        try:
+            connection.limiter.wait()
+            raw = connection.service.Put_Tenanted_Report_Definition(**payload)
+        except Exception as exc:  # noqa: BLE001 - surfaced on the record
+            return (
+                f"Dashboard shell was created, but associating worklet "
+                f"{report_node.name!r} with it failed: "
+                f"{connection.redact(str(exc))}"
+            )
+        exceptions = extract_exceptions(serialize_object(raw) or {})
+        if is_failure(exceptions):
+            detail = "; ".join(f"{e.classification}: {e.message}" for e in exceptions)
+            return (
+                f"Worklet {report_node.name!r} was rejected while being "
+                f"associated with the dashboard: {detail}"
+            )
+
+    # Phase three: the dashboard, complete. Add_Only must go — it guarded the
+    # create, and the object now exists.
+    final = {k: v for k, v in full_payload.items() if k != "Add_Only"}
+    try:
+        connection.limiter.wait()
+        raw = getattr(connection.service, operation)(**final)
+    except Exception as exc:  # noqa: BLE001
+        return (
+            "Dashboard was created and its worklet reports updated, but writing "
+            f"its worklets back failed: {connection.redact(str(exc))}"
+        )
+    exceptions = extract_exceptions(serialize_object(raw) or {})
+    if is_failure(exceptions):
+        detail = "; ".join(f"{e.classification}: {e.message}" for e in exceptions)
+        return f"Dashboard worklets were rejected: {detail}"
+    return None
 
 
 # ── Execution ────────────────────────────────────────────────────────────────
@@ -779,7 +1389,17 @@ def write_node(
     operation = operation_for(node)
 
     try:
-        if node.kind is NodeKind.REPORT:
+        if node.kind in DASHBOARD_TABBED_BY_KIND:
+            payload = build_dashboard_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
+            )
+        elif node.kind is NodeKind.PROMPT_SET:
+            payload = build_prompt_set_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
+            )
+        elif node.kind is NodeKind.REPORT:
             payload = build_report_payload(
                 node,
                 plan.wid_map,
@@ -787,6 +1407,7 @@ def write_node(
                 owner_reference=owner_reference,
                 dest_wid=dest_wid,
                 reference_decisions=plan.reference_decisions,
+                keep_worklet=is_dashboard_worklet(node),
             )
         elif node.kind is NodeKind.CALCULATED_MEASURE:
             payload = build_calculated_measure_payload(
@@ -803,10 +1424,16 @@ def write_node(
         record.fault = str(exc)
         return record
 
-    # A matrix report cannot carry its summary calculations on the write that
-    # creates it — see _defer_summary_calculations. Holding them back turns one
-    # node into two SOAP calls, still one record.
+    # Two deferrals, same shape: an ordering constraint the schema does not
+    # express, handled by writing the object twice. Both turn one node into
+    # several SOAP calls while staying a single record.
     deferred = _defer_summary_calculations(payload) if node.kind is NodeKind.REPORT else None
+    deferred_worklets = (
+        _defer_dashboard_worklets(payload, DASHBOARD_FLAVOURS[
+            DASHBOARD_TABBED_BY_KIND[node.kind]]["data"])
+        if node.kind in DASHBOARD_TABBED_BY_KIND
+        else None
+    )
 
     if guard.dry_run:
         # Serialize through the real binding but never send. This is where
@@ -893,6 +1520,34 @@ def write_node(
             record.dest_wid = returned_wid
             record.duration_ms = int((time.monotonic() - started) * 1000)
             return record
+
+    # Phases two and three for a dashboard that has worklets. The WID has to be
+    # registered first: rebuilding the worklet reports' payloads is what makes
+    # their landing-page reference resolve, and that reads plan.wid_map.
+    if deferred_worklets is not None:
+        plan.wid_map[node.source_wid] = returned_wid
+        worklet_fault = _attach_dashboard_worklets(
+            connection, node, plan, deferred_worklets, operation,
+            owner_reference=owner_reference,
+        )
+        if worklet_fault is not None:
+            record.status = WriteStatus.FAILED
+            record.fault = worklet_fault
+            # Recorded, unlike the exceptions case: the dashboard demonstrably
+            # exists — as a shell — and whoever cleans up has to be able to find
+            # it. This service has no delete operation.
+            record.dest_wid = returned_wid
+            record.duration_ms = int((time.monotonic() - started) * 1000)
+            return record
+
+    # Prompt set members get fresh WIDs that the Put response does not report.
+    # Recorded as a warning rather than a failure — see _map_prompt_set_members.
+    if node.kind is NodeKind.PROMPT_SET:
+        member_fault = _map_prompt_set_members(
+            connection, node, returned_wid, plan.wid_map
+        )
+        if member_fault is not None:
+            record.fault = member_fault
 
     record.status = WriteStatus.SUCCESS
     record.dest_wid = returned_wid

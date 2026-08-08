@@ -24,9 +24,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Iterable, Mapping
 
-from wdmigrator.discovery.inventory import Index, ids_of
+from wdmigrator.discovery.inventory import DASHBOARD_FLAVOURS, Index, ids_of
 from wdmigrator.migrate.ordering import (
+    extract_dashboard_refs,
     extract_measure_refs,
+    extract_prompt_set_refs,
     extract_reference_id_refs,
     extract_report_refs,
     extract_wid_refs,
@@ -37,6 +39,18 @@ class NodeKind(str, Enum):
     CALCULATED_FIELD = "calculated_field"
     REPORT = "report"
     CALCULATED_MEASURE = "calculated_measure"
+    PROMPT_SET = "prompt_set"
+    #: The two dashboard flavours are separate kinds rather than one kind with a
+    #: flag, because everything downstream — the data block, the Put operation,
+    #: the response reference key, the probe's ID type — is keyed by kind, and a
+    #: flag would need special-casing at every one of those points.
+    DASHBOARD = "dashboard"
+    DASHBOARD_TABBED = "dashboard_tabbed"
+
+
+#: Which dashboard kind corresponds to which flavour, in both directions.
+DASHBOARD_KINDS = {False: NodeKind.DASHBOARD, True: NodeKind.DASHBOARD_TABBED}
+DASHBOARD_TABBED_BY_KIND = {kind: tabbed for tabbed, kind in DASHBOARD_KINDS.items()}
 
 
 class PartialIndexError(ValueError):
@@ -89,6 +103,12 @@ class Closure:
     #: ``Custom_Report_ID`` values for sub-reports that could not be fetched.
     #: A composite cannot render a sub-report the destination does not have.
     unresolved_report_ids: set[str] = field(default_factory=set)
+    #: ``Prompt_Set_ID`` values named by a dashboard but absent from the prompt
+    #: set index. Same reasoning as the others: the reference states outright
+    #: that the target is a prompt set, so not finding it is a real gap.
+    unresolved_prompt_set_ids: set[str] = field(default_factory=set)
+    #: Dashboard business IDs named by another dashboard but not in the index.
+    unresolved_dashboard_ids: set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
         return len(self.nodes)
@@ -161,11 +181,58 @@ def _measure_node(wid: str, payload: dict) -> Node:
     )
 
 
+def _prompt_set_node(wid: str, payload: dict) -> Node:
+    data = payload.get("Prompt_Set_Data") or {}
+    ids = ids_of(payload.get("Prompt_Set_Reference"))
+    return Node(
+        node_id=node_id_for(NodeKind.PROMPT_SET, wid),
+        kind=NodeKind.PROMPT_SET,
+        source_wid=wid,
+        reference_id=ids.get("Prompt_Set_ID"),
+        name=data.get("Name"),
+        payload=payload,
+        selected=False,
+    )
+
+
+def _dashboard_node(wid: str, payload: dict, *, tabbed: bool, selected: bool) -> Node:
+    spec = DASHBOARD_FLAVOURS[tabbed]
+    data = payload.get(spec["data"]) or {}
+    ids = ids_of(payload.get(spec["reference"]))
+    kind = DASHBOARD_KINDS[tabbed]
+    return Node(
+        node_id=node_id_for(kind, wid),
+        kind=kind,
+        source_wid=wid,
+        reference_id=ids.get(spec["id_type"]),
+        name=data.get("Name"),
+        payload=payload,
+        selected=selected,
+    )
+
+
 _DATA_BLOCK = {
     NodeKind.REPORT: "Tenanted_Report_Definition_Data",
     NodeKind.CALCULATED_FIELD: "Calculated_Field_Data",
     NodeKind.CALCULATED_MEASURE: "Calculated_Measure_Data",
+    NodeKind.PROMPT_SET: "Prompt_Set_Data",
+    NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["data"],
+    NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["data"],
 }
+
+
+#: Fields naming the dashboard a report is *shown on*. The dependency runs the
+#: other way — the dashboard names its worklets — and
+#: ``writer._strip_sharing_and_placement`` drops these on every write, in both
+#: the worklet and non-worklet branches.
+#:
+#: They must be excluded from the dependency walk for the same reason. Confirmed
+#: live 2026-08-07: resolving `Commit - Optimize Reporting Dashboard` without
+#: this produced a hard cycle — ``dashboard_tabbed:6c141afe... -> report:2d8af1b5...
+#: -> dashboard_tabbed:6c141afe...`` — and ``topological_sort`` refuses a cycle,
+#: so the whole migration was unschedulable over a reference that never gets
+#: written.
+WORKLET_BACKREF_FIELDS = ("Worklet_Landing_Page_Reference",)
 
 
 def _dependency_payload(node: Node) -> dict:
@@ -173,8 +240,16 @@ def _dependency_payload(node: Node) -> dict:
 
     Scoped to the data block so the object's own reference block does not
     register as a dependency on itself.
+
+    **This must reflect what the writer will actually send, not what the source
+    returned.** A reference the writer strips is not a dependency, and treating
+    it as one invents edges — including cycles — over bytes that never reach the
+    destination. See :data:`WORKLET_BACKREF_FIELDS`.
     """
-    return node.payload.get(_DATA_BLOCK[node.kind]) or {}
+    data = node.payload.get(_DATA_BLOCK[node.kind]) or {}
+    if node.kind is NodeKind.REPORT and any(f in data for f in WORKLET_BACKREF_FIELDS):
+        return {k: v for k, v in data.items() if k not in WORKLET_BACKREF_FIELDS}
+    return data
 
 
 def resolve_closure(
@@ -182,10 +257,13 @@ def resolve_closure(
     cf_index: Index,
     selected_field_wids: Iterable[str] = (),
     selected_reports: Mapping[str, dict] | None = None,
+    selected_dashboards: Mapping[str, dict] | None = None,
     allow_partial_index: bool = False,
     expected_index_size: int | None = None,
     measure_loader: Callable[[str], dict | None] | None = None,
     report_loader: Callable[[str], dict | None] | None = None,
+    prompt_set_index: Index | None = None,
+    dashboard_index: Index | None = None,
 ) -> Closure:
     """Expand a selection into every object that has to be written.
 
@@ -197,10 +275,23 @@ def resolve_closure(
         allow_partial_index: Opt out of the completeness check. Only for tests.
         expected_index_size: Total the index claims the tenant has, when known,
             so a truncated sweep can be caught.
+        selected_dashboards: ``{dashboard_wid: full payload}`` the user picked.
+            Payloads come from the dashboard index, which carries the flavour;
+            the flavour is re-derived here from which reference key the payload
+            actually holds, so a mislabelled selection cannot route a write to
+            the wrong Put operation.
+        prompt_set_index: The complete prompt-set index, or None to skip prompt
+            sets. Indexed rather than loaded on demand because the request
+            criteria do not work — see
+            :func:`~wdmigrator.discovery.inventory.iter_prompt_set_index`.
+        dashboard_index: The complete dashboard index, or None to skip
+            dashboard-to-dashboard edges. Dashboards nest, and a nested one has
+            to exist in the destination first.
         report_loader: ``wid -> payload`` for sub-reports, or None to skip
             them. A composite report names its sub-reports inline, and each has
             to exist in the destination first. Same on-demand contract as
-            ``measure_loader``.
+            ``measure_loader``. Also used for the reports a dashboard shows as
+            worklets, which are named the same way.
         measure_loader: ``wid -> payload`` for calculated measures, or None to
             skip them entirely. **This is the one argument that can make this
             function touch the network** — measures are not indexed, so each
@@ -236,6 +327,14 @@ def resolve_closure(
     # Seed nodes.
     for wid, payload in selected_reports.items():
         node = _report_node(wid, payload, selected=True)
+        closure.nodes[node.node_id] = node
+
+    for wid, payload in (selected_dashboards or {}).items():
+        # Derived from the payload rather than trusted from the caller: the two
+        # flavours are written by different operations, and getting it wrong
+        # sends a create to the wrong one.
+        tabbed = DASHBOARD_FLAVOURS[True]["reference"] in payload
+        node = _dashboard_node(wid, payload, tabbed=tabbed, selected=True)
         closure.nodes[node.node_id] = node
 
     for wid in selected_field_wids:
@@ -327,9 +426,46 @@ def resolve_closure(
                 dep = _report_node(report_wid, fetched, selected=False)
             _link(dep, dep_id, node)
 
+        # Prompt sets and nested dashboards, both resolved against an index
+        # rather than a loader — see the argument docs for why the on-demand
+        # route is not available for either.
+        prompt_sets: dict[str, str] = (
+            extract_prompt_set_refs(payload) if prompt_set_index is not None else {}
+        )
+        for ps_wid, ps_id in prompt_sets.items():
+            if ps_wid == node.source_wid:
+                continue
+            dep_id = node_id_for(NodeKind.PROMPT_SET, ps_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = prompt_set_index.payload(ps_wid)
+                if fetched is None:
+                    closure.unresolved_prompt_set_ids.add(ps_id)
+                    continue
+                dep = _prompt_set_node(ps_wid, fetched)
+            _link(dep, dep_id, node)
+
+        dashboards: dict[str, tuple[str, bool]] = (
+            extract_dashboard_refs(payload) if dashboard_index is not None else {}
+        )
+        for db_wid, (db_id, tabbed) in dashboards.items():
+            if db_wid == node.source_wid:
+                continue  # a dashboard names itself; stripped on CREATE
+            dep_id = node_id_for(DASHBOARD_KINDS[tabbed], db_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = dashboard_index.payload(db_wid)
+                if fetched is None:
+                    closure.unresolved_dashboard_ids.add(db_id)
+                    continue
+                dep = _dashboard_node(db_wid, fetched, tabbed=tabbed, selected=False)
+            _link(dep, dep_id, node)
+
         for ref_wid in extract_wid_refs(payload, exclude=[node.source_wid]):
             if ref_wid in measures or ref_wid in reports:
                 continue  # already handled as a measure or a sub-report
+            if ref_wid in prompt_sets or ref_wid in dashboards:
+                continue  # already handled as a prompt set or nested dashboard
             if ref_wid not in cf_index:
                 closure.passthrough_wids.add(ref_wid)
                 continue

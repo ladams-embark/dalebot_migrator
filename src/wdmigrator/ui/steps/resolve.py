@@ -41,8 +41,15 @@ def _compute(state: WizardState) -> None:
             # distinct measure — a handful per report, not a sweep.
             measure_loader=measure_loader_for(state.source.connection),
             # Composite reports render sub-reports, which must exist in the
-            # destination first. Same on-demand contract as measures.
+            # destination first. Same on-demand contract as measures. Also
+            # covers the reports a dashboard shows as worklets, which are
+            # named the same way.
             report_loader=report_loader_for(state.source.connection),
+            selected_dashboards=state.selected_dashboards,
+            # Indexes rather than loaders: neither object kind has usable
+            # request criteria, so there is no on-demand route to take.
+            prompt_set_index=state.prompt_set_index,
+            dashboard_index=state.dashboard_index,
         )
     except PartialIndexError as exc:
         state.closure = None
@@ -177,6 +184,18 @@ def gate(state: WizardState) -> list[Blocker]:
             "sub-report",
             "Check the source ISU can read the sub-report. A composite cannot "
             "render a sub-report the destination does not have.",
+        ),
+        (
+            sorted(state.closure.unresolved_prompt_set_ids),
+            "prompt set",
+            "Rebuild the prompt set index in Select. Reading prompt sets needs an "
+            "implementer account, so confirm the source connection is one.",
+        ),
+        (
+            sorted(state.closure.unresolved_dashboard_ids),
+            "nested dashboard",
+            "Rebuild the dashboard index in Select. A dashboard shown inside "
+            "another has to exist in the destination first.",
         ),
     ):
         if missing:
