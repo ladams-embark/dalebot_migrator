@@ -1,6 +1,7 @@
 # dalebot_migrator
 
-Migrates configuration (calculated fields + custom report definitions) from a
+Migrates configuration (calculated fields, calculated measures, custom report
+definitions, custom dashboards and their prompt sets) from a
 SOURCE Workday tenant to a DESTINATION tenant via the
 **Core_Implementation_Service** SOAP web service. (`Report_Metadata` exposes
 the same operations but is rejected live on this tenant regardless of domain

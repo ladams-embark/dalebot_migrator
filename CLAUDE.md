@@ -33,19 +33,27 @@ for now.
 All module paths below are relative to `src/wdmigrator/`, so `auth/client.py`
 means `src/wdmigrator/auth/client.py`, imported as `wdmigrator.auth.client`.
 
-Build order:
-1. `config/targets.py` + `safety.py` — **done.** Tenant URL parsing and the
-   write guard. Built first deliberately: the guard has to exist before any
-   code that can write to a tenant. 57 offline tests.
-2. `auth/client.py` ← **next**
-3. `discovery/inventory.py` — index sweeps at Count=999, disk cache
-4. `migrate/ordering.py` — DAG + Kahn topological sort (child-most first)
-5. `migrate/resolver.py` — WID classification + dependency closure walker
-6. `migrate/planner.py` — CREATE/UPDATE/SKIP via destination probing
-7. `migrate/writer.py` — dry-run default; inspect `Exceptions_Response_Data`
-8. `api.py` — the only engine module the UI imports; generator-based
-9. `ui/` — Streamlit gated wizard; then `validation/verify.py`, `cli.py`
-10. Tests in `tests/` alongside each module (see the Testing approach section)
+Build order — **all done except where noted**. Kept because the *ordering*
+still explains the architecture: the write guard exists before anything that
+can write, and the engine is complete before the UI that drives it.
+1. `config/targets.py` + `safety.py` — tenant URL parsing and the write guard.
+2. `auth/client.py` — endpoint-pinned clients, WS-Security.
+3. `discovery/inventory.py` — index sweeps at Count=999, disk cache.
+4. `migrate/ordering.py` — DAG + Kahn topological sort (child-most first).
+5. `migrate/resolver.py` — WID classification + dependency closure walker.
+6. `migrate/planner.py` — CREATE/UPDATE/SKIP via destination probing.
+7. `migrate/writer.py` — dry-run default; inspect `Exceptions_Response_Data`.
+8. `api.py` — the only engine module the UI imports; generator-based.
+9. `ui/` — Streamlit gated wizard. **`validation/verify.py` is still a stub
+   and `cli.py` does not exist** — the only two gaps left.
+10. Tests in `tests/` alongside each module (see the Testing approach section).
+
+Migratable object kinds, in dependency order: calculated fields → calculated
+measures → reports (including composites and matrix reports) → prompt sets →
+custom dashboards. Nothing hardcodes that order; it falls out of the DAG, and
+that is deliberate — a hardcoded phase order would have hidden the nested
+calculated-field gap and the dashboard/worklet cycle, both found because the
+sort refused to produce an order.
 
 Two structural rules for this build:
 - **Nothing under `src/wdmigrator/` except `ui/` may import streamlit or
@@ -153,7 +161,7 @@ After any ISU permission change in Workday: run "Activate Pending Security Polic
 | Report names are **not unique** — 7 of 999 sampled reports shared one | A duplicated name must resolve to UNKNOWN, never a guess. Overwriting the wrong report cannot be undone. |
 | `Put_Calculated_Field_ResponseType` contains `Exceptions_Response_Data` | **A HTTP-200 no-fault PUT can still have failed.** Always inspect it — "no fault" ≠ success. |
 | `Put_Tenanted_Report_Definition_ResponseType` has **no** exceptions block | Error handling is asymmetric between the two writers. |
-| Volumes on `commitconsulting_dpt1`: ~9,650+ CFs (grows as report-scoped fields get promoted to global — was 9,652, now 9,654) / ~5,153 reports | Index once, cache, rate-limit at ~8 calls/sec. Re-sweep rather than trust an old cache if a dependency unexpectedly won't resolve. |
+| Volumes on `commitconsulting_dpt1`: ~9,700 CFs (grows as report-scoped fields get promoted to global — 9,652 → 9,654 → 9,716 → 9,717 across sessions) / ~5,197 reports / 55 measures / 57 prompt sets / 179 dashboards | Index once, cache, rate-limit at ~8 calls/sec. Re-sweep rather than trust an old cache if a dependency unexpectedly won't resolve. Dashboards and prompt sets are one page each, so their sweeps are free next to the 25s CF sweep. |
 | **No Configuration Package / Object Transporter API exists** | Probed `Object_Transporter`, `Configuration_Package`, `Integrations`, `Custom_Object`, `Change_Set`, `Solution`, `Workday_Extensibility` — none expose a package/transport/migration operation. OX is UI-only tooling. Scope by explicit user selection instead. |
 | This service has **no delete operation** | Nothing written can be undone by the tool. See `src/wdmigrator/safety.py`. |
 | **`Tenanted_Report_Column_Data.External_Field_Reference` is not always a `Calculated_Field` reference — it's a superset `External_Field` ID space** | Its enumeration (`External_FieldReferenceEnumeration` in the WSDL) is `WID`, `Calculated_Field_ID`, `Custom_Field_ID`, `Computed_Data_Source_Field_ID`, `Cube_Field_Last_Entry_ID`, `Custom_Field_Data_Set_ID`, `Extension_Computed_Data_Field_Reference_ID`, `External_Analytics_Data_Source_Field_ID`, plus two `Business_View_*_Field` variants — several distinct underlying object types share one WID namespace. `Get_Calculated_Fields` by WID returning `NOT_FOUND` for a column reference is real and not a bug — **but it does not by itself mean the field is unmigratable.** See the next two rows: it can also mean "report-scoped calculated field, not yet promoted to global" (fixable, see below) or "delivered field, passes through fine regardless" (also fine — confirmed live on "AE Previous Worker," which has exactly this shape of reference and migrates successfully). There is nothing in this WSDL that distinguishes those cases from a genuinely unmigratable `Custom_Field_ID`-space reference ahead of time — **do not build a pre-flight blocker on "not a Calculated_Field" alone; it was tried and reverted for producing false positives.** |
@@ -651,7 +659,9 @@ Never write to the destination tenant in any test, marked or not.
 ---
 
 ## Known risks / pre-flight checklist before first real migration
-- [ ] **A real, distinct destination tenant exists.** As of 2026-07-31 `.env` points `WD_DEST_*` at the same tenant as the source (`commitconsulting_dpt1`, same host, same ISU). `safety.py` blocks live runs in that configuration; dry runs still work.
+- [ ] **A real, distinct destination tenant exists.** Satisfied: source is `commitconsulting_dpt1` @ `impl-services1.wd12.myworkday.com`, destination is `commitconsulting` @ `impl-services1.wd501.myworkday.com`. `safety.py` still blocks live runs unconditionally if the two ever resolve to the same tenant.
+- [ ] **Check the `.env` host/tenant pairing before connecting.** These two tenants live on *different* pods, and a mismatched pair fails with an unhelpful HTTP 500 on the WSDL fetch rather than an auth error. Confirm by fetching `https://{host}/ccx/service/{tenant}/Core_Implementation_Service/v46.0?wsdl` and looking for a ~5.5 MB 200.
+- [ ] **Expect the destination to be refreshed.** `commitconsulting` was refreshed overnight during session 9 and lost 24 migrated objects. The destination probe handles this correctly (everything reverts to CREATE), but when a probe result looks surprising, sweep the destination rather than trusting the probe — re-creating something that already exists cannot be undone.
 - [ ] **Migrating dashboards? Both connections must be implementer accounts.** A normal ISU cannot read or write them regardless of domain grants (see above). Reports and calculated fields are unaffected.
 - [ ] Source ISU has Get on Configuration Set: Custom Reports and Fields + activated
 - [ ] Destination ISU has Get and Put on Configuration Set: Custom Reports and Fields + activated

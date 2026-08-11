@@ -1,10 +1,11 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-08-03 (session 6)_
+_Last updated: 2026-08-07 (session 9)_
 
 ## What this project is
-A Python tool that migrates configuration (calculated fields + custom report
-definitions) from a SOURCE Workday tenant to a DESTINATION tenant via the
+A Python tool that migrates configuration (calculated fields, custom report
+definitions, custom dashboards and their prompt sets) from a SOURCE Workday
+tenant to a DESTINATION tenant via the
 **Core_Implementation_Service** SOAP web service. (`Report_Metadata` exposes
 the same operations but is rejected live on this tenant regardless of domain
 security — see `docs/WSDL_NOTES.md`.) Authoritative context lives in:
@@ -20,9 +21,10 @@ security — see `docs/WSDL_NOTES.md`.) Authoritative context lives in:
 ## Where the code lives
 Everything is one installable package, `wdmigrator`, under `src/`:
 
-- `src/wdmigrator/` — `auth/`, `discovery/`, `migrate/`, `validation/`. Each is a
-  real package with an `__init__.py` docstring; **the modules themselves are not
-  yet written.** Build order is in `docs/START_HERE.md`.
+- `src/wdmigrator/` — `auth/`, `config/`, `discovery/`, `migrate/`, `ui/`,
+  `validation/`, plus `api.py`, `safety.py`, `secrets.py`, `ratelimit.py`.
+  **All built and green except `validation/verify.py`, which is still a stub.**
+  `api.py` is the only module `ui/` imports.
 - `src/wdmigrator/assets/core_implementation_service_wsdl.xml` — local copy of
   the tenant WSDL (Core_Implementation_Service, v47.0). Point `zeep` at this to
   build a client OFFLINE (no tenant round-trip needed just to construct the
@@ -35,27 +37,16 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 
 ## PICK UP HERE — next session
 
-**Branch:** working directly on `master` now — `core-implementation-service-migration`
-was merged 2026-08-03 via [PR #1](https://github.com/ladams-embark/dalebot_migrator/pull/1)
-(opened and merged in the browser — `gh` CLI is not installed on this
-machine), and this session's work (endpoint discovery, version hardcoding)
-was committed straight to `master`, same as the small housekeeping commit
-right after the merge. No open PR right now.
+**Branch:** `master`, and everything is merged into it. Session 9's work
+landed as `a9a28fd` + merge `6353478` (branch `custom-dashboard-migration`,
+merged with `--no-ff`, matching the pattern of every other feature branch
+here). `gh` CLI is **not installed** — PRs, if wanted, must be opened in the
+browser.
 
-**State:** engine steps 1–8 are built and green. `ui/` (step 9, the Streamlit
-wizard) is built: `app.py`, `state.py`, `runner.py`, `safety_ui.py`,
-`secrets.py`, `components.py`, plus `steps/{connect,select,resolve,conflicts,
-confirm,execute,results}.py`, root `streamlit_app.py`, `.streamlit/
-config.toml`. `pyproject.toml` has the `ui` extra
-(`streamlit>=1.40`, `pandas>=2.2`), installed in `.venv`.
-
-**A live write has now succeeded — the first one this project has ever made.**
-See "Done this session" below. `writer.py` is no longer unproven: a
-calculated field and a report (with a correctly WID-remapped dependency
-between them) were both created live on a genuinely distinct destination
-tenant, `commitconsulting_dpt5`, and read back to confirm. The "no real
-destination tenant" blocker from earlier sessions is resolved — `.env`'s
-`WD_DEST_*` now points at `commitconsulting_dpt5`, not the source tenant.
+**State: the tool migrates calculated fields, reports (including composites
+and matrix reports), calculated measures, custom dashboards and prompt sets,
+end to end, live-verified.** Engine and `ui/` are both built. 613 offline
+tests green; `pytest` needs no `.env` and no network.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -64,90 +55,90 @@ pytest -m live      # read-only source-tenant tests
 python scripts/selfcheck.py
 ```
 
-**Next step: manual walkthrough of the Streamlit wizard end-to-end**
-(`streamlit run streamlit_app.py`), then step 10 (`validation/verify.py`,
-`cli.py`). The UI has been exercised live piecemeal (Connect, Select,
-Resolve, Conflicts) via manual testing and bug fixes during this session, but
-never all the way through Confirm → Execute → Results in the browser itself
-— the successful live write above went through hand-written scripts in
-`scripts/` (see below), not the wizard's own Execute step, because driving
-credential-entry forms isn't something the assistant can do. Someone with
-hands needs to walk the wizard itself through a live run at least once.
+### Tenants — read this before running anything
 
-**"PLNF - All Workers" is resolved — it migrates cleanly now.** What looked
-like a hard capability boundary (session 4's "New known limitation," see
-CLAUDE.md's verified-facts table for the full corrected writeup) turned out
-to be a **report-scoped calculated field that hadn't been promoted to
-global**, not a `Custom_Field`-space object this tool can't touch. Once the
-user promoted `CF_LRV_-_Home_State` to a global calculated field in the
-Workday UI, it took a real activation delay (both a targeted
-`Get_Calculated_Fields(wid=...)` and the bulk index sweep still returned
-`NOT_FOUND` immediately after promotion) before it became visible **under
-its original WID** — no new object, no code changes needed once it was
-actually readable. Live-verified end to end: `CF LRV - Home State` created,
-`PLNF - All Workers` created, the report column's WID correctly remapped to
-the new destination CF, owner correctly set to `wd-support`.
+| | tenant | services host |
+|---|---|---|
+| source | `commitconsulting_dpt1` | `impl-services1.wd12.myworkday.com` |
+| destination | `commitconsulting` | `impl-services1.wd501.myworkday.com` |
 
-A pre-flight check that tried to auto-detect "unmigratable" `External_Field`
-references was built and then **reverted** during this same session — it
-would have false-positived on "AE Previous Worker" (a report that already
-migrates successfully live has a non-`Calculated_Field` `External_Field`
-reference too — a delivered field that passes through fine). "Not a
-`Calculated_Field` right now" cannot be reliably distinguished from "not a
-`Calculated_Field`, ever" using anything in this WSDL — see CLAUDE.md.
-**The only reliable move on a `NOT_FOUND` for one of these is to ask whether
-it's a report-scoped calculated field that needs promoting to global, wait
-for activation, and retry** — not to treat it as a hard block.
+**`.env` currently has both hosts wrong** (session 9 ran everything with
+command-line overrides rather than editing the credentials file). It pairs
+`commitconsulting_dpt1` with the `wd501` host, and `commitconsulting` with
+`wd2-impl-services1.workday.com` — neither combination exists and both return
+HTTP 500 on the WSDL fetch. Fix those two lines before the wizard will
+connect. A quick way to confirm a pairing: fetch
+`https://{host}/ccx/service/{tenant}/Core_Implementation_Service/v46.0?wsdl`
+and look for HTTP 200 with a ~5.5 MB body.
 
-**A second, unrelated wall was found and fixed (2026-08-03): a filter
-condition's `Filter_Instances_Reference`** (its fixed comparison value —
-e.g. "Location = Austin Office" — a reference to a specific business-object
-*instance*, not a field definition) fails the exact same way if that
-instance doesn't exist on the destination. Tried
-`Ignore_When_No_Target_Value=True` first, live, on the untouched reference —
-**still failed**, same fault, ruled out empirically. Fixed instead by
-stripping `Filter_Instances_Reference` (and the now-meaningless
-`Ignore_When_No_Target_Value`) unconditionally in
-`migrate/writer.py:build_report_payload`, the same treatment already given
-to the report owner — the field is optional in the schema
-(`minOccurs="0"`), so there's nothing Workday requires there. Live-verified
-on "Luke's Fancy Report": created successfully, filter condition intact
-minus its default value. See CLAUDE.md's verified-facts table for the full
-writeup.
+**The destination refreshes.** `commitconsulting` was refreshed overnight
+during session 9 and lost 24 migrated objects. That is normal for an
+implementation tenant and not a bug — but it means a "the destination already
+has this" assumption goes stale without warning. The planner's destination
+probe handles it correctly (everything reverts to CREATE), and a full
+destination sweep is the reliable check when a probe result looks surprising.
+
+**Dashboards require an implementer account on both tenants.** `ladams-impl`
+works. A normal ISU (`lmcneil`) fails every dashboard operation with
+`Processing error occurred. The task submitted is not authorized.` while
+reading calculated fields and reports perfectly well. This is an account-type
+gate, not a domain grant — see CLAUDE.md. Reports and calculated fields are
+unaffected, and the UI explains the limitation once rather than surfacing a
+raw fault.
+
+### Next steps, roughly in order
+
+1. **Drive the Streamlit wizard end to end by hand.** Still never done. Every
+   live migration this project has performed went through scripts in
+   `scripts/` or the scratchpad, never the wizard's own Execute step, because
+   driving credential-entry forms is not something the assistant can do. The
+   dashboard picker and implementer notice added in session 9 are covered by
+   `AppTest` only. Someone with hands needs to do this once.
+2. **Migrate an untabbed dashboard.** Only the tabbed flavour has been
+   written live. `Cost Center Manager Dashboard` on the source resolves
+   cleanly to 42 objects **including a prompt set**, so it exercises both the
+   untabbed Put and the prompt-set write path — neither of which has ever run
+   against a tenant.
+3. **`validation/verify.py` is still a stub.** Every read-back this project
+   has done was hand-written in a throwaway script.
+4. **Report tags could be migrated properly.** They are currently stripped
+   from every report because they always fail cross-tenant, but
+   `Get_Report_Tags` / `Put_Report_Tag` both exist, so this is a clean
+   follow-up rather than a limitation.
 
 ### Blockers and open questions
 
-1. ~~No real destination tenant~~ — **resolved.** `commitconsulting_dpt5` is
-   live-verified as a working, distinct destination.
-2. **`Put_Calculated_Field` with a reference: replace or merge?** Still
-   unverified — the live test so far only exercised CREATE (dest didn't have
-   the field) and SKIP (dest already had it), never UPDATE. Until tested,
-   continue treating UPDATE as unsafe and prefer CREATE/SKIP.
-3. **Can `Data_Source_Reference` existence be probed in the destination?**
+1. **`Put_Calculated_Field` with a reference: replace or merge?** Still
+   unverified after nine sessions. Live runs have only exercised CREATE and
+   SKIP for calculated fields, never UPDATE. Keep preferring CREATE/SKIP —
+   session 9 deliberately excluded calculated fields from a forced-rewrite
+   pass for exactly this reason.
+2. **Can `Data_Source_Reference` existence be probed in the destination?**
    Still open.
-4. ~~Can the destination ISU own a report?~~ — **confirmed yes.** Verified
-   live: `build_owner_reference(workday_username=<plain ISU username>)`
-   (not the WS-Security-qualified `user@tenant` string) correctly sets
-   `Tenanted_Report_Definition_System_User_Reference`, read back correctly
-   after the write.
-5. ~~`External_Field_Reference` on report columns can point outside this
-   tool's scope~~ — **resolved for the case found.** It was a report-scoped
-   calculated field needing promotion + activation time, not a genuine
-   capability gap; see above. Genuine `Custom_Field`-space references (a
-   plain field, never a calculated field) remain out of scope — no operation
-   exists for those — but no live case of that has actually been confirmed
-   yet, only theorized.
+3. **`Prompt_Set_Member__All__Reference` remapping is unproven.**
+   `writer._map_prompt_set_members` reads a written prompt set back and maps
+   member WIDs by `Prompt_Set_Member_ID`, because `Put_Prompt_Set` returns
+   only the set's own reference. No prompt set has ever been written, so this
+   has never run. See next step 2.
+4. **Genuine `Custom_Field`-space references remain out of scope** — no
+   operation exists for them — but still no live case has been confirmed,
+   only theorized. Every `NOT_FOUND` investigated so far turned out to be a
+   report-scoped calculated field needing promotion, or a delivered field
+   passing through fine.
 
 ### Local machine state (not in git)
 
-`out/cache/commitconsulting_dpt1/calculated_field.json` — 42+ MB, all
-calculated fields (9,654 as of this session — it grows as fields get
-promoted from report-scoped to global). Gitignored. Rebuilding costs ~30-40s;
-`load_index()` reads it instantly. **Stale cache risk confirmed live this
-session**: a just-promoted calculated field was invisible to a cache built
-too soon after promotion. If a report's dependency isn't resolving and you
-suspect it was recently changed in Workday, rebuild fresh rather than
-trusting the cache's age alone.
+`out/cache/<tenant>/{calculated_field,report,dashboard,prompt_set}.json` —
+gitignored. The calculated-field index is the big one (~42 MB, 9,717 fields
+on the source as of session 9; it grows as fields are promoted from
+report-scoped to global). Dashboard and prompt-set indexes are trivial (179
+and 57 items, one page each). Rebuilding the CF index costs ~25s;
+`load_index()` reads it instantly.
+
+**Stale cache risk, confirmed live twice**: a just-promoted calculated field
+is invisible to a sweep run too soon afterward. If a dependency isn't
+resolving and you suspect a recent Workday change, delete the cache file and
+rebuild rather than trusting its age.
 
 ### The approved build plan
 
@@ -155,6 +146,90 @@ trusting the cache's age alone.
 holds the full architecture, the Streamlit design, and the safety model.
 
 ---
+
+## Done this session (2026-08-07, session 9) — custom dashboards, live end to end
+
+Added custom dashboards as a third selectable object kind, with prompt sets
+and worklet reports as dependencies. **`Commit - Optimize Reporting Dashboard`
+migrated end to end, `commitconsulting_dpt1` → `commitconsulting`, 25/25
+objects, both tabs populated, confirmed by read-back.** Commit `a9a28fd`,
+merge `6353478`. 613 offline tests.
+
+**Phase 0 first: probed the WSDL and the live tenant before writing code.**
+`scripts/probe_dashboards.py` (read-only, kept) answers the questions the
+schema cannot. Four findings reshaped the design before a line of engine code
+was written:
+
+- Dashboards are **two unrelated object types** — tabbed is a
+  `Custom_Landing_Page_Group`, untabbed a `Custom_Landing_Page` — with
+  separate Get, Put, data block and ID space, and nothing in a reference says
+  which you have. Both are swept. 52 untabbed + 127 tabbed, one page each.
+- Unlike `Custom_Report_ID`, a dashboard's business ID **does** work as a
+  lookup key, so dashboards get real cross-tenant identity.
+- **`Prompt_Set_Request_Criteria` is unusable, both fields.** The
+  report-scoped one is accepted and silently ignored (three different reports,
+  all 57 prompt sets each time); the dashboard-scoped one is typed to the
+  untabbed object and rejects a tabbed dashboard outright. So prompt sets are
+  indexed, not loaded on demand.
+- **Dashboards require an implementer account.** A normal ISU fails every
+  dashboard operation with "The task submitted is not authorized" while
+  reading 9,716 calculated fields fine. Different failure from the
+  `Report_Metadata` one — that says the *binding* is invalid, this says the
+  *account* is not allowed. `discovery/inventory.py:requires_implementer`
+  detects it so the UI explains it once.
+
+**Five more things only the live write could find**, in the order they broke:
+
+1. **Report tags always fail.** Blocked object 18 of 25;
+   `Custom_Report_Tag_ID` is tenant-specific by construction and 5 of the 10
+   reports shared one. Now stripped from **every** report, per the user's
+   explicit instruction, not just dashboard ones.
+2. **Matrix measures and dimensions** are created *inline* on a sub-report via
+   `Matrix_Measures_Data`, so their destination WIDs are never reported back
+   and `Matrix_Measure_DataType` has no reference element to discover them
+   from. Read-back proved the measure was already in the destination under the
+   same business ID with only a stale WID. `_INLINE_CHILD_REFERENCES` drops
+   the dead WID and lets the business ID resolve.
+3. **Metadata security groups do not resolve cross-tenant.** The session
+   started by keeping `Workday-Delivered_Security_Group_Reference` on the
+   reasoning that a delivered business ID resolves anywhere — wrong, disproved
+   live on `implementers_wkdyGroup`. Both tenanted and delivered security
+   groups are now stripped; Workday repopulates the destination's own defaults.
+4. **The dashboard and its worklet reports are mutually dependent**, and both
+   ends are validated at write time — the dashboard rejects a worklet whose
+   report does not name it, and the report cannot name a dashboard that does
+   not exist yet, *not even by stable business ID*. Broken with a three-phase
+   write (`_defer_dashboard_worklets`): shell with no worklets → re-write the
+   reports naming the real dashboard → dashboard complete with `Add_Only`
+   dropped. Same shape as `_defer_summary_calculations`.
+5. **A dashboard worklet must be a `Shared` report.** This one cost the most.
+   With `Shared=False` every worklet was rejected as "not valid for the
+   assigned dashboard", *even as the dashboard's only worklet*. Ruled out
+   first, each by direct test: the landing-page association (present and
+   correct), WID mapping (25 mappings, 0 unresolved), activation delay
+   (minutes), worklet capacity (fails with 1 against `Max_Worklets_Allowed=6`),
+   the security domain (the source's WID resolves on **both** tenants as
+   `Custom Report Administration` — a delivered global), and tenant-scoped
+   config IDs (`-6-*` vs the destination's `-3-*`; stripping changed nothing).
+   `Shared` is **not** the same as the `Restricted_to_*` references, which
+   stay stripped — so a worklet report lands shared with no inherited
+   restrictions.
+
+**Also corrected a false dependency cycle.** `Worklet_Landing_Page_Reference`
+was being read as a back-pointer and stripped; it is actually the declaration
+that a report may appear on a dashboard. The writer strips it, so the resolver
+must ignore it too or `topological_sort` hard-blocks on
+`dashboard → report → dashboard`. The field list lives in
+`resolver.WORKLET_BACKREF_FIELDS` and is imported by the writer so the two
+cannot drift. **General rule this is an instance of:
+`resolver._dependency_payload` must reflect what the writer will actually
+send, not what the source returned.**
+
+**Destination refreshed overnight mid-session**, wiping 24 already-migrated
+objects. Caught by a full destination sweep rather than trusting the probe —
+worth repeating, since re-creating objects that already exist is unrecoverable
+here. The re-run was clean because the planner correctly reverted everything
+to CREATE.
 
 ## Done this session (2026-08-03, session 6) — hardcoded v46.0, tenant-ID endpoint discovery
 
