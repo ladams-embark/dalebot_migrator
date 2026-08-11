@@ -1,6 +1,6 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-08-07 (session 9)_
+_Last updated: 2026-08-11 (session 10)_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields, custom report
@@ -37,15 +37,16 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 
 ## PICK UP HERE — next session
 
-**Branch:** `master`, and everything is merged into it. Session 9's work
-landed as `a9a28fd` + merge `6353478` (branch `custom-dashboard-migration`,
-merged with `--no-ff`, matching the pattern of every other feature branch
-here). `gh` CLI is **not installed** — PRs, if wanted, must be opened in the
-browser.
+**Branch:** `master`, and everything is merged into it. Session 10's work
+landed as `2f61065` + merge `e716e6d` (branch
+`claude/prepaid-certification-migration-ae7877`, merged with `--no-ff`,
+matching the pattern of every other feature branch here). **Nothing is
+pushed** — `master` is ahead of the remote. `gh` CLI is **not installed** —
+PRs, if wanted, must be opened in the browser.
 
 **State: the tool migrates calculated fields, reports (including composites
 and matrix reports), calculated measures, custom dashboards and prompt sets,
-end to end, live-verified.** Engine and `ui/` are both built. 613 offline
+end to end, live-verified.** Engine and `ui/` are both built. 618 offline
 tests green; `pytest` needs no `.env` and no network.
 
 ```powershell
@@ -57,19 +58,34 @@ python scripts/selfcheck.py
 
 ### Tenants — read this before running anything
 
+**The destination changed in session 10.** It was `commitconsulting` @ wd501
+through session 9. As of 2026-08-11 `.env` names:
+
 | | tenant | services host |
 |---|---|---|
 | source | `commitconsulting_dpt1` | `impl-services1.wd12.myworkday.com` |
-| destination | `commitconsulting` | `impl-services1.wd501.myworkday.com` |
+| destination | `commitconsulting_dpt3` | `impl-services1.wd12.myworkday.com` |
 
-**`.env` currently has both hosts wrong** (session 9 ran everything with
-command-line overrides rather than editing the credentials file). It pairs
-`commitconsulting_dpt1` with the `wd501` host, and `commitconsulting` with
-`wd2-impl-services1.workday.com` — neither combination exists and both return
-HTTP 500 on the WSDL fetch. Fix those two lines before the wizard will
-connect. A quick way to confirm a pairing: fetch
+Do not assume either half of that pair from memory — read `.env`, then verify
+the pairing live. Hosts confirmed so far: `commitconsulting_dpt1`, `_dpt3` and
+`_dpt5` are all on `impl-services1.wd12.myworkday.com`; plain
+`commitconsulting` is on `impl-services1.wd501.myworkday.com`.
+
+**`.env` has had the host/tenant pairing wrong in every session so far**, and
+still did at the start of session 10 — it pointed *both* tenants at `wd501`
+when both were on `wd12`. Session 9 had it pairing `commitconsulting_dpt1`
+with `wd501` and `commitconsulting` with `wd2-impl-services1.workday.com`. A
+mismatch returns HTTP 500 on the WSDL fetch, which reads like an outage rather
+than a config error, so **check this first on any connection failure — it has
+never once been the code.** Confirm a pairing by fetching
 `https://{host}/ccx/service/{tenant}/Core_Implementation_Service/v46.0?wsdl`
-and look for HTTP 200 with a ~5.5 MB body.
+and looking for HTTP 200 with a ~5.5 MB body.
+
+⚠️ **As of the end of session 10 the two `.env` host lines are still wrong**
+— both read `impl-services1.wd501.myworkday.com` and both need to be
+`impl-services1.wd12.myworkday.com`. Session 10 ran with in-process overrides
+rather than editing the credentials file. Fix them before the wizard will
+connect.
 
 **The destination refreshes.** `commitconsulting` was refreshed overnight
 during session 9 and lost 24 migrated objects. That is normal for an
@@ -88,12 +104,16 @@ raw fault.
 
 ### Next steps, roughly in order
 
-1. **Drive the Streamlit wizard end to end by hand.** Still never done. Every
-   live migration this project has performed went through scripts in
-   `scripts/` or the scratchpad, never the wizard's own Execute step, because
-   driving credential-entry forms is not something the assistant can do. The
-   dashboard picker and implementer notice added in session 9 are covered by
-   `AppTest` only. Someone with hands needs to do this once.
+1. **Drive the Streamlit wizard end to end by hand.** Still never done, and
+   session 10 raised the stakes: every live migration this project has
+   performed went through scripts in `scripts/` or the scratchpad, never the
+   wizard's own Execute step, because driving credential-entry forms is not
+   something the assistant can do. The dashboard picker (session 9) and the
+   rewritten report/dashboard selection banking (session 10) are covered by
+   `AppTest` only. **Session 10 fixed a bug that made it impossible to select
+   objects across two different searches, and nobody has confirmed by hand
+   that the fix feels right** — the tests pin the state contract, not the
+   interaction. Someone with hands needs to do this once.
 2. **Migrate an untabbed dashboard.** Only the tabbed flavour has been
    written live. `Cost Center Manager Dashboard` on the source resolves
    cleanly to 42 objects **including a prompt set**, so it exercises both the
@@ -109,10 +129,10 @@ raw fault.
 ### Blockers and open questions
 
 1. **`Put_Calculated_Field` with a reference: replace or merge?** Still
-   unverified after nine sessions. Live runs have only exercised CREATE and
+   unverified after ten sessions. Live runs have only exercised CREATE and
    SKIP for calculated fields, never UPDATE. Keep preferring CREATE/SKIP —
    session 9 deliberately excluded calculated fields from a forced-rewrite
-   pass for exactly this reason.
+   pass for exactly this reason, and session 10's run was 1 CREATE / 5 SKIP.
 2. **Can `Data_Source_Reference` existence be probed in the destination?**
    Still open.
 3. **`Prompt_Set_Member__All__Reference` remapping is unproven.**
@@ -129,21 +149,97 @@ raw fault.
 ### Local machine state (not in git)
 
 `out/cache/<tenant>/{calculated_field,report,dashboard,prompt_set}.json` —
-gitignored. The calculated-field index is the big one (~42 MB, 9,717 fields
-on the source as of session 9; it grows as fields are promoted from
-report-scoped to global). Dashboard and prompt-set indexes are trivial (179
-and 57 items, one page each). Rebuilding the CF index costs ~25s;
-`load_index()` reads it instantly.
+gitignored. The calculated-field index is the big one (~44 MB, **9,734 fields
+on the source as of session 10**, up from 9,717 in session 9; it grows as
+fields are promoted from report-scoped to global). Dashboard and prompt-set
+indexes are trivial (179 and 57 items, one page each). Rebuilding the CF index
+costs ~25s; `load_index()` reads it instantly.
 
-**Stale cache risk, confirmed live twice**: a just-promoted calculated field
-is invisible to a sweep run too soon afterward. If a dependency isn't
-resolving and you suspect a recent Workday change, delete the cache file and
-rebuild rather than trusting its age.
+**Stale cache risk, confirmed live three times** — and session 10's instance
+cost most of the debugging time for a migration that turned out to have
+nothing wrong with it. A calculated field that exists in the tenant is absent
+from an index swept before it appeared, and `resolve` then hard-blocks
+reporting it as a genuinely missing dependency, which is indistinguishable
+from a real one. In session 10 a 4-day-old index made
+`Prepaid Spend Amortization Installment - CF LRV - Supplier Invoice
+Accounting Date - 1212285275` look missing; a fresh sweep found it
+immediately. **If `unresolved_reference_ids` is non-empty, rebuild the index
+before believing it.** Do not trust a cache's age.
 
 ### The approved build plan
 
 `C:\Users\LucasAdams\.claude\plans\knowing-what-we-know-swirling-treasure.md`
 holds the full architecture, the Streamlit design, and the safety model.
+
+---
+
+## Done this session (2026-08-11, session 10) — Prepaid Certification migrated, picker selection bug fixed
+
+Two pieces of work: a live report migration to a **new destination tenant**,
+and a UI bug the migration had nothing to do with. Commit `2f61065`, merge
+`e716e6d`. 618 offline tests.
+
+### `Prepaid Certification` migrated live, dpt1 → dpt3
+
+The user reported it "failing". **Neither cause was the report**, and both are
+environment conditions this handoff had already warned about in general terms:
+
+1. **Both `.env` services hosts pointed at the wrong pod** — `wd501` for two
+   tenants that are both on `wd12`. Presents as HTTP 500 on the WSDL fetch.
+2. **The cached calculated-field index was 4 days stale**, so `resolve`
+   hard-blocked claiming a real calculated field was a missing dependency. A
+   fresh sweep (9,717 → 9,734 fields) resolved it with no code change.
+
+With both corrected the migration was unremarkable: closure of 6 objects
+(3 reports, 3 calculated fields), **1 CREATE and 5 SKIP** — every dependency
+already existed in dpt3. Plan hash `f6d6a0fcbfc6027f`, re-verified on re-probe
+before the live write. Result 1 success / 0 failed / 0 indeterminate. Dest WID
+`332111f5bc6610011af1dadfd9750000`.
+
+`Prepaid Certification` is a **composite** report — no columns of its own, it
+renders two sub-reports. Read-back confirmed every field matches the source
+except `Shared` (stripped deliberately; not a dashboard worklet), both
+composite sub-report references point at destination WIDs, and no migrated
+dependency's source WID survived anywhere in the payload.
+
+Worth knowing: this migration leaned on pre-existing destination state. The
+three calculated fields belong to the sub-reports, not to the composite
+parent, and all five dependencies were already in dpt3. **A refresh of dpt3
+would make this a much larger run.**
+
+### The picker selection bug — reports *and* dashboards
+
+Selecting reports across more than one search term was impossible. The report
+and dashboard pickers rebuilt their selection every rerun by reading
+`st.dataframe`'s live selection, which is **a list of row positions into the
+frame the widget was just handed**. Retyping the filter above the table
+repointed those positions at different objects, or at nothing, silently
+discarding everything picked under the previous search.
+
+`state.py` had encoded the wrong assumption outright — *"the report index
+table's own widget state already persists its row selection across reruns"* —
+true only while the frame is unchanged, which is exactly not the case when
+filtering.
+
+Both now bank on an explicit add button into a persistent dict, the pattern
+`_render_calculated_fields` already used and which is why that picker never
+had the bug. `selected_reports_manual` → `selected_reports_added`;
+`selected_dashboards_added` is new.
+
+Since selections are no longer visible as highlighted rows once the filter
+moves on, each picker lists what it holds by name — picking the wrong object
+cannot be undone in the destination. The dashboard picker also gained the
+clear button it never had.
+
+**Audited every other widget read back into state.** The two `st.data_editor`
+call sites are safe and were left alone: neither has a filter that can reorder
+its frame, `conflicts.py` applies edits keyed on `node_id`, and
+`execute.py:_apply_decisions` already documents why positional matching holds
+there. `_render_calculated_fields` was already correct.
+
+Five new `AppTest` cases. Note the standing limitation — the Select step
+cannot be reached in a browser without tenant credentials, so this is
+`AppTest` coverage only.
 
 ---
 
