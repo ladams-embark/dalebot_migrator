@@ -102,16 +102,24 @@ class WizardState:
 
     # wid -> True for directly-selected calculated fields
     selected_field_wids: set = field(default_factory=set)
-    # wid -> the report's raw payload dict. Recomputed each render as
-    # {**selected_reports_manual, **<current table selection>}; only the
-    # manual (exact-name-search) additions need to persist on their own,
-    # since the report index table's own widget state already persists its
-    # row selection across reruns.
-    selected_reports_manual: dict = field(default_factory=dict)
+    # wid -> the report's raw payload dict, for every report the user has
+    # explicitly added — from the index table or from the exact-name lookup.
+    #
+    # This has to accumulate on its own rather than be read back off the
+    # table widget. ``st.dataframe`` reports its selection as *row positions
+    # into the frame it was just handed*, so the moment the filter box
+    # changes the frame, those positions describe different reports (or none).
+    # Deriving the selection from the widget each rerun therefore silently
+    # dropped everything picked under a previous search term, making it
+    # impossible to select reports across more than one search.
+    selected_reports_added: dict = field(default_factory=dict)
     selected_reports: dict = field(default_factory=dict)
     # wid -> the dashboard's raw payload dict, from the dashboard index. Unlike
     # reports there is no exact-name lookup to merge in: dashboards have no
     # usable request criteria at all, so the index table is the only source.
+    # Accumulated behind an explicit add, for the same reason reports are —
+    # see ``selected_reports_added``.
+    selected_dashboards_added: dict = field(default_factory=dict)
     selected_dashboards: dict = field(default_factory=dict)
 
     closure: Optional[Closure] = None
@@ -175,8 +183,9 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.prompt_set_index_job = None
         state.implementer_required = False
         state.selected_field_wids = set()
-        state.selected_reports_manual = {}
+        state.selected_reports_added = {}
         state.selected_reports = {}
+        state.selected_dashboards_added = {}
         state.selected_dashboards = {}
         state.reference_decisions = {}
 

@@ -232,7 +232,7 @@ def _render_reports(state: WizardState) -> None:
             if result.outcome is LookupOutcome.FOUND:
                 full = lookup_report(state.source.connection, wid=result.wid)
                 if full.outcome is LookupOutcome.FOUND and full.data is not None:
-                    state.selected_reports_manual[full.wid] = full.data
+                    state.selected_reports_added[full.wid] = full.data
                     theme.banner("success", f"Added “{name}”")
                 else:
                     theme.banner(
@@ -288,15 +288,20 @@ def _render_reports(state: WizardState) -> None:
             key="report_table_select",
         )
         rows = event.selection["rows"] if event and event.selection else []
-        table_selected = {}
-        for i in rows:
-            wid = df.iloc[i]["wid"]
-            payload = state.report_index.payload(wid)
-            if payload is not None:
-                table_selected[wid] = payload
-        state.selected_reports = {**state.selected_reports_manual, **table_selected}
+        # Adding is an explicit button, not a read of the live table selection,
+        # for the same reason the calculated field picker works this way: the
+        # table reports *row positions into the frame it was handed*, so
+        # retyping the filter makes those positions refer to different reports.
+        # Selections have to be banked before the frame changes underneath them,
+        # or picking reports across two different searches is impossible.
+        if st.button("Add selected reports", key="report_add", disabled=not rows):
+            for i in rows:
+                wid = df.iloc[i]["wid"]
+                payload = state.report_index.payload(wid)
+                if payload is not None:
+                    state.selected_reports_added[wid] = payload
+            st.rerun()
     else:
-        state.selected_reports = dict(state.selected_reports_manual)
         theme.banner(
             "neutral",
             "Index not built",
@@ -304,10 +309,20 @@ def _render_reports(state: WizardState) -> None:
             "Until then, exact-name lookup is the only way to add a report.",
         )
 
+    state.selected_reports = dict(state.selected_reports_added)
+
     if state.selected_reports:
         theme.figures([("Reports selected", len(state.selected_reports))])
+        # Added reports are no longer visible as highlighted table rows once the
+        # filter moves on, so they are listed by name. Picking the wrong report
+        # cannot be undone in the destination, which makes "what exactly is in
+        # my selection" worth showing rather than just counting.
+        with st.expander(f"Selected reports ({len(state.selected_reports)})"):
+            for wid, payload in state.selected_reports.items():
+                data = payload.get("Tenanted_Report_Definition_Data") or {}
+                st.write(f"- {data.get('Name') or wid}")
         if st.button("Clear report selections", key="report_clear"):
-            state.selected_reports_manual = {}
+            state.selected_reports_added = {}
             state.selected_reports = {}
             st.rerun()
 
@@ -320,6 +335,10 @@ def _render_dashboards(state: WizardState) -> None:
         "underneath. Reading them requires an implementer account.",
         eyebrow="Requires an implementer account",
     )
+
+    # Set before the early returns below so every path agrees on what is
+    # selected, including the ones that never reach the table.
+    state.selected_dashboards = dict(state.selected_dashboards_added)
 
     if state.implementer_required:
         theme.banner(
@@ -365,16 +384,29 @@ def _render_dashboards(state: WizardState) -> None:
         key="dashboard_table_select",
     )
     rows = event.selection["rows"] if event and event.selection else []
-    selected = {}
-    for i in rows:
-        wid = df.iloc[i]["wid"]
-        payload = state.dashboard_index.payload(wid)
-        if payload is not None:
-            selected[wid] = payload
-    state.selected_dashboards = selected
+    # Banked on an explicit add rather than read off the live table, for the
+    # same reason as reports: the table's row positions are relative to the
+    # frame it was handed, so retyping the filter silently repoints them.
+    if st.button("Add selected dashboards", key="dashboard_add", disabled=not rows):
+        for i in rows:
+            wid = df.iloc[i]["wid"]
+            payload = state.dashboard_index.payload(wid)
+            if payload is not None:
+                state.selected_dashboards_added[wid] = payload
+        st.rerun()
+
+    state.selected_dashboards = dict(state.selected_dashboards_added)
 
     if state.selected_dashboards:
         theme.figures([("Dashboards selected", len(state.selected_dashboards))])
+        with st.expander(f"Selected dashboards ({len(state.selected_dashboards)})"):
+            for wid, payload in state.selected_dashboards.items():
+                summary = state.dashboard_index.summaries.get(wid)
+                st.write(f"- {getattr(summary, 'name', None) or wid}")
+        if st.button("Clear dashboard selections", key="dashboard_clear"):
+            state.selected_dashboards_added = {}
+            state.selected_dashboards = {}
+            st.rerun()
 
 
 def render(state: WizardState) -> None:
