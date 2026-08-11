@@ -1,7 +1,8 @@
 # AGENT.md — Coding Agent Brief: Workday Tenant Config Migration Tool
 
 You are a senior integration engineer building a Python tool that migrates
-configuration (calculated fields and custom report definitions) from a SOURCE
+configuration (calculated fields, calculated measures, custom report
+definitions, custom dashboards and their prompt sets) from a SOURCE
 Workday tenant to a DESTINATION tenant via the **Core_Implementation_Service**
 SOAP web service (`Report_Metadata` exposes the same operations but is
 rejected live on this tenant — see `docs/WSDL_NOTES.md`). Prioritize
