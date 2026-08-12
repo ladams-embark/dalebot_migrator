@@ -22,6 +22,15 @@ Run it:
 
 Without --live it stops after the dry run, which is the only way to get a plan
 hash to review. Live execution is a separate, deliberate invocation.
+
+``--treat-as-new <Calculated_Field_ID>`` (repeatable) records a human decision
+that a specific calculated field is absent from the destination, for the case
+where matching genuinely cannot decide — several destination fields share the
+field's name, class and business object, and it carries no WQL alias to tell
+them apart. It adjudicates **existence**, not the action, because
+``validate_plan`` refuses to create an object whose existence is UNKNOWN
+however the action was set, and that rule is deliberate. Use it only when
+creating a duplicate is the understood, accepted outcome.
 """
 
 import os
@@ -84,7 +93,37 @@ def sweep(connection: api.Connection, kind: str, iterator_fn, label: str):
     return index
 
 
-def main(names: list[str], live: bool) -> None:
+def adjudicate_as_new(closure, existence: dict, reference_ids: set[str]) -> None:
+    """Record that named calculated fields are absent from the destination.
+
+    Written into ``existence`` rather than passed as an action override: an
+    override leaves the probe result UNKNOWN, and `validate_plan` blocks
+    creating an UNKNOWN object no matter how the action was set. The decision
+    being made here is about existence, so that is where it belongs — and it
+    stays visible on the plan afterwards as the recorded fault text.
+    """
+    seen = set()
+    for node in closure.nodes.values():
+        if node.reference_id in reference_ids:
+            existence[node.node_id] = api.Existence(
+                node_id=node.node_id,
+                state=api.LookupOutcome.NOT_FOUND,
+                fault=(
+                    "Adjudicated as new by the operator: destination matching "
+                    "could not decide between several equally-good candidates."
+                ),
+            )
+            seen.add(node.reference_id)
+            print(f"  adjudicated as NEW: {node.name!r} ({node.reference_id})")
+    unmatched = reference_ids - seen
+    if unmatched:
+        raise SystemExit(
+            "--treat-as-new named calculated field(s) that are not in this "
+            f"closure: {sorted(unmatched)}"
+        )
+
+
+def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
     source_conn = connect("SOURCE", api.Role.SOURCE)
     dest_conn = connect("DEST", api.Role.DESTINATION)
     verify(source_conn, "source")
@@ -125,6 +164,15 @@ def main(names: list[str], live: bool) -> None:
         print(f"  destination calculated fields: {len(dest_cf_index)} (cached)")
     match_index = api.calculated_field_match_index(dest_cf_index)
 
+    # Calculated measures need the same treatment, and more urgently: their
+    # BI_Calculated_Measure_ID is Workday-generated per tenant, so it can never
+    # match across two. One page, so this is swept every run rather than cached.
+    dest_measures = None
+    for progress in api.iter_calculated_measure_index(dest_conn):
+        dest_measures = progress.index
+    measure_match_index = api.calculated_measure_match_index(dest_measures)
+    print(f"  destination calculated measures: {len(dest_measures)}")
+
     wanted = set(names)
     selected = {
         wid: dashboard_index.payload(wid)
@@ -152,7 +200,10 @@ def main(names: list[str], live: bool) -> None:
     print("\nProbing destination…")
     existence = {}
     for progress in api.iter_check_existence(
-        dest_conn, closure, match_index=match_index
+        dest_conn,
+        closure,
+        match_index=match_index,
+        measure_match_index=measure_match_index,
     ):
         existence[progress.node.node_id] = progress.existence
 
@@ -163,9 +214,25 @@ def main(names: list[str], live: bool) -> None:
             "than by Calculated_Field_ID — they will be reused, not duplicated."
         )
 
+    if treat_as_new:
+        adjudicate_as_new(closure, existence, treat_as_new)
+
     plan = api.build_plan(closure, existence)
     print(f"\nPlan actions: {plan.counts()}")
     print(f"Plan hash: {plan.plan_hash()}")
+
+    # Per-kind breakdown, because "74 creates" is not reviewable on its own —
+    # two prompt sets among them means something very different from two more
+    # calculated fields.
+    by_kind: dict[str, dict[str, int]] = {}
+    for node in plan.ordered_nodes:
+        tally = by_kind.setdefault(node.kind.value, {})
+        action = plan.action_for(node).value
+        tally[action] = tally.get(action, 0) + 1
+    print("  by kind:")
+    for kind in sorted(by_kind):
+        counts = ", ".join(f"{a} {n}" for a, n in sorted(by_kind[kind].items()))
+        print(f"    {kind:20} {counts}")
 
     blockers = api.validate_plan(plan)
     if blockers:
@@ -231,8 +298,26 @@ def main(names: list[str], live: bool) -> None:
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--live"]
-    if not args:
+    argv = sys.argv[1:]
+    dashboards: list[str] = []
+    new_fields: set[str] = set()
+    expecting_field = False
+    live = False
+    for arg in argv:
+        if expecting_field:
+            new_fields.add(arg)
+            expecting_field = False
+        elif arg == "--live":
+            live = True
+        elif arg == "--treat-as-new":
+            expecting_field = True
+        elif arg.startswith("--treat-as-new="):
+            new_fields.add(arg.split("=", 1)[1])
+        else:
+            dashboards.append(arg)
+    if expecting_field:
+        raise SystemExit("--treat-as-new needs a Calculated_Field_ID after it.")
+    if not dashboards:
         print(__doc__)
         raise SystemExit(1)
-    main(args, live="--live" in sys.argv)
+    main(dashboards, live, new_fields)

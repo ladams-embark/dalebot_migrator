@@ -345,7 +345,8 @@ The probe above matches on `Calculated_Field_ID`, and this file has said since
 WID". **That holds only when both tenants acquired the field the same way.**
 Two independently-built tenants have no reason to have done so.
 
-Confirmed live 2026-08-11, `commitconsulting_dpt1` → `_dpt3`. The same field is:
+Confirmed live 2026-08-12, `commitconsulting_dpt1` → `_dpt3`, and again against
+`_dpt5`. The same field is:
 
 - `CRTMNU01_Commit - HR Dashboard_03_Is Top Performer` on dpt1 (machine-generated
   by some earlier migration, namespaced by dashboard)
@@ -372,6 +373,59 @@ Opt-in via `iter_check_existence(..., match_index=...)`, because it costs a full
 destination index sweep (~25s) to build. **Without it, any two tenants with
 different ID conventions will duplicate every field they already share.**
 
+### ⚠️ `BI_Calculated_Measure_ID` can NEVER match across tenants
+
+Worse than the calculated-field case, and unavoidable rather than conventional.
+Confirmed live 2026-08-12, dpt1 → dpt5: the destination's measure IDs are
+Workday-generated with tenant-local sequence numbers
+(`ARITHMETIC_CALCULATED_MEASURE-11-210`, `LOOKUP_PRIOR_PERIOD_CALCULATED_MEASURE-11-19`)
+while the source's came from an earlier migration
+(`CRTMNU01_Commit - HR Dashboard_08_Annual - Turnover %`). Two tenants cannot
+agree on such an ID by construction.
+
+A create whose name is taken is rejected with **"Enter a unique name for the
+System-Wide Summarization Calculation"** — the same class of message as the
+`WQL_Alias` one, and the same trap: it reads like a naming rule and means "this
+already exists".
+
+`planner._match_calculated_measure_across_tenants` matches on `(Name,
+Business_Object_Reference WID)`. Deliberately thinner than the calculated-field
+shape — `Calculated_Measure_DataType` has no `Class_Name`; the measure's type
+shows only in which sub-type block is populated, which is not a comparable
+scalar. It is sufficient on the tenants seen (dpt5: 47 measures, **zero**
+duplicate names), and several candidates returns UNKNOWN rather than a guess.
+
+Enable with `iter_check_existence(..., measure_match_index=...)`, built from
+`iter_calculated_measure_index`. Measures stay un-indexed for *resolution* —
+that reasoning is about the source and still holds — but recognising one in the
+destination needs the whole destination set.
+
+### ⚠️ Prompt sets depend on prompt fields, which this tool cannot yet create
+
+Confirmed live 2026-08-12. `Put_Prompt_Set` fails with `Invalid ID value. 'X'
+is not a valid ID value for type = 'WID'`, naming a
+`Tenanted_Prompt_Set_Member_Data` → `Abstract_External_Parameter_Reference`.
+
+That reference carries a source WID **and** a business ID
+(`TenantedExternalParameter = 'DateOE Open Date'`), which makes it look exactly
+like the `_INLINE_CHILD_REFERENCES` case — drop the stale WID, let the business
+ID resolve. **It is not, and the difference cannot be seen from the reference.**
+These are standalone *tenanted external parameters*: not defined inline in the
+prompt set member, and not defined by any report in the closure.
+`Get_Prompt_Fields` returns 28 on dpt1 against 13 on dpt5, and the two the
+prompt set needs are absent from dpt5 — so dropping the WID would simply fail
+on the business ID instead.
+
+`Get_Prompt_Fields` / `Put_Prompt_Field` exist (implementer-gated), so prompt
+fields are migratable, but only as a **new object kind** with its own resolver
+edge, payload builder, probe and ordering. Until that exists, a prompt set
+whose parameters are missing from the destination cannot be written.
+
+**The general lesson:** a reference carrying both a WID and a business ID has
+now meant three different things in this project — a stale inline WID (matrix
+measures), a wrong-tenant identity (calculated fields), and a genuinely absent
+object (prompt fields). Shape does not distinguish them. Check the destination.
+
 ### ⚠️ `WQL_Alias` must be unique per business object in the destination
 
 A `Put_Calculated_Field` whose alias collides is rejected outright:
@@ -382,7 +436,7 @@ using zero through 9, A through Z, a through z, or the _ symbol.
 ```
 
 The message reads like a character-set complaint and is usually a **uniqueness**
-complaint — confirmed live 2026-08-11 on an alias (`cf_isTopPerformer1`) that was
+complaint — confirmed live 2026-08-12 on an alias (`cf_isTopPerformer1`) that was
 entirely legal characters. Of 9,734 source fields, **zero** had an illegal
 character; the failures were all collisions.
 
@@ -724,7 +778,7 @@ Never write to the destination tenant in any test, marked or not.
 ---
 
 ## Known risks / pre-flight checklist before first real migration
-- [ ] **A real, distinct destination tenant exists.** Satisfied: as of 2026-08-11 source is `commitconsulting_dpt1` and destination is `commitconsulting_dpt3`, both @ `impl-services1.wd12.myworkday.com`. The destination was `commitconsulting` @ `impl-services1.wd501.myworkday.com` up to session 9 — **it has changed once, so read `.env` rather than assuming either half.** `safety.py` still blocks live runs unconditionally if the two ever resolve to the same tenant.
+- [ ] **A real, distinct destination tenant exists.** Satisfied: as of 2026-08-12 source is `commitconsulting_dpt1` and destination is `commitconsulting_dpt5`, both @ `impl-services1.wd12.myworkday.com`. The destination has now changed **three times** — `commitconsulting` @ wd501 through session 9, then `_dpt3`, then `_dpt5` partway through session 10, without announcement. **Read `.env` every time; never carry a destination over from a previous turn, let alone a previous session.** `safety.py` still blocks live runs unconditionally if the two ever resolve to the same tenant.
 - [ ] **Check the `.env` host/tenant pairing before connecting.** Tenants are not always on the same pod, and a mismatched pair fails with an unhelpful HTTP 500 on the WSDL fetch rather than an auth error. `.env` has had this wrong in every session so far — check it *first* on any connection failure, because it has never once been the code. Confirm by fetching `https://{host}/ccx/service/{tenant}/Core_Implementation_Service/v46.0?wsdl` and looking for a ~5.5 MB 200. Hosts confirmed live: `commitconsulting_dpt1`, `_dpt3` and `_dpt5` on `impl-services1.wd12.myworkday.com`; plain `commitconsulting` on `impl-services1.wd501.myworkday.com`.
 - [ ] **Expect the destination to be refreshed.** `commitconsulting` was refreshed overnight during session 9 and lost 24 migrated objects. The destination probe handles this correctly (everything reverts to CREATE), but when a probe result looks surprising, sweep the destination rather than trusting the probe — re-creating something that already exists cannot be undone.
 - [ ] **Migrating dashboards? Both connections must be implementer accounts.** A normal ISU cannot read or write them regardless of domain grants (see above). Reports and calculated fields are unaffected.
