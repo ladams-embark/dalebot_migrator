@@ -1,6 +1,6 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-08-11 (session 10)_
+_Last updated: 2026-08-12 (session 10)_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields, custom report
@@ -38,16 +38,16 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 ## PICK UP HERE — next session
 
 **Branch:** `master`, and everything is merged into it. Session 10 landed
-three commits on `claude/prepaid-certification-migration-ae7877`, each merged
-`--no-ff` matching the pattern of every other feature branch here. **Nothing
-is pushed** — `master` is ahead of the remote. `gh` CLI is **not installed** —
-PRs, if wanted, must be opened in the browser.
+several commits on `claude/prepaid-certification-migration-ae7877`, each
+merged `--no-ff` matching the pattern of every other feature branch here.
+**Nothing is pushed** — `master` is ahead of `origin/master`. `gh` CLI is
+**not installed** — PRs, if wanted, must be opened in the browser.
 
 **State: the tool migrates calculated fields, reports (including composites
 and matrix reports), calculated measures, custom dashboards and prompt sets,
-end to end, live-verified.** Engine and `ui/` are both built. **571 offline
-tests green** (`pytest` reports `571 passed, 9 deselected`); no `.env` and no
-network needed.
+end to end, live-verified — with the exception noted in next step 0.** Engine
+and `ui/` are both built. **586 offline tests green** (`pytest` reports
+`586 passed, 9 deselected`); no `.env` and no network needed.
 
 > The "613 offline tests" figure carried by this file through session 9, and
 > the "618" briefly written during session 10, were both wrong — never
@@ -63,16 +63,19 @@ python scripts/selfcheck.py
 
 ### Tenants — read this before running anything
 
-**The destination changed in session 10.** It was `commitconsulting` @ wd501
-through session 9. As of 2026-08-11 `.env` names:
+**The destination changed TWICE during session 10**, without announcement:
+`commitconsulting` @ wd501 through session 9, then `_dpt3`, then `_dpt5`
+partway through the session — discovered only because a run printed the tenant
+it had just authenticated to. As of the end of 2026-08-12 `.env` names:
 
 | | tenant | services host |
 |---|---|---|
 | source | `commitconsulting_dpt1` | `impl-services1.wd12.myworkday.com` |
-| destination | `commitconsulting_dpt3` | `impl-services1.wd12.myworkday.com` |
+| destination | `commitconsulting_dpt5` | `impl-services1.wd12.myworkday.com` |
 
-Do not assume either half of that pair from memory — read `.env`, then verify
-the pairing live. Hosts confirmed so far: `commitconsulting_dpt1`, `_dpt3` and
+**Read `.env` at the start of every run and print what you connected to.**
+Never carry a destination over from a previous turn, let alone a previous
+session. Then verify the pairing live. Hosts confirmed so far: `commitconsulting_dpt1`, `_dpt3` and
 `_dpt5` are all on `impl-services1.wd12.myworkday.com`; plain
 `commitconsulting` is on `impl-services1.wd501.myworkday.com`.
 
@@ -86,11 +89,9 @@ never once been the code.** Confirm a pairing by fetching
 `https://{host}/ccx/service/{tenant}/Core_Implementation_Service/v46.0?wsdl`
 and looking for HTTP 200 with a ~5.5 MB body.
 
-⚠️ **As of the end of session 10 the two `.env` host lines are still wrong**
-— both read `impl-services1.wd501.myworkday.com` and both need to be
-`impl-services1.wd12.myworkday.com`. Session 10 ran with in-process overrides
-rather than editing the credentials file. Fix them before the wizard will
-connect.
+The host lines were wrong for most of session 10 (both on `wd501` for tenants
+on `wd12`) and were **corrected by the user partway through**, along with the
+destination change. They are right as of the end of the session.
 
 **The destination refreshes.** `commitconsulting` was refreshed overnight
 during session 9 and lost 24 migrated objects. That is normal for an
@@ -109,21 +110,49 @@ raw fault.
 
 ### Next steps, roughly in order
 
-0. **Three dashboards are fully planned and NOT written.** `Commit - HR
+0. **The three-dashboard migration is PART WRITTEN and blocked.** `Commit - HR
    Dashboard`, `Commit - Optimize Reporting Dashboard` and `Commit - Open
-   Enrollment Command Center`, dpt1 → dpt3. Final plan: **99 CREATE / 66 SKIP,
-   zero blockers, dry run clean, plan hash `202e8a742a6b91d8`.** Four live
-   attempts in session 10 wrote **zero** objects — two halted on the WQL alias
-   collision at object 1, the rest were dry runs, and the last was stopped by a
-   permission prompt rather than anything in the tool. dpt3 is untouched.
-   Re-probe before running: the plan hash is only valid against the destination
-   as it was on 2026-08-11.
+   Enrollment Command Center`, dpt1 → **dpt5**.
 
-   Two things this run will exercise for the first time ever: **prompt sets
-   have never been written to a tenant** (2 of them here, and
-   `writer._map_prompt_set_members` has never executed — see open question 3),
-   and the cross-tenant calculated-field matching added this session decides
-   62 of the 165 objects.
+   **22 objects are already in dpt5** — roughly 19 calculated fields and
+   3 reports, written across two halted runs on 2026-08-12. They are valid and
+   carry their source business IDs, so a re-run finds and skips them: the
+   migration is **resumable, not corrupt**. No dashboard was created, and
+   dpt5's pre-existing `Commit - Optimize Reporting Dashboard` was never
+   touched (it probes as FOUND and stays SKIP — note that means this run will
+   never *update* it).
+
+   **Blocked on a missing object kind: prompt fields.** `Put_Prompt_Set`
+   failed with `'bfd569ef594210011985fb557c140000' is not a valid ID value for
+   type = 'WID'`. That is a `Tenanted_Prompt_Set_Member_Data` →
+   `Abstract_External_Parameter_Reference`, which carries a source WID *and* a
+   business ID (`TenantedExternalParameter = 'DateOE Open Date'`).
+
+   It looks exactly like the `_INLINE_CHILD_REFERENCES` case — drop the stale
+   WID, let the business ID resolve — **and it is not.** Checked before
+   assuming: these are standalone tenant objects, not defined inline and not
+   defined by any report in the closure. `Get_Prompt_Fields` returns 28 on dpt1
+   and 13 on dpt5, and both parameters the prompt set needs are **absent from
+   dpt5**. Dropping the WID would just fail on the business ID instead.
+
+   `Get_Prompt_Fields` / `Put_Prompt_Field` both exist, so this is migratable —
+   as a **new object kind**: resolver edge from prompt set, payload builder,
+   destination probe, ordering. Comparable in size to the session 9 dashboard
+   work. Note `Get_Prompt_Fields` is implementer-gated.
+
+   One thread not yet pulled: the other prompt set,
+   `CRTMNU0104_Commit HR Dashboard Prompt Set`, has 5 members with **no**
+   `TenantedExternalParameter` ID at all. Different shape, possibly a different
+   problem — investigate before assuming the prompt-field work covers it.
+
+   Re-run with:
+   ```
+   python scripts/migrate_dashboards_example.py --live      "Commit - HR Dashboard" "Commit - Optimize Reporting Dashboard"      "Commit - Open Enrollment Command Center"      --treat-as-new "CRTMNU01_Commit - HR Dashboard_03_Year-Month"      --treat-as-new "CRTMNU01_Commit - HR Dashboard_03_Year-MonthHDCT"
+   ```
+   The two `--treat-as-new` flags carry a decision the user made on 2026-08-12:
+   two dpt1 `Year-Month` fields match two dpt5 candidates equally well and
+   carry no WQL alias to separate them, so they are created fresh. They cannot
+   collide, precisely because they have no alias.
 
 1. **Drive the Streamlit wizard end to end by hand.** Still never done, and
    session 10 raised the stakes: every live migration this project has
@@ -194,7 +223,7 @@ holds the full architecture, the Streamlit design, and the safety model.
 
 ---
 
-## Done this session (2026-08-11, session 10) — Prepaid Certification migrated, picker selection bug fixed
+## Done this session (2026-08-12, session 10) — Prepaid Certification migrated, picker selection bug fixed
 
 Two pieces of work: a live report migration to a **new destination tenant**,
 and a UI bug the migration had nothing to do with. Commit `2f61065`, merge
@@ -310,6 +339,46 @@ rather than the action, which is what the run script now does for the two
 `Year-Month` fields. **Do not weaken that blocker.**
 
 15 new offline tests in `test_planner.py`.
+
+### Calculated measures have the same defect, structurally
+
+Migrating the three dashboards to **dpt5** halted 67 objects in on
+`Enter a unique name for the System-Wide Summarization Calculation`.
+
+Same root cause as calculated fields, but for measures it is not a matter of
+convention — it is unavoidable. `BI_Calculated_Measure_ID` is Workday-generated
+with tenant-local sequence numbers: dpt5 has
+`ARITHMETIC_CALCULATED_MEASURE-11-210` where dpt1 has
+`CRTMNU01_Commit - HR Dashboard_08_Annual - Turnover %`. **No two tenants can
+ever agree on one.**
+
+Matching is on `(name, business object)` — thinner than the calculated-field
+shape because `Calculated_Measure_DataType` has no comparable scalar for type.
+It holds here: dpt5 has 47 measures and **zero** duplicate names. Several
+candidates still returns UNKNOWN.
+
+`iter_calculated_measure_index` is new. Measures remain un-indexed for
+*resolution* — that reasoning was always about the source and still stands —
+but recognising one in the *destination* needs the whole destination set. One
+page, swept per run, not cached.
+
+Took the live plan from 74 creates to 55, reusing 2 of 7 measures. 7 tests.
+
+### Prompt fields: a missing object kind, not a stale WID
+
+See next step 0 for the full detail. The short version: the failure *looks*
+like the `_INLINE_CHILD_REFERENCES` pattern and is not, and the difference was
+only established by checking `Get_Prompt_Fields` on both tenants rather than
+reasoning from the shape of the reference. **That check is the lesson** — the
+same shape has now meant three different things across this project (stale
+inline WID, wrong-tenant identity, genuinely absent object).
+
+### A correction worth carrying forward
+
+The dates in this file and CLAUDE.md for session 10 were first written as
+2026-08-11 and are actually **2026-08-12**; the test count was quoted as 613
+and then 618 when `pytest` prints 571 (now 586). Both were written from
+inference rather than measurement. Quote the tool's own output.
 
 ---
 
