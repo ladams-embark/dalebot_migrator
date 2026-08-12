@@ -28,7 +28,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 from zeep.helpers import serialize_object
 
@@ -263,6 +263,96 @@ def classify_fault(message: str) -> LookupOutcome:
     if any(fragment in lowered for fragment in _NOT_FOUND_FRAGMENTS):
         return LookupOutcome.NOT_FOUND
     return LookupOutcome.UNKNOWN
+
+
+# ── Cross-tenant shape matching for calculated fields ────────────────────────
+
+
+def calculated_field_data(payload: Mapping | None) -> dict:
+    """The ``Calculated_Field_Data`` block, whether it came back singular or in
+    a one-element list."""
+    data = (payload or {}).get("Calculated_Field_Data") or {}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return data if isinstance(data, dict) else {}
+
+
+def calculated_field_shape(payload: Mapping | None) -> tuple[str, str, str] | None:
+    """A calculated field's cross-tenant *shape*: name, class, business object.
+
+    ``Calculated_Field_Reference_ID`` was assumed to be a stable cross-tenant
+    identifier, and it is not — it is stable only when both tenants acquired the
+    field the same way. Confirmed live 2026-08-11 between `commitconsulting_dpt1`
+    and `_dpt3`, whose conventions diverge completely: the same field is
+    ``CRTMNU01_Commit - HR Dashboard_03_Is Top Performer`` on one and
+    ``Custom Object Data - Is Top Performer`` on the other. Probing by ID alone
+    reported 48 fields as absent that were plainly present, and creating them
+    would have duplicated them onto the same business objects.
+
+    The three parts are chosen because each is comparable across tenants:
+    ``Name`` and ``Class_Name`` are plain strings, and the business object is a
+    Workday-delivered object whose WID is identical in every tenant.
+
+    Returns ``None`` when any part is missing — an incomplete shape must never
+    match, since a match means "do not create".
+    """
+    data = calculated_field_data(payload)
+    name = data.get("Name")
+    class_name = data.get("Class_Name")
+    business_object = ids_of(data.get("External_Field_Reference")).get("WID")
+    if not (name and class_name and business_object):
+        return None
+    return (str(name), str(class_name), str(business_object))
+
+
+@dataclass(frozen=True)
+class CalculatedFieldMatchIndex:
+    """Everything needed to recognise a source field in the destination.
+
+    Three maps rather than one because matching happens in tiers, weakest last:
+    shape identifies a field, ``WQL_Alias`` disambiguates between fields that
+    share a shape, and alias alone is the last resort for a field the
+    destination renamed. See
+    :func:`~wdmigrator.migrate.planner.probe_node` for the order they are tried.
+    """
+
+    #: (name, class, business object) -> WIDs carrying it.
+    by_shape: dict[tuple[str, str, str], list[str]] = field(default_factory=dict)
+    #: WQL_Alias -> WIDs carrying it. Not unique: `commitconsulting_dpt3` has
+    #: five fields sharing ``cf_ExecutiveGroup``.
+    by_alias: dict[str, list[str]] = field(default_factory=dict)
+    #: WID -> its own alias, for breaking a tie within ``by_shape``.
+    alias_of: dict[str, str] = field(default_factory=dict)
+    #: WID -> its own shape, for narrowing an ambiguous ``by_alias`` hit down to
+    #: the candidate sharing the source's business object.
+    shape_of: dict[str, tuple[str, str, str]] = field(default_factory=dict)
+
+
+def calculated_field_match_index(index: "Index") -> CalculatedFieldMatchIndex:
+    """Index a destination tenant's calculated fields for cross-tenant matching.
+
+    Every map holds a *list* of WIDs on purpose. A tenant can hold several
+    fields with one name on one business object — `commitconsulting_dpt3` has
+    five called ``Executive Group`` — and those have to surface as ambiguous
+    rather than silently resolving to whichever was seen first.
+    """
+    by_shape: dict[tuple[str, str, str], list[str]] = {}
+    by_alias: dict[str, list[str]] = {}
+    alias_of: dict[str, str] = {}
+    shape_of: dict[str, tuple[str, str, str]] = {}
+    for wid in index.summaries:
+        payload = index.payload(wid)
+        shape = calculated_field_shape(payload)
+        if shape is not None:
+            by_shape.setdefault(shape, []).append(wid)
+            shape_of[wid] = shape
+        alias = calculated_field_data(payload).get("WQL_Alias")
+        if alias:
+            by_alias.setdefault(str(alias), []).append(wid)
+            alias_of[wid] = str(alias)
+    return CalculatedFieldMatchIndex(
+        by_shape=by_shape, by_alias=by_alias, alias_of=alias_of, shape_of=shape_of
+    )
 
 
 # ── Targeted lookups ─────────────────────────────────────────────────────────

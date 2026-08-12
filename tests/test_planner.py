@@ -15,6 +15,8 @@ from wdmigrator.discovery.inventory import (
     CalculatedFieldSummary,
     Index,
     LookupOutcome,
+    calculated_field_match_index,
+    calculated_field_shape,
 )
 from wdmigrator.migrate.planner import (
     Action,
@@ -557,3 +559,278 @@ class TestUnresolvedDependenciesBlockThePlan:
         plan = build_plan(closure, {})
         assert plan.unresolved_reference_ids == frozenset({"A"})
         assert plan.unresolved_measure_ids == frozenset({"B"})
+
+
+# ── Cross-tenant calculated-field matching ──────────────────────────────────
+#
+# Lives here rather than in test_discovery.py because these helpers exist to
+# serve one decision — "does the destination already have this field?" — and
+# that decision is the planner's. test_discovery.py is `live`-marked; this is
+# pure logic and belongs in the default offline run.
+
+
+def shaped_payload(
+    wid,
+    ref_id,
+    *,
+    name,
+    business_object,
+    class_name="Arithmetic Calculated Field",
+    alias=None,
+):
+    """A calculated field carrying everything cross-tenant matching looks at."""
+    data = {
+        "Calculated_Field_Reference_ID": ref_id,
+        "Name": name,
+        "Class_Name": class_name,
+        "External_Field_Reference": {
+            "ID": [{"type": "WID", "_value_1": business_object}]
+        },
+    }
+    if alias is not None:
+        data["WQL_Alias"] = alias
+    return {
+        "Calculated_Field_Reference": {
+            "ID": [
+                {"type": "WID", "_value_1": wid},
+                {"type": "Calculated_Field_ID", "_value_1": ref_id},
+            ]
+        },
+        "Calculated_Field_Data": data,
+    }
+
+
+def dest_match_index(*payloads):
+    index = Index(kind="calculated_field", tenant="dest", fetched_at=time.time())
+    for payload in payloads:
+        wid = payload["Calculated_Field_Reference"]["ID"][0]["_value_1"]
+        data = payload["Calculated_Field_Data"]
+        index.summaries[wid] = CalculatedFieldSummary(
+            wid=wid,
+            reference_id=data["Calculated_Field_Reference_ID"],
+            name=data["Name"],
+            class_name=data["Class_Name"],
+        )
+        index.payloads[wid] = payload
+    return calculated_field_match_index(index)
+
+
+def only_node(closure):
+    return next(iter(closure.nodes.values()))
+
+
+class TestCalculatedFieldShape:
+    def test_shape_is_name_class_and_business_object(self):
+        payload = shaped_payload("W1", "REF", name="Tenure", business_object="BO")
+        assert calculated_field_shape(payload) == (
+            "Tenure",
+            "Arithmetic Calculated Field",
+            "BO",
+        )
+
+    def test_a_field_with_no_business_object_has_no_shape(self):
+        """An incomplete shape must never match: a match means "do not create",
+        and matching on two thirds of an identity is a guess."""
+        payload = shaped_payload("W1", "REF", name="Tenure", business_object="BO")
+        del payload["Calculated_Field_Data"]["External_Field_Reference"]
+        assert calculated_field_shape(payload) is None
+
+    def test_duplicate_shapes_are_kept_as_a_list(self):
+        """commitconsulting_dpt3 really does hold five fields named
+        'Executive Group' on one business object."""
+        index = dest_match_index(
+            shaped_payload("D1", "a", name="Executive Group", business_object="BO"),
+            shaped_payload("D2", "b", name="Executive Group", business_object="BO"),
+        )
+        shape = ("Executive Group", "Arithmetic Calculated Field", "BO")
+        assert index.by_shape[shape] == ["D1", "D2"]
+
+
+class TestCrossTenantMatching:
+    """``Calculated_Field_ID`` is not a stable cross-tenant identity.
+
+    Confirmed live 2026-08-11: `commitconsulting_dpt1` names a field
+    ``CRTMNU01_Commit - HR Dashboard_03_Is Top Performer`` and `_dpt3` names the
+    same field ``Custom Object Data - Is Top Performer``. Probing by ID alone
+    called 62 present fields absent; creating them would have duplicated every
+    one onto the same business object, with no delete operation to undo it.
+    """
+
+    def _probe(self, payload, match_index):
+        # A destination that knows nothing by ID is the whole premise here.
+        closure = closure_of(payload)
+        return probe_node(
+            FakeDestination(), only_node(closure), match_index=match_index
+        )
+
+    def test_without_a_match_index_an_id_miss_stays_missing(self):
+        """The fallback is opt-in — callers that pass nothing are unaffected."""
+        payload = shaped_payload("W1", "SRC_REF", name="Tenure", business_object="BO")
+        found = probe_node(FakeDestination(), only_node(closure_of(payload)))
+        assert found.state is LookupOutcome.NOT_FOUND
+        assert found.matched_by is None
+
+    def test_a_unique_shape_match_is_found_and_carries_the_destination_wid(self):
+        payload = shaped_payload("W1", "SRC_REF", name="Tenure", business_object="BO")
+        index = dest_match_index(
+            shaped_payload("DEST1", "DIFFERENT_REF", name="Tenure", business_object="BO")
+        )
+        found = self._probe(payload, index)
+        assert found.state is LookupOutcome.FOUND
+        assert found.dest_wid == "DEST1"
+        assert "name + class + business object" in found.matched_by
+
+    def test_a_field_on_a_different_business_object_is_not_a_match(self):
+        payload = shaped_payload("W1", "SRC_REF", name="Tenure", business_object="BO")
+        index = dest_match_index(
+            shaped_payload("DEST1", "x", name="Tenure", business_object="OTHER")
+        )
+        assert self._probe(payload, index).state is LookupOutcome.NOT_FOUND
+
+    def test_two_same_shape_candidates_are_unknown_not_a_guess(self):
+        payload = shaped_payload("W1", "SRC_REF", name="Tenure", business_object="BO")
+        index = dest_match_index(
+            shaped_payload("DEST1", "x", name="Tenure", business_object="BO"),
+            shaped_payload("DEST2", "y", name="Tenure", business_object="BO"),
+        )
+        found = self._probe(payload, index)
+        assert found.state is LookupOutcome.UNKNOWN
+        assert "no WQL alias to break the tie" in found.fault
+
+    def test_the_wql_alias_breaks_a_shape_tie(self):
+        payload = shaped_payload(
+            "W1", "SRC_REF", name="Tenure", business_object="BO", alias="cf_tenure"
+        )
+        index = dest_match_index(
+            shaped_payload(
+                "DEST1", "x", name="Tenure", business_object="BO", alias="cf_other"
+            ),
+            shaped_payload(
+                "DEST2", "y", name="Tenure", business_object="BO", alias="cf_tenure"
+            ),
+        )
+        found = self._probe(payload, index)
+        assert found.state is LookupOutcome.FOUND
+        assert found.dest_wid == "DEST2"
+        assert "tie-broken by WQL alias" in found.matched_by
+
+    def test_an_alias_matching_no_candidate_stays_unknown(self):
+        payload = shaped_payload(
+            "W1", "SRC_REF", name="Tenure", business_object="BO", alias="cf_tenure"
+        )
+        index = dest_match_index(
+            shaped_payload(
+                "DEST1", "x", name="Tenure", business_object="BO", alias="cf_a"
+            ),
+            shaped_payload(
+                "DEST2", "y", name="Tenure", business_object="BO", alias="cf_b"
+            ),
+        )
+        assert self._probe(payload, index).state is LookupOutcome.UNKNOWN
+
+    def test_a_renamed_field_is_matched_on_alias_alone(self):
+        """dpt1's 'CF LRV Benefit Group' is dpt3's 'Benefit Group'. Nothing but
+        the alias connects them, which is why alias is tried last rather than
+        not at all."""
+        payload = shaped_payload(
+            "W1",
+            "SRC_REF",
+            name="CF LRV Benefit Group",
+            business_object="BO",
+            alias="cf_benefitGroup",
+        )
+        index = dest_match_index(
+            shaped_payload(
+                "DEST1",
+                "x",
+                name="Benefit Group",
+                business_object="BO",
+                alias="cf_benefitGroup",
+            )
+        )
+        found = self._probe(payload, index)
+        assert found.state is LookupOutcome.FOUND
+        assert found.dest_wid == "DEST1"
+        assert "WQL alias" in found.matched_by
+
+    def test_a_shared_alias_is_narrowed_by_business_object(self):
+        """dpt3 holds three fields named 'Employee ID' sharing cf_EmployeeID on
+        three different business objects. Only one of them is this field."""
+        payload = shaped_payload(
+            "W1",
+            "SRC_REF",
+            name="CF LRV Employee ID",
+            business_object="BO",
+            alias="cf_EmployeeID",
+        )
+        index = dest_match_index(
+            shaped_payload(
+                "DEST1", "x", name="Employee ID",
+                business_object="OTHER1", alias="cf_EmployeeID",
+            ),
+            shaped_payload(
+                "DEST2", "y", name="Employee ID",
+                business_object="BO", alias="cf_EmployeeID",
+            ),
+            shaped_payload(
+                "DEST3", "z", name="Employee ID",
+                business_object="OTHER2", alias="cf_EmployeeID",
+            ),
+        )
+        found = self._probe(payload, index)
+        assert found.state is LookupOutcome.FOUND
+        assert found.dest_wid == "DEST2"
+        assert "narrowed by business object" in found.matched_by
+
+    def test_a_shared_alias_on_one_business_object_stays_unknown(self):
+        payload = shaped_payload(
+            "W1", "SRC_REF", name="CF LRV Company",
+            business_object="BO", alias="cf_Company",
+        )
+        index = dest_match_index(
+            shaped_payload(
+                "DEST1", "x", name="Company", business_object="BO", alias="cf_Company"
+            ),
+            shaped_payload(
+                "DEST2", "y", name="Company", business_object="BO", alias="cf_Company"
+            ),
+        )
+        found = self._probe(payload, index)
+        assert found.state is LookupOutcome.UNKNOWN
+        assert "duplicate alias" in found.fault
+
+    def test_a_field_with_neither_shape_nor_alias_is_missing(self):
+        payload = shaped_payload("W1", "SRC_REF", name="Tenure", business_object="BO")
+        del payload["Calculated_Field_Data"]["External_Field_Reference"]
+        assert self._probe(payload, dest_match_index()).state is LookupOutcome.NOT_FOUND
+
+    def test_an_id_hit_never_consults_the_match_index(self):
+        """The business ID stays the strongest signal on the runs where it does
+        match — the fallback only ever fires on a miss."""
+        payload = shaped_payload("W1", "SRC_REF", name="Tenure", business_object="BO")
+        dest = FakeDestination({"SRC_REF": ("found", "BY_ID")})
+        index = dest_match_index(
+            shaped_payload("BY_SHAPE", "x", name="Tenure", business_object="BO")
+        )
+        found = probe_node(dest, only_node(closure_of(payload)), match_index=index)
+        assert found.dest_wid == "BY_ID"
+        assert found.matched_by is None
+
+    def test_a_shape_matched_field_seeds_the_wid_map(self):
+        """The point of matching rather than creating: dependents must be
+        rewritten to the destination's WID, not left on a source one that means
+        nothing there."""
+        payload = shaped_payload("W1", "SRC_REF", name="Tenure", business_object="BO")
+        closure = closure_of(payload)
+        index = dest_match_index(
+            shaped_payload("DEST1", "DIFFERENT_REF", name="Tenure", business_object="BO")
+        )
+        existence = {
+            p.node.node_id: p.existence
+            for p in iter_check_existence(
+                FakeDestination(), closure, match_index=index
+            )
+        }
+        plan = build_plan(closure, existence)
+        assert plan.wid_map["W1"] == "DEST1"
+        assert plan.action_for(only_node(closure)) is Action.SKIP

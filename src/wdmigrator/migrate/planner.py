@@ -32,7 +32,10 @@ from typing import Iterator, Mapping
 
 from wdmigrator.auth.client import Connection
 from wdmigrator.discovery.inventory import (
+    CalculatedFieldMatchIndex,
     LookupOutcome,
+    calculated_field_data,
+    calculated_field_shape,
     lookup_calculated_field,
     lookup_calculated_measure,
     lookup_dashboard,
@@ -62,6 +65,10 @@ class Existence:
     state: LookupOutcome
     dest_wid: str | None = None
     fault: str | None = None
+    #: How the match was made, when it was not the object's own business ID.
+    #: Recorded so the review step can show that a field was matched on shape
+    #: rather than identity — a weaker claim the user should be able to see.
+    matched_by: str | None = None
 
     @property
     def exists(self) -> bool:
@@ -211,13 +218,22 @@ def default_action(existence: Existence) -> Action:
     return Action.SKIP
 
 
-def probe_node(connection: Connection, node: Node) -> Existence:
+def probe_node(
+    connection: Connection,
+    node: Node,
+    *,
+    match_index: CalculatedFieldMatchIndex | None = None,
+) -> Existence:
     """Ask the destination whether one object already exists.
 
-    The two kinds are matched differently, and not by choice:
+    The kinds are matched differently, and not by choice:
 
-    - **Calculated fields** match on ``Calculated_Field_ID``, a genuine stable
-      cross-tenant identifier.
+    - **Calculated fields** match on ``Calculated_Field_ID`` first. That was
+      believed to be a stable cross-tenant identifier and is not — pass
+      ``match_index`` (from
+      :func:`~wdmigrator.discovery.inventory.calculated_field_match_index`) to
+      re-check a miss against name + class + business object, and then WQL
+      alias, before concluding the field is absent.
     - **Reports** match on their **name**, because ``Custom_Report_ID`` is
       returned by the API but rejected as a lookup key (see
       :func:`~wdmigrator.discovery.inventory.lookup_report_by_name`). Name is a
@@ -280,6 +296,8 @@ def probe_node(connection: Connection, node: Node) -> Existence:
                 ),
             )
         result = lookup_calculated_field(connection, reference_id=node.reference_id)
+        if result.outcome is LookupOutcome.NOT_FOUND and match_index is not None:
+            return _match_calculated_field_across_tenants(node, match_index)
 
     return Existence(
         node_id=node.node_id,
@@ -289,13 +307,161 @@ def probe_node(connection: Connection, node: Node) -> Existence:
     )
 
 
+def _match_calculated_field_across_tenants(
+    node: Node, match_index: CalculatedFieldMatchIndex
+) -> Existence:
+    """Second opinion on a calculated field the ID probe said was absent.
+
+    ``Calculated_Field_ID`` is only a cross-tenant identity when both tenants
+    acquired the field the same way, which two independently-built tenants have
+    no reason to have done — see
+    :func:`~wdmigrator.discovery.inventory.calculated_field_shape`. Three tiers
+    are tried, weakest last:
+
+    1. **Shape** — name + class + business object. The strong signal: all three
+       are comparable across tenants and together they describe what the field
+       *is*.
+    2. **Shape, tie-broken by ``WQL_Alias``** — when several destination fields
+       share a shape, one carrying the source's exact alias is that field.
+    3. **Alias alone** — for a field the destination holds under a different
+       name (`CF LRV Benefit Group` against dpt3's `Benefit Group`). Weakest,
+       because it asserts identity on a query nickname.
+
+    Every tier returns UNKNOWN rather than guessing when it finds more than one
+    candidate. Picking arbitrarily would wire dependents to whichever field was
+    swept first, which is both wrong and invisible.
+    """
+    shape = calculated_field_shape(node.payload)
+    source_alias = calculated_field_data(node.payload).get("WQL_Alias")
+    source_alias = str(source_alias) if source_alias else None
+
+    if shape is None and not source_alias:
+        return Existence(
+            node_id=node.node_id,
+            state=LookupOutcome.NOT_FOUND,
+            fault=(
+                "No Calculated_Field_ID match, and the field has neither a "
+                "complete shape nor a WQL alias to match on."
+            ),
+        )
+
+    candidates = list(match_index.by_shape.get(shape) or []) if shape else []
+
+    if len(candidates) == 1:
+        name, class_name, business_object = shape
+        return Existence(
+            node_id=node.node_id,
+            state=LookupOutcome.FOUND,
+            dest_wid=candidates[0],
+            matched_by=(
+                f"name + class + business object ({name!r}, {class_name}, "
+                f"{business_object}) — its Calculated_Field_ID differs between "
+                "the tenants"
+            ),
+        )
+
+    if len(candidates) > 1:
+        if source_alias:
+            by_alias = [
+                wid for wid in candidates
+                if match_index.alias_of.get(wid) == source_alias
+            ]
+            if len(by_alias) == 1:
+                return Existence(
+                    node_id=node.node_id,
+                    state=LookupOutcome.FOUND,
+                    dest_wid=by_alias[0],
+                    matched_by=(
+                        f"name + class + business object, tie-broken by WQL "
+                        f"alias {source_alias!r} against {len(candidates)} "
+                        "same-shape candidates"
+                    ),
+                )
+        return Existence(
+            node_id=node.node_id,
+            state=LookupOutcome.UNKNOWN,
+            fault=(
+                f"{len(candidates)} destination calculated fields share this "
+                f"name, class and business object ({shape[0]!r})"
+                + (
+                    f", and none uniquely carries the source's WQL alias "
+                    f"{source_alias!r}"
+                    if source_alias
+                    else ", and the source has no WQL alias to break the tie"
+                )
+                + ". Choosing one would wire dependents to arbitrary data."
+            ),
+        )
+
+    # No shape match at all. The destination may still hold this field under a
+    # different name, in which case its alias is the only thread left.
+    if source_alias:
+        alias_candidates = match_index.by_alias.get(source_alias) or []
+        if len(alias_candidates) == 1:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.FOUND,
+                dest_wid=alias_candidates[0],
+                matched_by=(
+                    f"WQL alias {source_alias!r} only — the destination's field "
+                    "has a different name, so nothing stronger matched"
+                ),
+            )
+        if len(alias_candidates) > 1:
+            # Several fields share the alias. The business object narrows them:
+            # it is a Workday-delivered object, so its WID is identical in both
+            # tenants, and a field on a different object is a different field
+            # whatever it is called. Applied only here, never to relax a
+            # single-candidate alias match, which is already unambiguous.
+            if shape is not None:
+                same_object = [
+                    wid for wid in alias_candidates
+                    if (match_index.shape_of.get(wid) or (None, None, None))[2]
+                    == shape[2]
+                ]
+                if len(same_object) == 1:
+                    return Existence(
+                        node_id=node.node_id,
+                        state=LookupOutcome.FOUND,
+                        dest_wid=same_object[0],
+                        matched_by=(
+                            f"WQL alias {source_alias!r} narrowed by business "
+                            f"object {shape[2]} — {len(alias_candidates)} "
+                            "destination fields share the alias, one shares the "
+                            "object"
+                        ),
+                    )
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    f"No name/class/business-object match, and "
+                    f"{len(alias_candidates)} destination fields share the WQL "
+                    f"alias {source_alias!r} without one uniquely sharing the "
+                    "business object. Creating it would be rejected as a "
+                    "duplicate alias; choosing one would be a guess."
+                ),
+            )
+
+    return Existence(node_id=node.node_id, state=LookupOutcome.NOT_FOUND)
+
+
 def iter_check_existence(
-    connection: Connection, closure: Closure
+    connection: Connection,
+    closure: Closure,
+    *,
+    match_index: CalculatedFieldMatchIndex | None = None,
 ) -> Iterator[ProbeProgress]:
     """Probe every node against the destination, yielding progress per object.
 
     A generator so the UI can show a live count and cancel partway through a
     rate-limited sweep.
+
+    ``match_index`` enables the cross-tenant calculated-field matching
+    described on :func:`probe_node`. It costs a destination index sweep to
+    build, so it is opt-in rather than automatic — but without it, two tenants
+    with different ``Calculated_Field_ID`` conventions will duplicate every
+    field they already share.
     """
     ordered = topological_sort(closure.nodes)
     total = len(ordered)
@@ -305,7 +471,7 @@ def iter_check_existence(
             checked=position,
             total=total,
             node=node,
-            existence=probe_node(connection, node),
+            existence=probe_node(connection, node, match_index=match_index),
         )
 
 
