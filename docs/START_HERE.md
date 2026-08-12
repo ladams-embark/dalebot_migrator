@@ -152,7 +152,7 @@ and requires `--no-dry-run` flag plus interactive confirmation before real write
 
 1. **Services host ≠ UI host** — SOAP calls go to `impl-services1.wd12.myworkday.com`, NOT `impl.wd12.myworkday.com`
 2. **Version must be in the URL path** — `https://.../Core_Implementation_Service/v47.0` not just `Core_Implementation_Service`
-3. **ISU username format** — `username@tenant`, not just `username`
+3. **ISU username format** — sent as `username@tenant`; enter the bare ISU name and the tenant is appended. Email-address usernames are supported
 4. **Activate Pending Security Policy Changes** — must be run in Workday UI after ISU permission changes or the ISU silently returns empty data
 5. **PUT loop is sequential** — cannot parallelize because each PUT's response WID feeds the next field's payload
 6. **Global WIDs pass through unchanged** — only remap WIDs identified as custom. Custom-vs-delivered is decided by probing the destination per object, NOT by enumerating the source (see `CLAUDE.md` → "WID handling")

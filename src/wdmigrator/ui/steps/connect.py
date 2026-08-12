@@ -196,7 +196,16 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
         placeholder="https://impl.wd12.myworkday.com/commitconsulting_dpt1/...",
         help="A pasted browser URL, or a bare tenant name.",
     )
-    side.username = secrets_ui.username_input(f"{label} ISU username", key=f"{key}_user", value=side.username)
+    side.username = secrets_ui.username_input(
+        f"{label} ISU username",
+        key=f"{key}_user",
+        value=side.username,
+        help=(
+            "Just the ISU name — the tenant is appended for you. An email "
+            "address works too. If it is already written as `name@tenant`, "
+            "that is accepted as-is rather than suffixed twice."
+        ),
+    )
     side.password = secrets_ui.password_input(f"{label} ISU password", key=f"{key}_pass")
 
     if st.button(f"Test {label.lower()} connection", key=f"{key}_test"):

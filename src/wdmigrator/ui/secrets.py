@@ -17,8 +17,8 @@ from __future__ import annotations
 import streamlit as st
 
 
-def username_input(label: str, *, key: str, value: str = "") -> str:
-    return st.text_input(label, value=value, key=key, autocomplete="off")
+def username_input(label: str, *, key: str, value: str = "", help: str | None = None) -> str:
+    return st.text_input(label, value=value, key=key, autocomplete="off", help=help)
 
 
 def password_input(label: str, *, key: str) -> str:

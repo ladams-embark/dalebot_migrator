@@ -54,7 +54,10 @@ URLs, ISU passwords, or tokens.
 Two gotchas that cost time if missed:
 - SOAP goes to the **services** host (`impl-services1.wd12.myworkday.com`), not
   the UI host (`impl.wd12.myworkday.com`).
-- The ISU username format is `username@tenant`.
+- The ISU username is sent as `username@tenant`, but enter just the ISU
+  name — `Credentials.ws_username` appends the tenant. An ISU username
+  that is itself an email address works; so does an already-qualified
+  `name@tenant`.
 
 ## Layout
 

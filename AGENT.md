@@ -163,7 +163,9 @@ extract specific type definitions.
 - **Services host ≠ UI host**: SOAP goes to `impl-services1.wd12.myworkday.com`,
   not `impl.wd12.myworkday.com`.
 - **Version in the URL path**: `.../Core_Implementation_Service/v47.0`, not bare `Core_Implementation_Service`.
-- **ISU username format**: `username@tenant`, not just `username`.
+- **ISU username format**: sent as `username@tenant`, but *enter* the bare
+  ISU name — the tenant is appended for you. An email-address username
+  (`jane.doe@acme.com`) is supported and still gets the tenant appended.
 - **Activate Pending Security Policy Changes** in the Workday UI after ISU
   permission changes, or the ISU silently returns empty data.
 - **PUT loop is sequential**: each write's response WID can feed the next payload —
