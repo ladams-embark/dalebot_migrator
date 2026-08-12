@@ -37,17 +37,22 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 
 ## PICK UP HERE — next session
 
-**Branch:** `master`, and everything is merged into it. Session 10's work
-landed as `2f61065` + merge `e716e6d` (branch
-`claude/prepaid-certification-migration-ae7877`, merged with `--no-ff`,
-matching the pattern of every other feature branch here). **Nothing is
-pushed** — `master` is ahead of the remote. `gh` CLI is **not installed** —
+**Branch:** `master`, and everything is merged into it. Session 10 landed
+three commits on `claude/prepaid-certification-migration-ae7877`, each merged
+`--no-ff` matching the pattern of every other feature branch here. **Nothing
+is pushed** — `master` is ahead of the remote. `gh` CLI is **not installed** —
 PRs, if wanted, must be opened in the browser.
 
 **State: the tool migrates calculated fields, reports (including composites
 and matrix reports), calculated measures, custom dashboards and prompt sets,
-end to end, live-verified.** Engine and `ui/` are both built. 618 offline
-tests green; `pytest` needs no `.env` and no network.
+end to end, live-verified.** Engine and `ui/` are both built. **571 offline
+tests green** (`pytest` reports `571 passed, 9 deselected`); no `.env` and no
+network needed.
+
+> The "613 offline tests" figure carried by this file through session 9, and
+> the "618" briefly written during session 10, were both wrong — never
+> measured, only inferred from pytest's progress dots. 571 is the number
+> `pytest` actually prints. Quote the summary line, not the dots.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -103,6 +108,22 @@ unaffected, and the UI explains the limitation once rather than surfacing a
 raw fault.
 
 ### Next steps, roughly in order
+
+0. **Three dashboards are fully planned and NOT written.** `Commit - HR
+   Dashboard`, `Commit - Optimize Reporting Dashboard` and `Commit - Open
+   Enrollment Command Center`, dpt1 → dpt3. Final plan: **99 CREATE / 66 SKIP,
+   zero blockers, dry run clean, plan hash `202e8a742a6b91d8`.** Four live
+   attempts in session 10 wrote **zero** objects — two halted on the WQL alias
+   collision at object 1, the rest were dry runs, and the last was stopped by a
+   permission prompt rather than anything in the tool. dpt3 is untouched.
+   Re-probe before running: the plan hash is only valid against the destination
+   as it was on 2026-08-11.
+
+   Two things this run will exercise for the first time ever: **prompt sets
+   have never been written to a tenant** (2 of them here, and
+   `writer._map_prompt_set_members` has never executed — see open question 3),
+   and the cross-tenant calculated-field matching added this session decides
+   62 of the 165 objects.
 
 1. **Drive the Streamlit wizard end to end by hand.** Still never done, and
    session 10 raised the stakes: every live migration this project has
@@ -240,6 +261,55 @@ there. `_render_calculated_fields` was already correct.
 Five new `AppTest` cases. Note the standing limitation — the Select step
 cannot be reached in a browser without tenant credentials, so this is
 `AppTest` coverage only.
+
+### Cross-tenant calculated-field matching — the big one
+
+Migrating three dashboards to dpt3 surfaced a defect that had been latent since
+2026-07-31, and it is the most consequential thing found this session.
+
+**`Calculated_Field_Reference_ID` is not a stable cross-tenant identity.**
+CLAUDE.md had asserted it was since the read path was first verified. It is
+stable only when both tenants acquired the field the same way, and dpt1 and
+dpt3 have completely different conventions —
+`CRTMNU01_Commit - HR Dashboard_03_Is Top Performer` against
+`Custom Object Data - Is Top Performer` for one and the same field.
+
+The destination probe therefore reported **62 of 110 calculated fields as
+absent when they were present**. The original plan was 164 CREATE / 1 SKIP;
+the correct plan is 99 / 66. Running the first one would have put 62 duplicate
+fields into dpt3, on the same business objects, with no delete operation.
+
+**How it surfaced** is worth remembering, because the symptom pointed nowhere
+near the cause. Object 1 of the live run failed with `Enter a unique WQL alias
+for the business object using zero through 9, A through Z, a through z, or the
+_ symbol` — which reads as a character-set complaint and is a **uniqueness**
+complaint. The alias was entirely legal characters. Of 9,734 source fields,
+zero had an illegal character.
+
+**The first fix considered was wrong and was rejected on the user's challenge.**
+Stripping `WQL_Alias` (it is `minOccurs="0"`, so legal) would have made all 164
+writes succeed — and produced 62 duplicates, because a colliding alias is
+nearly always evidence that the destination already *has* the field. Across all
+62 live collisions, **zero** turned out to be an unrelated field squatting on
+the alias. The lesson generalises: an error that can be silenced by deleting a
+field from the payload deserves a check on whether the error was telling you
+something true.
+
+`planner._match_calculated_field_across_tenants` re-checks an ID miss in three
+tiers, returning UNKNOWN rather than guessing whenever a tier finds more than
+one candidate — see CLAUDE.md for the tiers and their justification. Opt-in via
+`iter_check_existence(..., match_index=...)` since it costs a destination sweep.
+
+**One attempted change was reverted.** Forcing an UNKNOWN object to CREATE via
+`overrides` trips `validate_plan`, so `MigrationPlan.overridden` was added to
+let a human override bypass that blocker — until two existing tests
+(`test_writing_an_unknown_object_blocks`,
+`test_writing_an_ambiguously_named_report_is_blocked`) showed the rule was
+deliberate, not an oversight. The right encoding is to adjudicate **existence**
+rather than the action, which is what the run script now does for the two
+`Year-Month` fields. **Do not weaken that blocker.**
+
+15 new offline tests in `test_planner.py`.
 
 ---
 
