@@ -13,10 +13,13 @@ import pytest
 
 from wdmigrator.discovery.inventory import (
     CalculatedFieldSummary,
+    CalculatedMeasureSummary,
     Index,
     LookupOutcome,
     calculated_field_match_index,
     calculated_field_shape,
+    calculated_measure_match_index,
+    calculated_measure_shape,
 )
 from wdmigrator.migrate.planner import (
     Action,
@@ -27,7 +30,13 @@ from wdmigrator.migrate.planner import (
     probe_node,
     validate_plan,
 )
-from wdmigrator.migrate.resolver import Closure, NodeKind, node_id_for, resolve_closure
+from wdmigrator.migrate.resolver import (
+    Closure,
+    Node,
+    NodeKind,
+    node_id_for,
+    resolve_closure,
+)
 
 NOT_FOUND_FAULT = (
     "Validation error occurred. Invalid ID value.  'X' is not a valid ID "
@@ -84,6 +93,7 @@ class FakeDestination:
         self.target = SimpleNamespace(tenant="dest_tenant")
         self.service = SimpleNamespace(
             Get_Calculated_Fields=self._get_cf,
+            Get_Calculated_Measures=self._get_measure,
             Get_Tenanted_Report_Definitions=self._get_report,
         )
 
@@ -117,6 +127,11 @@ class FakeDestination:
 
     def _get_cf(self, **kwargs):
         return self._answer(kwargs, "Calculated_Field_ID", "Calculated_Field")
+
+    def _get_measure(self, **kwargs):
+        return self._answer(
+            kwargs, "BI_Calculated_Measure_ID", "Calculated_Measure"
+        )
 
     def _get_report(self, **kwargs):
         """Reports are matched by NAME — Custom_Report_ID is not a usable key.
@@ -834,3 +849,118 @@ class TestCrossTenantMatching:
         plan = build_plan(closure, existence)
         assert plan.wid_map["W1"] == "DEST1"
         assert plan.action_for(only_node(closure)) is Action.SKIP
+
+
+# ── Cross-tenant calculated-measure matching ────────────────────────────────
+
+
+def measure_payload(wid, ref_id, *, name, business_object):
+    return {
+        "Calculated_Measure_Reference": {
+            "ID": [
+                {"type": "WID", "_value_1": wid},
+                {"type": "BI_Calculated_Measure_ID", "_value_1": ref_id},
+            ]
+        },
+        "Calculated_Measure_Data": {
+            "Name": name,
+            "Business_Object_Reference": {
+                "ID": [{"type": "WID", "_value_1": business_object}]
+            },
+        },
+    }
+
+
+def measure_match_index_of(*payloads):
+    index = Index(kind="calculated_measure", tenant="dest", fetched_at=time.time())
+    for payload in payloads:
+        wid = payload["Calculated_Measure_Reference"]["ID"][0]["_value_1"]
+        index.summaries[wid] = CalculatedMeasureSummary(
+            wid=wid, reference_id=None, name=None
+        )
+        index.payloads[wid] = payload
+    return calculated_measure_match_index(index)
+
+
+def measure_node(payload, ref_id):
+    """A bare closure node for a calculated measure."""
+    wid = payload["Calculated_Measure_Reference"]["ID"][0]["_value_1"]
+    return Node(
+        node_id=node_id_for(NodeKind.CALCULATED_MEASURE, wid),
+        kind=NodeKind.CALCULATED_MEASURE,
+        source_wid=wid,
+        reference_id=ref_id,
+        name=payload["Calculated_Measure_Data"]["Name"],
+        payload=payload,
+    )
+
+
+class TestCalculatedMeasureMatching:
+    """``BI_Calculated_Measure_ID`` cannot be a cross-tenant identity.
+
+    Unlike calculated fields — where it depends on how each tenant acquired the
+    field — measure IDs are Workday-generated with tenant-local sequence
+    numbers (`ARITHMETIC_CALCULATED_MEASURE-11-210`), so two tenants can never
+    agree. Confirmed live 2026-08-12: creating a measure whose name is taken
+    fails with "Enter a unique name for the System-Wide Summarization
+    Calculation", which halted a migration 67 objects in.
+    """
+
+    def _probe(self, payload, ref_id, index):
+        return probe_node(
+            FakeDestination(), measure_node(payload, ref_id), measure_match_index=index
+        )
+
+    def test_shape_is_name_and_business_object(self):
+        payload = measure_payload("W1", "x", name="Turnover", business_object="BO")
+        assert calculated_measure_shape(payload) == ("Turnover", "BO")
+
+    def test_a_measure_with_no_business_object_has_no_shape(self):
+        payload = measure_payload("W1", "x", name="Turnover", business_object="BO")
+        del payload["Calculated_Measure_Data"]["Business_Object_Reference"]
+        assert calculated_measure_shape(payload) is None
+
+    def test_without_a_match_index_an_id_miss_stays_missing(self):
+        payload = measure_payload("W1", "SRC", name="Turnover", business_object="BO")
+        found = probe_node(FakeDestination(), measure_node(payload, "SRC"))
+        assert found.state is LookupOutcome.NOT_FOUND
+        assert found.matched_by is None
+
+    def test_a_unique_shape_match_is_found(self):
+        payload = measure_payload("W1", "SRC", name="Turnover", business_object="BO")
+        index = measure_match_index_of(
+            measure_payload(
+                "DEST1", "ARITHMETIC_CALCULATED_MEASURE-11-210",
+                name="Turnover", business_object="BO",
+            )
+        )
+        found = self._probe(payload, "SRC", index)
+        assert found.state is LookupOutcome.FOUND
+        assert found.dest_wid == "DEST1"
+        assert "name + business object" in found.matched_by
+
+    def test_a_measure_on_a_different_business_object_is_not_a_match(self):
+        payload = measure_payload("W1", "SRC", name="Turnover", business_object="BO")
+        index = measure_match_index_of(
+            measure_payload("DEST1", "y", name="Turnover", business_object="OTHER")
+        )
+        assert self._probe(payload, "SRC", index).state is LookupOutcome.NOT_FOUND
+
+    def test_two_candidates_are_unknown_not_a_guess(self):
+        payload = measure_payload("W1", "SRC", name="Turnover", business_object="BO")
+        index = measure_match_index_of(
+            measure_payload("DEST1", "y", name="Turnover", business_object="BO"),
+            measure_payload("DEST2", "z", name="Turnover", business_object="BO"),
+        )
+        found = self._probe(payload, "SRC", index)
+        assert found.state is LookupOutcome.UNKNOWN
+        assert "share this name and business object" in found.fault
+
+    def test_a_genuinely_absent_measure_is_still_created(self):
+        """Five of the seven measures in the live run really were new — the
+        fallback must not turn 'absent' into 'assume it exists'."""
+        payload = measure_payload("W1", "SRC", name="Brand New", business_object="BO")
+        index = measure_match_index_of(
+            measure_payload("DEST1", "y", name="Something Else", business_object="BO")
+        )
+        assert self._probe(payload, "SRC", index).state is LookupOutcome.NOT_FOUND

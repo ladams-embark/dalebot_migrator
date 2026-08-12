@@ -159,6 +159,14 @@ class DashboardSummary:
 
 
 @dataclass(frozen=True)
+class CalculatedMeasureSummary:
+    wid: str
+    reference_id: str | None
+    name: str | None
+    business_object_wid: str | None = None
+
+
+@dataclass(frozen=True)
 class PromptSetSummary:
     wid: str
     reference_id: str | None
@@ -353,6 +361,55 @@ def calculated_field_match_index(index: "Index") -> CalculatedFieldMatchIndex:
     return CalculatedFieldMatchIndex(
         by_shape=by_shape, by_alias=by_alias, alias_of=alias_of, shape_of=shape_of
     )
+
+
+def calculated_measure_data(payload: Mapping | None) -> dict:
+    """The ``Calculated_Measure_Data`` block, singular or one-element list."""
+    data = (payload or {}).get("Calculated_Measure_Data") or {}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return data if isinstance(data, dict) else {}
+
+
+def calculated_measure_shape(payload: Mapping | None) -> tuple[str, str] | None:
+    """A calculated measure's cross-tenant shape: name and business object.
+
+    Thinner than :func:`calculated_field_shape`, which also has ``Class_Name``.
+    ``Calculated_Measure_DataType`` has no equivalent — the measure's type shows
+    only in which sub-type block is populated, and that is not a comparable
+    scalar. So this asserts identity on two parts rather than three, and is
+    correspondingly weaker.
+
+    It holds on the tenants seen so far: `commitconsulting_dpt5` has 47 measures
+    and **zero** duplicate names (confirmed live 2026-08-12), so name alone is
+    already unique there and the business object is a second, free check.
+    :func:`~wdmigrator.migrate.planner.probe_node` still refuses to guess when
+    more than one candidate shares a shape.
+
+    Returns ``None`` if either part is missing — an incomplete shape must never
+    match, because a match means "do not create".
+    """
+    data = calculated_measure_data(payload)
+    name = data.get("Name")
+    business_object = ids_of(data.get("Business_Object_Reference")).get("WID")
+    if not (name and business_object):
+        return None
+    return (str(name), str(business_object))
+
+
+def calculated_measure_match_index(index: "Index") -> dict[tuple[str, str], list[str]]:
+    """Map each measure shape in ``index`` to the WIDs carrying it.
+
+    A list, not a single WID, for the same reason as calculated fields: a
+    duplicate has to surface as ambiguous rather than silently resolve to
+    whichever the sweep saw first.
+    """
+    shapes: dict[tuple[str, str], list[str]] = {}
+    for wid in index.summaries:
+        shape = calculated_measure_shape(index.payload(wid))
+        if shape is not None:
+            shapes.setdefault(shape, []).append(wid)
+    return shapes
 
 
 # ── Targeted lookups ─────────────────────────────────────────────────────────
@@ -880,6 +937,20 @@ def _dashboard_summary(item: dict, *, tabbed: bool) -> DashboardSummary | None:
     )
 
 
+def _calculated_measure_summary(item: dict) -> CalculatedMeasureSummary | None:
+    ids = ids_of(item.get("Calculated_Measure_Reference"))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = calculated_measure_data(item)
+    return CalculatedMeasureSummary(
+        wid=wid,
+        reference_id=ids.get("BI_Calculated_Measure_ID"),
+        name=data.get("Name"),
+        business_object_wid=ids_of(data.get("Business_Object_Reference")).get("WID"),
+    )
+
+
 def _prompt_set_summary(item: dict) -> PromptSetSummary | None:
     ids = ids_of(item.get("Prompt_Set_Reference"))
     wid = ids.get("WID")
@@ -955,6 +1026,39 @@ def iter_dashboard_index(
             if page >= total_pages:
                 break
             page += 1
+
+
+def iter_calculated_measure_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every calculated measure. One page, 47-55 items on these tenants.
+
+    Measures are deliberately *not* indexed for dependency resolution — see
+    :func:`lookup_calculated_measure`, which fetches them one at a time because
+    a report reaches only a handful and an on-demand lookup cannot go stale
+    mid-run. That reasoning still holds.
+
+    This sweep exists for the opposite job: recognising a measure in the
+    **destination** when its ``BI_Calculated_Measure_ID`` does not match. It
+    cannot match, in fact — confirmed live 2026-08-12, dpt5's IDs are Workday-
+    generated with tenant-local sequence numbers
+    (``ARITHMETIC_CALCULATED_MEASURE-11-210``) while dpt1's come from an earlier
+    migration (``CRTMNU01_Commit - HR Dashboard_08_Annual - Turnover %``). Two
+    tenants can never agree on those, so matching needs the whole destination
+    set. See :func:`calculated_measure_match_index`.
+    """
+    return _iter_index(
+        connection,
+        kind="calculated_measure",
+        operation_name="Get_Calculated_Measures",
+        response_group={
+            "Include_Reference": True,
+            "Include_Calculated_Measure_Data": True,
+        },
+        collection_key="Calculated_Measure",
+        summarise=_calculated_measure_summary,
+        page_size=page_size,
+    )
 
 
 def iter_prompt_set_index(
@@ -1034,6 +1138,7 @@ def save_index(index: Index, path: Path) -> Path:
 #: Which summary dataclass a cached index rehydrates into, by ``kind``.
 _SUMMARY_TYPES = {
     "calculated_field": CalculatedFieldSummary,
+    "calculated_measure": CalculatedMeasureSummary,
     "report": ReportSummary,
     "dashboard": DashboardSummary,
     "prompt_set": PromptSetSummary,

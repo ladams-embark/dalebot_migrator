@@ -36,6 +36,7 @@ from wdmigrator.discovery.inventory import (
     LookupOutcome,
     calculated_field_data,
     calculated_field_shape,
+    calculated_measure_shape,
     lookup_calculated_field,
     lookup_calculated_measure,
     lookup_dashboard,
@@ -223,6 +224,7 @@ def probe_node(
     node: Node,
     *,
     match_index: CalculatedFieldMatchIndex | None = None,
+    measure_match_index: Mapping[tuple[str, str], list[str]] | None = None,
 ) -> Existence:
     """Ask the destination whether one object already exists.
 
@@ -281,6 +283,11 @@ def probe_node(
                 ),
             )
         result = lookup_calculated_measure(connection, reference_id=node.reference_id)
+        if (
+            result.outcome is LookupOutcome.NOT_FOUND
+            and measure_match_index is not None
+        ):
+            return _match_calculated_measure_across_tenants(node, measure_match_index)
     elif node.kind is NodeKind.REPORT:
         result = lookup_report_by_name(connection, node.name or "")
     else:
@@ -446,11 +453,69 @@ def _match_calculated_field_across_tenants(
     return Existence(node_id=node.node_id, state=LookupOutcome.NOT_FOUND)
 
 
+def _match_calculated_measure_across_tenants(
+    node: Node, measure_match_index: Mapping[tuple[str, str], list[str]]
+) -> Existence:
+    """Second opinion on a calculated measure the ID probe said was absent.
+
+    ``BI_Calculated_Measure_ID`` cannot be a cross-tenant identity, and unlike
+    the calculated-field case that is true *by construction* rather than by
+    convention: the destination's IDs are Workday-generated with tenant-local
+    sequence numbers (``ARITHMETIC_CALCULATED_MEASURE-11-210``), so no two
+    tenants can agree on them.
+
+    Matching is on (name, business object) — see
+    :func:`~wdmigrator.discovery.inventory.calculated_measure_shape` for why
+    that is thinner than the calculated-field equivalent. Several candidates
+    means UNKNOWN, never a guess.
+
+    Confirmed live 2026-08-12: creating a measure whose name is already taken
+    fails with "Enter a unique name for the System-Wide Summarization
+    Calculation", so an unmatched duplicate does not silently succeed — but it
+    does halt a run partway, which is what this avoids.
+    """
+    shape = calculated_measure_shape(node.payload)
+    if shape is None:
+        return Existence(
+            node_id=node.node_id,
+            state=LookupOutcome.NOT_FOUND,
+            fault=(
+                "No BI_Calculated_Measure_ID match, and the measure is missing "
+                "a name or business object, so it cannot be matched on shape."
+            ),
+        )
+
+    candidates = measure_match_index.get(shape) or []
+    if len(candidates) == 1:
+        name, business_object = shape
+        return Existence(
+            node_id=node.node_id,
+            state=LookupOutcome.FOUND,
+            dest_wid=candidates[0],
+            matched_by=(
+                f"name + business object ({name!r}, {business_object}) — "
+                "BI_Calculated_Measure_ID is tenant-generated and never matches"
+            ),
+        )
+    if len(candidates) > 1:
+        return Existence(
+            node_id=node.node_id,
+            state=LookupOutcome.UNKNOWN,
+            fault=(
+                f"{len(candidates)} destination calculated measures share this "
+                f"name and business object ({shape[0]!r}). Choosing one would "
+                "wire dependents to arbitrary data."
+            ),
+        )
+    return Existence(node_id=node.node_id, state=LookupOutcome.NOT_FOUND)
+
+
 def iter_check_existence(
     connection: Connection,
     closure: Closure,
     *,
     match_index: CalculatedFieldMatchIndex | None = None,
+    measure_match_index: Mapping[tuple[str, str], list[str]] | None = None,
 ) -> Iterator[ProbeProgress]:
     """Probe every node against the destination, yielding progress per object.
 
@@ -471,7 +536,12 @@ def iter_check_existence(
             checked=position,
             total=total,
             node=node,
-            existence=probe_node(connection, node, match_index=match_index),
+            existence=probe_node(
+                connection,
+                node,
+                match_index=match_index,
+                measure_match_index=measure_match_index,
+            ),
         )
 
 
