@@ -291,9 +291,15 @@ dest_client.service.Get_Calculated_Fields(
 ```
 
 - **Resolves** → EXISTS. Capture the destination WID and seed `wid_map` with it.
-- **Fault** `Invalid ID value.  'X' is not a valid ID value for type = 'Calculated_Field_ID'` → MISSING.
+- **Fault** `Invalid ID value.  'X' is not a valid ID value for type = 'Calculated_Field_ID'` → MISSING —
+  **but only provisionally.** A miss here means "this tenant does not use that ID", not "this tenant does
+  not have that field". Re-check it against name/class/business object before creating anything; see
+  "`Calculated_Field_Reference_ID` is NOT a stable cross-tenant identity" below.
 - **Any other fault** → UNKNOWN. Must NOT be collapsed into MISSING: "missing" means "create", and
-  creating something that already exists is how you get duplicates. Block the run instead.
+  creating something that already exists is how you get duplicates. Block the run instead. This holds
+  even when a human overrides the action — `validate_plan` refuses to create an UNKNOWN object however
+  the action was set, and `tests/test_planner.py` pins that. Adjudicate *existence* if you mean to
+  override it, so the decision is recorded where it belongs.
 
 This one mechanism does both jobs — custom-vs-delivered discrimination *and* conflict detection — and
 costs O(dependency closure) instead of O(9652).
@@ -331,6 +337,65 @@ for node in plan.ordered_nodes:
 
 # 7. PUT report definitions — same wid_map applied to column/filter data, owner remapped.
 ```
+
+### ⚠️ `Calculated_Field_Reference_ID` is NOT a stable cross-tenant identity
+
+The probe above matches on `Calculated_Field_ID`, and this file has said since
+2026-07-31 that it is a "stable cross-tenant ID; use this for identity, NOT
+WID". **That holds only when both tenants acquired the field the same way.**
+Two independently-built tenants have no reason to have done so.
+
+Confirmed live 2026-08-11, `commitconsulting_dpt1` → `_dpt3`. The same field is:
+
+- `CRTMNU01_Commit - HR Dashboard_03_Is Top Performer` on dpt1 (machine-generated
+  by some earlier migration, namespaced by dashboard)
+- `Custom Object Data - Is Top Performer` on dpt3 (`<Business Object> - <Name>`)
+
+Probing by ID alone reported **62 of 110 calculated fields as absent when they
+were plainly present**. Creating them would have put 62 duplicates onto the same
+business objects, unremovable by this tool.
+
+`migrate/planner.py:_match_calculated_field_across_tenants` re-checks an ID miss
+in three tiers, weakest last, and returns UNKNOWN rather than guessing whenever a
+tier finds more than one candidate:
+
+1. **Shape** — `(Name, Class_Name, External_Field_Reference WID)`. All three are
+   comparable across tenants: the first two are plain strings and the business
+   object is Workday-delivered, so its WID is identical everywhere.
+2. **Shape tie-broken by `WQL_Alias`** — dpt3 holds five fields named
+   `Executive Group` on one business object, so shape alone is not always unique.
+3. **`WQL_Alias` alone, narrowed by business object if several share it** — for a
+   field the destination renamed (`CF LRV Benefit Group` ↔ dpt3's `Benefit
+   Group`). Weakest tier: it asserts identity on a query nickname.
+
+Opt-in via `iter_check_existence(..., match_index=...)`, because it costs a full
+destination index sweep (~25s) to build. **Without it, any two tenants with
+different ID conventions will duplicate every field they already share.**
+
+### ⚠️ `WQL_Alias` must be unique per business object in the destination
+
+A `Put_Calculated_Field` whose alias collides is rejected outright:
+
+```
+Validation error occurred. Enter a unique WQL alias for the business object
+using zero through 9, A through Z, a through z, or the _ symbol.
+```
+
+The message reads like a character-set complaint and is usually a **uniqueness**
+complaint — confirmed live 2026-08-11 on an alias (`cf_isTopPerformer1`) that was
+entirely legal characters. Of 9,734 source fields, **zero** had an illegal
+character; the failures were all collisions.
+
+Uniqueness is scoped **per business object**, not tenant-wide — dpt3 itself holds
+five fields sharing `cf_ExecutiveGroup`, which would be impossible otherwise. So
+a tenant-global "is this alias taken" check over-reports.
+
+`WQL_Alias` is `minOccurs="0"`, so stripping it is schema-legal — **but do not
+reach for that first.** It was the initial fix considered here and it was wrong:
+a colliding alias is nearly always evidence that the destination already has the
+field, and stripping it converts "reuse the existing field" into "create a
+duplicate". Investigated across 62 live collisions, **zero** turned out to be an
+unrelated field squatting on the alias. Match the field instead (see above).
 
 ### Identifying custom vs global WIDs
 Decided per object by the destination probe above. A WID that resolves in the destination is
