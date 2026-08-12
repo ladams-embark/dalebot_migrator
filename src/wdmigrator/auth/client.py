@@ -15,7 +15,10 @@ its schema and the address always comes from the :class:`TenantTarget`.
 appended the tenant unconditionally while its docstring said the env var
 "usually" already contained it — which would silently produce
 ``user@tenant@tenant``. Here an already-qualified username is accepted, but a
-mismatched one is rejected rather than quietly overridden.
+mismatched one is rejected rather than quietly overridden. The ISU username may
+itself be an email address, which makes "already qualified" ambiguous — see
+:meth:`Credentials.ws_username` for how the two are separated and how to
+override it.
 """
 
 from __future__ import annotations
@@ -84,24 +87,59 @@ class Credentials:
     def ws_username(self, tenant: str) -> str:
         """The WS-Security username: ``{isu_username}@{tenant}``.
 
-        Accepts an already-qualified username so a user who pastes
-        ``lmcneil@acme_impl`` is not double-suffixed. A username qualified with
-        a *different* tenant is an error, not something to silently correct —
-        it usually means credentials were copy-pasted from another tenant, and
-        quietly rewriting it would authenticate somewhere unintended.
+        Three shapes have to work, and two of them look identical:
+
+        - ``lmcneil`` — the bare ISU name. Gets the tenant appended.
+        - ``lmcneil@acme_impl`` — already qualified. Returned as-is rather than
+          double-suffixed, which is the bug the original prototype had.
+        - ``jane.doe@acme.com`` — **an ISU username that is itself an email
+          address.** Workday allows this, and it still needs the tenant
+          appended, giving ``jane.doe@acme.com@acme_impl``.
+
+        The second and third are the same shape — ``something@something`` — so
+        they cannot be told apart with certainty. They are separated by whether
+        the trailing segment contains a dot: no Workday tenant seen by this
+        project has one (`commitconsulting`, `commitconsulting_dpt1/_dpt3/_dpt5`,
+        `web`), and a mail domain effectively always does.
+
+        That is a heuristic, so it is arranged to never be a dead end. It only
+        gates the *error* path, and a username already ending in ``@{tenant}``
+        short-circuits it entirely — so anything the heuristic gets wrong is
+        fixed by typing the fully-qualified form
+        (``jane@localdomain@acme_impl``), which is accepted verbatim.
+
+        A username qualified with a *different* tenant is still an error rather
+        than something to silently correct: it usually means credentials were
+        copy-pasted from another tenant, and rewriting it quietly would
+        authenticate as an ISU the user did not intend.
         """
         username = self.username.strip()
-        if "@" not in username:
-            return f"{username}@{tenant}"
+        suffix = f"@{tenant}"
 
-        local, _, qualifier = username.rpartition("@")
-        if qualifier.lower() != tenant.lower():
+        if username.startswith("@"):
             raise AuthError(
-                f"Username {username!r} is qualified with tenant {qualifier!r} "
-                f"but this connection targets {tenant!r}. Use the bare ISU "
-                "username, or correct the tenant."
+                f"Username {username!r} has nothing before the '@'. Enter the "
+                "ISU username itself — either bare, or qualified as "
+                f"'name{suffix}'."
             )
-        return f"{local}@{tenant}"
+
+        # Already qualified with this tenant. Covers a plain ISU name and a
+        # fully-qualified email alike, and normalises the tenant's case.
+        if username.lower().endswith(suffix.lower()) and len(username) > len(suffix):
+            return f"{username[: -len(suffix)]}@{tenant}"
+
+        if "@" in username:
+            qualifier = username.rpartition("@")[2]
+            if "." not in qualifier and qualifier.lower() != tenant.lower():
+                raise AuthError(
+                    f"Username {username!r} looks like it is qualified with "
+                    f"tenant {qualifier!r}, but this connection targets "
+                    f"{tenant!r}. Use the bare ISU username, or correct the "
+                    f"tenant. If {username!r} really is the whole username, "
+                    f"enter it as {username}{suffix}."
+                )
+
+        return f"{username}{suffix}"
 
     def fingerprint(self, target: TenantTarget) -> str:
         """Stable ID for (host, tenant, username) — **never** the password.

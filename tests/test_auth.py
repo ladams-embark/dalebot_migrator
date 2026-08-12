@@ -40,6 +40,55 @@ class TestCredentials:
         with pytest.raises(AuthError, match="production_tenant"):
             c.ws_username("acme_impl")
 
+
+class TestEmailAddressUsernames:
+    """An ISU username is sometimes an email address.
+
+    That collides with the ``user@tenant`` qualification format: both are
+    ``something@something``, so an email username was previously rejected as
+    "qualified with the wrong tenant" and there was no way to connect at all.
+    """
+
+    def test_an_email_username_gets_the_tenant_appended(self):
+        c = creds(username="jane.doe@acme.com")
+        assert c.ws_username("acme_impl") == "jane.doe@acme.com@acme_impl"
+
+    def test_a_fully_qualified_email_username_is_not_double_suffixed(self):
+        c = creds(username="jane.doe@acme.com@acme_impl")
+        assert c.ws_username("acme_impl") == "jane.doe@acme.com@acme_impl"
+
+    def test_a_fully_qualified_email_matches_the_tenant_case_insensitively(self):
+        c = creds(username="jane.doe@acme.com@ACME_IMPL")
+        assert c.ws_username("acme_impl") == "jane.doe@acme.com@acme_impl"
+
+    def test_an_email_qualified_with_another_tenant_still_appends(self):
+        """Not an error: 'acme.com' is a mail domain, not a tenant, so this is
+        an unqualified email username rather than a wrong-tenant paste."""
+        c = creds(username="jane.doe@acme.com")
+        assert c.ws_username("other_tenant") == "jane.doe@acme.com@other_tenant"
+
+    def test_a_dotless_qualifier_is_still_treated_as_a_tenant(self):
+        """The dot is what separates the two shapes. Without one this reads as
+        a wrong-tenant qualification, which is the safer reading."""
+        with pytest.raises(AuthError, match="localdomain"):
+            creds(username="jane@localdomain").ws_username("acme_impl")
+
+    def test_the_error_names_the_fully_qualified_escape_hatch(self):
+        """The heuristic must never be a dead end — the message has to say how
+        to force the literal username through."""
+        with pytest.raises(AuthError, match=r"jane@localdomain@acme_impl"):
+            creds(username="jane@localdomain").ws_username("acme_impl")
+
+    def test_the_escape_hatch_actually_works(self):
+        c = creds(username="jane@localdomain@acme_impl")
+        assert c.ws_username("acme_impl") == "jane@localdomain@acme_impl"
+
+    def test_a_username_with_no_local_part_is_rejected_clearly(self):
+        """Its own error rather than the wrong-tenant one, which would have read
+        'qualified with acme_impl but targets acme_impl'."""
+        with pytest.raises(AuthError, match="nothing before"):
+            creds(username="@acme_impl").ws_username("acme_impl")
+
     def test_whitespace_is_stripped(self):
         assert creds(username="  lmcneil  ").ws_username("t") == "lmcneil@t"
 
