@@ -1606,6 +1606,22 @@ def write_node(
 
     if action is Action.SKIP:
         record.dest_wid = dest_wid
+        # A skipped prompt set still needs its MEMBERS mapped. Members get
+        # fresh WIDs in the destination and dashboards reference them
+        # individually through Prompt_Set_Member__All__Reference, so without
+        # this a dashboard is written pointing at the source's member WIDs.
+        #
+        # Only ever ran after a successful write before, which hid the gap: it
+        # is exactly the second run — where the prompt set was created earlier
+        # and is now SKIP — that needs it. Confirmed live 2026-08-12, the
+        # `Commit - Open Enrollment Command Center` worklet write-back failed on
+        # a member WID after its prompt set had been created by a prior run.
+        if node.kind is NodeKind.PROMPT_SET and dest_wid and not guard.dry_run:
+            member_fault = _map_prompt_set_members(
+                connection, node, dest_wid, plan.wid_map
+            )
+            if member_fault is not None:
+                record.warnings.append(member_fault)
         return record
 
     operation = operation_for(node)
