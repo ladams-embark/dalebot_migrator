@@ -882,6 +882,51 @@ def build_dashboard_payload(
     return payload
 
 
+def build_prompt_field_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+) -> dict:
+    """Arguments for ``Put_Prompt_Field``.
+
+    A prompt field is a *tenanted external parameter* — what a prompt set's
+    members point at. ``Prompt_Field_DataType`` is small: ``Name``, a required
+    ``Field_Type_Reference``, and optional ``Business_Object_Reference`` and
+    ``Currency_Code_Reference``. All three references are delivered objects, so
+    they pass through with the same WIDs; ``wid_map`` is applied anyway for
+    consistency and costs nothing.
+
+    Only *custom* prompt fields reach here. A delivered parameter (Effective
+    Date, Supervisory Organization) is referenced by a bare WID with no
+    ``TenantedExternalParameter`` id, is not returned by ``Get_Prompt_Fields``
+    on either tenant, and is never resolved into a node — see
+    :func:`~wdmigrator.migrate.ordering.extract_prompt_field_refs`.
+    """
+    data = node.payload.get("Prompt_Field_Data")
+    if not data:
+        raise WriteError(f"{node.name!r} has no Prompt_Field_Data to write.")
+
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+
+    payload: dict = {"Prompt_Field_Data": remapped}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE {node.name!r} without the destination's WID."
+            )
+        payload["Prompt_Field_Reference"] = {
+            "ID": [{"type": "WID", "_value_1": dest_wid}]
+        }
+
+    return payload
+
+
 def build_prompt_set_payload(
     node: Node,
     wid_map: Mapping[str, str],
@@ -927,6 +972,7 @@ _OPERATIONS = {
     NodeKind.CALCULATED_FIELD: "Put_Calculated_Field",
     NodeKind.CALCULATED_MEASURE: "Put_Global_Calculated_Measure",
     NodeKind.PROMPT_SET: "Put_Prompt_Set",
+    NodeKind.PROMPT_FIELD: "Put_Prompt_Field",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["put"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["put"],
 }
@@ -1041,6 +1087,7 @@ _RESPONSE_REFERENCE_KEY = {
     NodeKind.CALCULATED_FIELD: "Calculated_Field_Reference",
     NodeKind.CALCULATED_MEASURE: "Calculated_Measure_Reference",
     NodeKind.PROMPT_SET: "Prompt_Set_Reference",
+    NodeKind.PROMPT_FIELD: "Prompt_Field_Reference",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["reference"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["reference"],
 }
@@ -1391,6 +1438,11 @@ def write_node(
     try:
         if node.kind in DASHBOARD_TABBED_BY_KIND:
             payload = build_dashboard_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
+            )
+        elif node.kind is NodeKind.PROMPT_FIELD:
+            payload = build_prompt_field_payload(
                 node, plan.wid_map, action=action, dest_wid=dest_wid,
                 reference_decisions=plan.reference_decisions,
             )

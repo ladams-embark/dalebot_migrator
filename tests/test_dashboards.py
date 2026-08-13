@@ -9,17 +9,21 @@ thing fails. Every reference shape below was observed in that dump.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from wdmigrator.discovery.inventory import (
     DASHBOARD_FLAVOURS,
     DashboardSummary,
     Index,
+    PromptFieldSummary,
     PromptSetSummary,
     requires_implementer,
 )
 from wdmigrator.migrate.ordering import (
     extract_dashboard_refs,
+    extract_prompt_field_refs,
     extract_prompt_set_refs,
     extract_report_refs,
 )
@@ -32,7 +36,9 @@ from wdmigrator.migrate.resolver import (
     resolve_closure,
 )
 from wdmigrator.migrate.writer import (
+    WriteError,
     build_dashboard_payload,
+    build_prompt_field_payload,
     build_prompt_set_payload,
     build_report_payload,
     is_dashboard_worklet,
@@ -790,3 +796,148 @@ class TestImplementerDetection:
         )
         assert not requires_implementer("invalid username or password")
         assert not requires_implementer(None)
+
+
+# ── Prompt fields (tenanted external parameters) ─────────────────────────────
+
+
+def prompt_field(wid="PARAM1", reference_id="DateOE Open Date", name="OE Open Date"):
+    return {
+        "Prompt_Field_Reference": ref(WID=wid, TenantedExternalParameter=reference_id),
+        "Prompt_Field_Data": {
+            "Name": name,
+            "Field_Type_Reference": ref(WID="FIELDTYPE1"),
+            "Business_Object_Reference": ref(WID="BO1"),
+            "Currency_Code_Reference": None,
+        },
+    }
+
+
+def prompt_field_index(*payloads):
+    index = Index(kind="prompt_field", tenant="t", fetched_at=time.time())
+    for p in payloads:
+        wid = p["Prompt_Field_Reference"]["ID"][0]["_value_1"]
+        index.summaries[wid] = PromptFieldSummary(
+            wid=wid,
+            reference_id=p["Prompt_Field_Reference"]["ID"][1]["_value_1"],
+            name=p["Prompt_Field_Data"]["Name"],
+        )
+        index.payloads[wid] = p
+    return index
+
+
+def prompt_set_with_custom_parameter(wid="PS1", name="Company"):
+    payload = prompt_set(wid=wid, name=name)
+    payload["Prompt_Set_Data"]["Tenanted_Prompt_Set_Member_Data"] = [
+        {
+            "Reference_for_Webservices": "1",
+            "Abstract_External_Parameter_Reference": ref(
+                WID="PARAM1", TenantedExternalParameter="DateOE Open Date"
+            ),
+        }
+    ]
+    return payload
+
+
+class TestPromptFieldReferences:
+    """A prompt set cannot be written before its parameters exist.
+
+    Confirmed live 2026-08-12: ``Put_Prompt_Set`` failed with ``Invalid ID
+    value ... for type = 'WID'`` naming an
+    ``Abstract_External_Parameter_Reference``, 69 objects into a migration.
+    """
+
+    def test_a_custom_parameter_is_extracted(self):
+        data = {
+            "Abstract_External_Parameter_Reference": ref(
+                WID="PARAM1", TenantedExternalParameter="DateOE Open Date"
+            )
+        }
+        assert extract_prompt_field_refs(data) == {"PARAM1": "DateOE Open Date"}
+
+    def test_a_delivered_parameter_is_ignored(self):
+        """The 'Commit - HR Dashboard' prompt set's five members are all like
+        this: a bare WID, absent from Get_Prompt_Fields on *both* tenants, and
+        identical across tenants. Resolving them would invent a dependency that
+        cannot be satisfied."""
+        assert extract_prompt_field_refs(
+            {"Abstract_External_Parameter_Reference": ref(WID="DELIVERED1")}
+        ) == {}
+
+
+class TestPromptFieldClosure:
+    def resolve(self, **kwargs):
+        return resolve_closure(
+            cf_index=empty_cf_index(),
+            allow_partial_index=True,
+            selected_dashboards={"DB1": tabbed_dashboard()},
+            **kwargs,
+        )
+
+    def test_a_prompt_set_pulls_in_its_custom_parameter(self):
+        closure = self.resolve(
+            prompt_set_index=prompt_set_index(prompt_set_with_custom_parameter()),
+            prompt_field_index=prompt_field_index(prompt_field()),
+        )
+        assert node_id_for(NodeKind.PROMPT_FIELD, "PARAM1") in closure.nodes
+
+    def test_the_prompt_set_depends_on_the_parameter(self):
+        """Ordering is the whole point — the parameter has to be written first."""
+        closure = self.resolve(
+            prompt_set_index=prompt_set_index(prompt_set_with_custom_parameter()),
+            prompt_field_index=prompt_field_index(prompt_field()),
+        )
+        prompt_set_node = closure.nodes[node_id_for(NodeKind.PROMPT_SET, "PS1")]
+        assert node_id_for(NodeKind.PROMPT_FIELD, "PARAM1") in prompt_set_node.depends_on
+
+    def test_a_delivered_parameter_creates_no_node(self):
+        closure = self.resolve(
+            prompt_set_index=prompt_set_index(prompt_set()),
+            prompt_field_index=prompt_field_index(prompt_field()),
+        )
+        assert not [
+            n for n in closure.nodes.values() if n.kind is NodeKind.PROMPT_FIELD
+        ]
+
+    def test_a_missing_parameter_is_recorded_not_silently_dropped(self):
+        closure = self.resolve(
+            prompt_set_index=prompt_set_index(prompt_set_with_custom_parameter()),
+            prompt_field_index=prompt_field_index(),
+        )
+        assert closure.unresolved_prompt_field_ids == {"DateOE Open Date"}
+
+    def test_no_prompt_field_index_means_no_prompt_field_resolution(self):
+        """Opt-in, like prompt sets and dashboards — a caller that passes
+        nothing behaves exactly as before."""
+        closure = self.resolve(
+            prompt_set_index=prompt_set_index(prompt_set_with_custom_parameter())
+        )
+        assert closure.unresolved_prompt_field_ids == set()
+        assert not [
+            n for n in closure.nodes.values() if n.kind is NodeKind.PROMPT_FIELD
+        ]
+
+
+class TestPromptFieldPayload:
+    def node(self):
+        payload = prompt_field()
+        return Node(
+            node_id=node_id_for(NodeKind.PROMPT_FIELD, "PARAM1"),
+            kind=NodeKind.PROMPT_FIELD,
+            source_wid="PARAM1",
+            reference_id="DateOE Open Date",
+            name="OE Open Date",
+            payload=payload,
+        )
+
+    def test_create_omits_the_reference(self):
+        built = build_prompt_field_payload(self.node(), {}, action=Action.CREATE)
+        assert "Prompt_Field_Reference" not in built
+        assert built["Prompt_Field_Data"]["Name"] == "OE Open Date"
+
+    def test_update_without_a_destination_wid_is_refused(self):
+        with pytest.raises(WriteError):
+            build_prompt_field_payload(self.node(), {}, action=Action.UPDATE)
+
+    def test_the_put_operation_is_put_prompt_field(self):
+        assert operation_for(self.node()) == "Put_Prompt_Field"

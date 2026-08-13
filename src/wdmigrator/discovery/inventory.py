@@ -167,6 +167,15 @@ class CalculatedMeasureSummary:
 
 
 @dataclass(frozen=True)
+class PromptFieldSummary:
+    """A tenanted external parameter — what a prompt set's members point at."""
+
+    wid: str
+    reference_id: str | None
+    name: str | None
+
+
+@dataclass(frozen=True)
 class PromptSetSummary:
     wid: str
     reference_id: str | None
@@ -599,6 +608,62 @@ def lookup_dashboard(
     )
 
 
+def lookup_prompt_field(
+    connection: Connection,
+    *,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one prompt field by ``TenantedExternalParameter`` or WID.
+
+    Both work as cross-tenant identities here, unusually. A prompt field shared
+    by two tenants keeps the *same WID* in both — all 13 of dpt5's appear in
+    dpt1 under identical WIDs (confirmed live 2026-08-12) — so there is none of
+    the shape-matching the calculated-field and measure probes need.
+
+    Requires an implementer account.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    ref = (
+        _reference("TenantedExternalParameter", reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        response = connection.service.Get_Prompt_Fields(
+            Request_References={"Prompt_Field_Reference": [ref]},
+            Response_Group={"Include_Reference": True},
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get("Prompt_Field") or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get("Prompt_Field_Reference"))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get("TenantedExternalParameter") or reference_id,
+    )
+
+
 def lookup_prompt_set(
     connection: Connection,
     *,
@@ -951,6 +1016,21 @@ def _calculated_measure_summary(item: dict) -> CalculatedMeasureSummary | None:
     )
 
 
+def _prompt_field_summary(item: dict) -> PromptFieldSummary | None:
+    ids = ids_of(item.get("Prompt_Field_Reference"))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = item.get("Prompt_Field_Data") or {}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return PromptFieldSummary(
+        wid=wid,
+        reference_id=ids.get("TenantedExternalParameter"),
+        name=(data or {}).get("Name"),
+    )
+
+
 def _prompt_set_summary(item: dict) -> PromptSetSummary | None:
     ids = ids_of(item.get("Prompt_Set_Reference"))
     wid = ids.get("WID")
@@ -1061,6 +1141,35 @@ def iter_calculated_measure_index(
     )
 
 
+def iter_prompt_field_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every prompt field (tenanted external parameter). One page.
+
+    A prompt set's members point at these through
+    ``Abstract_External_Parameter_Reference``, and a prompt set cannot be
+    written until they exist — confirmed live 2026-08-12, ``Put_Prompt_Set``
+    fails with ``Invalid ID value ... for type = 'WID'`` naming one.
+
+    **Unlike calculated fields and measures, these do not need cross-tenant
+    shape matching.** A prompt field shared by two tenants has the *same WID* in
+    both: all 13 of dpt5's appear in dpt1 under identical WIDs. So the ordinary
+    delivered-vs-custom split applies — a WID that resolves in the destination
+    passes through, one that does not has to be created.
+
+    Requires an implementer account, like the dashboard operations.
+    """
+    return _iter_index(
+        connection,
+        kind="prompt_field",
+        operation_name="Get_Prompt_Fields",
+        response_group={"Include_Reference": True},
+        collection_key="Prompt_Field",
+        summarise=_prompt_field_summary,
+        page_size=page_size,
+    )
+
+
 def iter_prompt_set_index(
     connection: Connection, *, page_size: int = PAGE_SIZE
 ) -> Iterator[IndexProgress]:
@@ -1139,6 +1248,7 @@ def save_index(index: Index, path: Path) -> Path:
 _SUMMARY_TYPES = {
     "calculated_field": CalculatedFieldSummary,
     "calculated_measure": CalculatedMeasureSummary,
+    "prompt_field": PromptFieldSummary,
     "report": ReportSummary,
     "dashboard": DashboardSummary,
     "prompt_set": PromptSetSummary,

@@ -40,6 +40,7 @@ from wdmigrator.discovery.inventory import (
     lookup_calculated_field,
     lookup_calculated_measure,
     lookup_dashboard,
+    lookup_prompt_field,
     lookup_prompt_set,
     lookup_report_by_name,
 )
@@ -162,6 +163,7 @@ class MigrationPlan:
     unresolved_measure_ids: frozenset[str] = frozenset()
     unresolved_report_ids: frozenset[str] = frozenset()
     unresolved_prompt_set_ids: frozenset[str] = frozenset()
+    unresolved_prompt_field_ids: frozenset[str] = frozenset()
     unresolved_dashboard_ids: frozenset[str] = frozenset()
     #: source WID -> what to do with a reference the destination cannot resolve.
     #: Survives a retry, so the same question is never asked twice, and is
@@ -261,6 +263,17 @@ def probe_node(
             tabbed=DASHBOARD_TABBED_BY_KIND[node.kind],
             reference_id=node.reference_id,
         )
+    elif node.kind is NodeKind.PROMPT_FIELD:
+        if not node.reference_id:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Prompt field has no TenantedExternalParameter ID, so it "
+                    "cannot be matched against the destination."
+                ),
+            )
+        result = lookup_prompt_field(connection, reference_id=node.reference_id)
     elif node.kind is NodeKind.PROMPT_SET:
         if not node.reference_id:
             return Existence(
@@ -568,6 +581,7 @@ def build_plan(
         unresolved_measure_ids=frozenset(closure.unresolved_measure_ids),
         unresolved_report_ids=frozenset(closure.unresolved_report_ids),
         unresolved_prompt_set_ids=frozenset(closure.unresolved_prompt_set_ids),
+        unresolved_prompt_field_ids=frozenset(closure.unresolved_prompt_field_ids),
         unresolved_dashboard_ids=frozenset(closure.unresolved_dashboard_ids),
         reference_decisions=dict(reference_decisions or {}),
     )
@@ -631,6 +645,12 @@ def validate_plan(plan: MigrationPlan) -> list[Blocker]:
             sorted(plan.unresolved_prompt_set_ids),
             "prompt set",
             "Rebuild the prompt set index. Reading prompt sets requires an "
+            "implementer account, so check the source connection is one.",
+        ),
+        (
+            sorted(plan.unresolved_prompt_field_ids),
+            "prompt field",
+            "Rebuild the prompt field index. Reading them requires an "
             "implementer account, so check the source connection is one.",
         ),
         (
