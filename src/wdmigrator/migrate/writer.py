@@ -45,7 +45,7 @@ from zeep.helpers import serialize_object
 
 from wdmigrator.auth.client import Connection, Role
 from wdmigrator.discovery.inventory import DASHBOARD_FLAVOURS, ids_of
-from wdmigrator.migrate.ordering import substitute_wids
+from wdmigrator.migrate.ordering import substitute_reference_ids, substitute_wids
 from wdmigrator.migrate.planner import (
     Action,
     MigrationPlan,
@@ -1687,6 +1687,15 @@ def write_node(
         record.status = WriteStatus.FAILED
         record.fault = str(exc)
         return record
+
+    # Nested calculated-field references name their target by BUSINESS id, and
+    # a field the destination already had answers to the destination's id, not
+    # the source's. Applied here rather than in each builder because it is the
+    # same rewrite for every object kind. Confirmed live 2026-08-13: without
+    # it, `Skills Gaps (as of Today)` was refused over a reused `Learning
+    # Points` that dpt5 calls `Worker - Learning Points`.
+    if plan.reference_id_map:
+        payload = substitute_reference_ids(payload, plan.reference_id_map)
 
     # Indicators that resolution proved are readable on neither tenant. The
     # reference is optional and already dangling on the source, so it goes

@@ -120,6 +120,70 @@ def substitute_wids(obj: Any, wid_map: Mapping[str, str]) -> Any:
     return _substitute(copy.deepcopy(obj), wid_map)
 
 
+def substitute_reference_ids(obj: Any, reference_id_map: Mapping[str, str]) -> Any:
+    """Deep-copy ``obj``, rewriting nested ``Calculated_Field_Reference_ID``s.
+
+    The twin of :func:`substitute_wids`, and it exists because the assumption
+    documented on :func:`extract_reference_id_refs` — that a business id is
+    stable across tenants and needs no remapping — is **false whenever the two
+    tenants name the same field differently**. That is the common case between
+    independently-built tenants: `commitconsulting_dpt1` calls a field
+    ``CRTMNU01_Commit - HR Dashboard_03_Learning Points`` where `_dpt5` calls it
+    ``Worker - Learning Points``.
+
+    It only matters for fields the destination *already had* and which were
+    therefore reused rather than created. A field this tool creates carries the
+    source's own id into the destination, so references to it resolve untouched;
+    a field matched cross-tenant keeps the destination's id, and every nested
+    reference naming the source's id then dangles.
+
+    Confirmed live 2026-08-13: `Skills Gaps (as of Today)` was refused with
+    ``You can't migrate the report ... because it uses deprecated fields:
+    Learning Points`` — which is Workday's wording for an unresolvable field
+    reference, not a statement about deprecation.
+
+    Ids absent from the map are left alone, exactly as unmapped WIDs are.
+
+    Unlike :func:`extract_reference_id_refs` this does **not** exclude the
+    object's own top-level id, and does not need to. The map only ever contains
+    ids of fields the destination already has, and such a field is SKIPped
+    rather than written — so an object being written is never its own key, and
+    the own id is untouched in practice. A created field must keep the source's
+    id, which is exactly what happens.
+    """
+    if not reference_id_map:
+        return copy.deepcopy(obj)
+    return _substitute_reference_ids(copy.deepcopy(obj), reference_id_map)
+
+
+def _substitute_reference_ids(obj: Any, reference_id_map: Mapping[str, str]) -> Any:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            # Form 1: the bare scalar, how one calculated field names another.
+            if key == "Calculated_Field_Reference_ID":
+                if isinstance(value, str) and value in reference_id_map:
+                    obj[key] = reference_id_map[value]
+            # Form 2: an ID-list entry typed Calculated_Field_ID, how a REPORT
+            # column names a calculated field through External_Field_Reference.
+            # Both forms carry the same identifier and both have to be rewritten
+            # — handling only the first left reports failing while calculated
+            # fields succeeded.
+            elif key == "ID" and isinstance(value, list):
+                for entry in value:
+                    if (
+                        isinstance(entry, dict)
+                        and entry.get("type") == "Calculated_Field_ID"
+                        and entry.get("_value_1") in reference_id_map
+                    ):
+                        entry["_value_1"] = reference_id_map[entry["_value_1"]]
+            else:
+                obj[key] = _substitute_reference_ids(value, reference_id_map)
+    elif isinstance(obj, list):
+        for index, item in enumerate(obj):
+            obj[index] = _substitute_reference_ids(item, reference_id_map)
+    return obj
+
+
 def _substitute(obj: Any, wid_map: Mapping[str, str]) -> Any:
     if isinstance(obj, dict):
         for key, value in obj.items():
