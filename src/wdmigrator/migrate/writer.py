@@ -362,6 +362,7 @@ _INLINE_CHILD_REFERENCES = {
 #: dropped and the WID left to resolve on its own.
 _TENANT_SCOPED_BUSINESS_IDS = {
     "Matrix_Display_Option_Reference": "Analytic_Indicator_ID",
+    "Analytic_Indicator_Reference": "Analytic_Indicator_ID",
 }
 
 
@@ -952,9 +953,19 @@ def build_dashboard_payload(
     return payload
 
 
-#: The element a matrix measure uses to name its indicator. Optional in the
-#: schema, which is what makes dropping it a legitimate fallback.
-_DISPLAY_OPTION_ELEMENT = "Matrix_Display_Option_Reference"
+#: Every element that names an analytic indicator, and can therefore be dropped
+#: when that indicator exists on neither tenant. Both are ``minOccurs="0"``,
+#: which is what makes dropping them legitimate rather than a corruption.
+#:
+#: Two of them because the same object is reached from two places: a matrix
+#: measure names one as its display option, and a report *column* names one
+#: directly. Found separately and the hard way — fixing only the matrix case
+#: left `Skills Gaps (as of Today)` failing on the column case one object from
+#: the end of the run.
+_INDICATOR_ELEMENTS = (
+    "Matrix_Display_Option_Reference",
+    "Analytic_Indicator_Reference",
+)
 
 
 def _strip_display_options(obj: object, wids: "set[str] | None" = None) -> int:
@@ -969,7 +980,7 @@ def _strip_display_options(obj: object, wids: "set[str] | None" = None) -> int:
     if isinstance(obj, dict):
         for key in list(obj):
             value = obj[key]
-            if key == _DISPLAY_OPTION_ELEMENT and isinstance(value, dict):
+            if key in _INDICATOR_ELEMENTS and isinstance(value, dict):
                 if wids is None or any(
                     entry.get("_value_1") in wids
                     for entry in value.get("ID") or []
