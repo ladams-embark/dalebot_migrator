@@ -40,6 +40,7 @@ from wdmigrator.discovery.inventory import (
     lookup_calculated_field,
     lookup_calculated_measure,
     lookup_dashboard,
+    lookup_gauge_range,
     lookup_prompt_field,
     lookup_prompt_set,
     lookup_report_by_name,
@@ -164,6 +165,7 @@ class MigrationPlan:
     unresolved_report_ids: frozenset[str] = frozenset()
     unresolved_prompt_set_ids: frozenset[str] = frozenset()
     unresolved_prompt_field_ids: frozenset[str] = frozenset()
+    unresolved_gauge_range_ids: frozenset[str] = frozenset()
     unresolved_dashboard_ids: frozenset[str] = frozenset()
     #: source WID -> what to do with a reference the destination cannot resolve.
     #: Survives a retry, so the same question is never asked twice, and is
@@ -263,6 +265,17 @@ def probe_node(
             tabbed=DASHBOARD_TABBED_BY_KIND[node.kind],
             reference_id=node.reference_id,
         )
+    elif node.kind is NodeKind.GAUGE_RANGE:
+        if not node.reference_id:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Gauge range has no Custom_Analytic_Range_ID, so it cannot "
+                    "be matched against the destination."
+                ),
+            )
+        result = lookup_gauge_range(connection, reference_id=node.reference_id)
     elif node.kind is NodeKind.PROMPT_FIELD:
         if not node.reference_id:
             return Existence(
@@ -582,6 +595,7 @@ def build_plan(
         unresolved_report_ids=frozenset(closure.unresolved_report_ids),
         unresolved_prompt_set_ids=frozenset(closure.unresolved_prompt_set_ids),
         unresolved_prompt_field_ids=frozenset(closure.unresolved_prompt_field_ids),
+        unresolved_gauge_range_ids=frozenset(closure.unresolved_gauge_range_ids),
         unresolved_dashboard_ids=frozenset(closure.unresolved_dashboard_ids),
         reference_decisions=dict(reference_decisions or {}),
     )
@@ -646,6 +660,11 @@ def validate_plan(plan: MigrationPlan) -> list[Blocker]:
             "prompt set",
             "Rebuild the prompt set index. Reading prompt sets requires an "
             "implementer account, so check the source connection is one.",
+        ),
+        (
+            sorted(plan.unresolved_gauge_range_ids),
+            "gauge range",
+            "Rebuild the gauge range index (Get_Gauge_Ranges, one page).",
         ),
         (
             sorted(plan.unresolved_prompt_field_ids),

@@ -882,6 +882,43 @@ def build_dashboard_payload(
     return payload
 
 
+def build_gauge_range_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+) -> dict:
+    """Arguments for ``Put_Gauge_Range``.
+
+    ``Gauge_Range_DataType`` carries its own business id in an ``ID`` string, so
+    a created range keeps the source ``Custom_Analytic_Range_ID`` and stays
+    findable by it afterwards. Its other references — decimal places, rounding
+    option, and each zone meaning — are delivered objects with stable WIDs.
+    """
+    data = node.payload.get("Gauge_Range_Data")
+    if not data:
+        raise WriteError(f"{node.name!r} has no Gauge_Range_Data to write.")
+
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+
+    payload: dict = {"Gauge_Range_Data": remapped}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE {node.name!r} without the destination WID."
+            )
+        payload["Gauge_Range_Reference"] = {
+            "ID": [{"type": "WID", "_value_1": dest_wid}]
+        }
+
+    return payload
+
+
 def build_prompt_field_payload(
     node: Node,
     wid_map: Mapping[str, str],
@@ -973,6 +1010,7 @@ _OPERATIONS = {
     NodeKind.CALCULATED_MEASURE: "Put_Global_Calculated_Measure",
     NodeKind.PROMPT_SET: "Put_Prompt_Set",
     NodeKind.PROMPT_FIELD: "Put_Prompt_Field",
+    NodeKind.GAUGE_RANGE: "Put_Gauge_Range",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["put"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["put"],
 }
@@ -1088,6 +1126,7 @@ _RESPONSE_REFERENCE_KEY = {
     NodeKind.CALCULATED_MEASURE: "Calculated_Measure_Reference",
     NodeKind.PROMPT_SET: "Prompt_Set_Reference",
     NodeKind.PROMPT_FIELD: "Prompt_Field_Reference",
+    NodeKind.GAUGE_RANGE: "Gauge_Range_Reference",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["reference"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["reference"],
 }
@@ -1438,6 +1477,11 @@ def write_node(
     try:
         if node.kind in DASHBOARD_TABBED_BY_KIND:
             payload = build_dashboard_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
+            )
+        elif node.kind is NodeKind.GAUGE_RANGE:
+            payload = build_gauge_range_payload(
                 node, plan.wid_map, action=action, dest_wid=dest_wid,
                 reference_decisions=plan.reference_decisions,
             )

@@ -145,6 +145,11 @@ def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
     prompt_field_index = sweep(
         source_conn, "prompt_field", api.iter_prompt_field_index, "prompt fields"
     )
+    # A report gauge layout points at one of these; the report cannot be
+    # written before it exists. One page.
+    gauge_range_index = sweep(
+        source_conn, "gauge_range", api.iter_gauge_range_index, "gauge ranges"
+    )
     cf_index = api.load_index(
         api.cache_path(source_conn, "calculated_field"),
         tenant=source_conn.target.tenant,
@@ -200,6 +205,7 @@ def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
         report_loader=api.report_loader_for(source_conn),
         prompt_set_index=prompt_set_index,
         prompt_field_index=prompt_field_index,
+        gauge_range_index=gauge_range_index,
         dashboard_index=dashboard_index,
     )
     print(f"Closure: {closure.counts_by_kind()} (total {len(closure)})")

@@ -353,7 +353,28 @@ def _collect_by_id_type(obj: Any, id_types: Iterable[str], found: dict) -> None:
 _PROMPT_SET_ID_TYPE = "Prompt_Set_ID"
 
 
-#: A prompt set member's parameter. Only the *custom* ones carry this business
+#: A report gauge colour banding. Carries a business id when custom; a
+#: Workday-delivered range would carry none and pass through.
+_GAUGE_RANGE_ID_TYPE = "Custom_Analytic_Range_ID"
+
+
+def extract_gauge_range_refs(obj: Any) -> dict[str, str]:
+    """Custom gauge-range references inside ``obj``, as ``{wid: id}``.
+
+    A report gauge layout points at one through ``Analytic_Range_Reference``,
+    and the report cannot be written before it exists — confirmed live
+    2026-08-12, ``Put_Tenanted_Report_Definition`` failed for
+    `Benefits - OE Submission %` on a WID that resolves as no migratable kind.
+
+    Same delivered-vs-custom split as prompt fields: only references carrying
+    ``Custom_Analytic_Range_ID`` become dependencies.
+    """
+    collected: dict[str, tuple[str, str]] = {}
+    _collect_by_id_type(obj, (_GAUGE_RANGE_ID_TYPE,), collected)
+    return {wid: business for wid, (_, business) in collected.items()}
+
+
+#: A prompt set member parameter. Only the *custom* ones carry this business
 #: id — Workday-delivered prompt parameters (Effective Date, Supervisory
 #: Organization) come back as a bare WID with no id at all, and pass through
 #: unchanged because their WID is the same in every tenant.

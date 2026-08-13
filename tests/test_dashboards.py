@@ -16,6 +16,7 @@ import pytest
 from wdmigrator.discovery.inventory import (
     DASHBOARD_FLAVOURS,
     DashboardSummary,
+    GaugeRangeSummary,
     Index,
     PromptFieldSummary,
     PromptSetSummary,
@@ -23,6 +24,7 @@ from wdmigrator.discovery.inventory import (
 )
 from wdmigrator.migrate.ordering import (
     extract_dashboard_refs,
+    extract_gauge_range_refs,
     extract_prompt_field_refs,
     extract_prompt_set_refs,
     extract_report_refs,
@@ -38,6 +40,7 @@ from wdmigrator.migrate.resolver import (
 from wdmigrator.migrate.writer import (
     WriteError,
     build_dashboard_payload,
+    build_gauge_range_payload,
     build_prompt_field_payload,
     build_prompt_set_payload,
     build_report_payload,
@@ -941,3 +944,134 @@ class TestPromptFieldPayload:
 
     def test_the_put_operation_is_put_prompt_field(self):
         assert operation_for(self.node()) == "Put_Prompt_Field"
+
+
+# ── Gauge ranges (custom analytic ranges) ────────────────────────────────────
+
+
+def gauge_range(wid="GR1", reference_id="Open Enrollment Submission Status"):
+    return {
+        "Gauge_Range_Reference": ref(WID=wid, Custom_Analytic_Range_ID=reference_id),
+        "Gauge_Range_Data": {
+            "Name": "CRTMNU02_Commit - Open Enrollment_14_" + reference_id,
+            "ID": reference_id,
+            "Decimal_Places_Reference": ref(WID="DP1"),
+            "Rounding_Reference": ref(WID="RND1", Rounding_Option_ID="ROUND"),
+            "Zone_Data": [
+                {"From_Value": "0", "To_Value": "0.5", "Meaning_Reference": ref(WID="M1")}
+            ],
+        },
+    }
+
+
+def gauge_range_index(*payloads):
+    index = Index(kind="gauge_range", tenant="t", fetched_at=time.time())
+    for p in payloads:
+        wid = p["Gauge_Range_Reference"]["ID"][0]["_value_1"]
+        index.summaries[wid] = GaugeRangeSummary(
+            wid=wid,
+            reference_id=p["Gauge_Range_Reference"]["ID"][1]["_value_1"],
+            name=p["Gauge_Range_Data"]["Name"],
+        )
+        index.payloads[wid] = p
+    return index
+
+
+def report_with_gauge(wid="RPT1", name="Benefits - OE Submission %"):
+    payload = report(wid=wid, name=name)
+    payload["Tenanted_Report_Definition_Data"]["Tenanted_Report_Gauge_Layout_Data"] = [
+        {
+            "Analytic_Range_Reference": ref(
+                WID="GR1", Custom_Analytic_Range_ID="Open Enrollment Submission Status"
+            )
+        }
+    ]
+    return payload
+
+
+class TestGaugeRangeReferences:
+    """A report gauge points at a custom analytic range, which has to exist first.
+
+    Confirmed live 2026-08-12: `Benefits - OE Submission %` failed with
+    ``'80605873bea110011df7b34ea3060000' is not a valid ID value for type =
+    'WID'``, 129 objects into a migration. That WID resolved as no migratable
+    kind on either tenant — it is a Gauge_Range, reachable only through
+    Get_Gauge_Ranges.
+    """
+
+    def test_a_custom_range_is_extracted(self):
+        data = {
+            "Analytic_Range_Reference": ref(
+                WID="GR1", Custom_Analytic_Range_ID="Open Enrollment Submission Status"
+            )
+        }
+        assert extract_gauge_range_refs(data) == {
+            "GR1": "Open Enrollment Submission Status"
+        }
+
+    def test_a_reference_without_a_business_id_is_ignored(self):
+        """Same delivered-vs-custom split as prompt fields."""
+        assert extract_gauge_range_refs(
+            {"Analytic_Range_Reference": ref(WID="DELIVERED1")}
+        ) == {}
+
+
+class TestGaugeRangeClosure:
+    def test_a_report_pulls_in_its_gauge_range(self):
+        closure = resolve_closure(
+            cf_index=empty_cf_index(),
+            allow_partial_index=True,
+            selected_dashboards={"DB1": tabbed_dashboard()},
+            report_loader=lambda wid: report_with_gauge(wid),
+            gauge_range_index=gauge_range_index(gauge_range()),
+        )
+        assert node_id_for(NodeKind.GAUGE_RANGE, "GR1") in closure.nodes
+
+    def test_the_report_depends_on_the_range(self):
+        closure = resolve_closure(
+            cf_index=empty_cf_index(),
+            allow_partial_index=True,
+            selected_dashboards={"DB1": tabbed_dashboard()},
+            report_loader=lambda wid: report_with_gauge(wid),
+            gauge_range_index=gauge_range_index(gauge_range()),
+        )
+        report_node = closure.nodes[node_id_for(NodeKind.REPORT, "RPT1")]
+        assert node_id_for(NodeKind.GAUGE_RANGE, "GR1") in report_node.depends_on
+
+    def test_a_missing_range_is_recorded_not_silently_dropped(self):
+        closure = resolve_closure(
+            cf_index=empty_cf_index(),
+            allow_partial_index=True,
+            selected_dashboards={"DB1": tabbed_dashboard()},
+            report_loader=lambda wid: report_with_gauge(wid),
+            gauge_range_index=gauge_range_index(),
+        )
+        assert closure.unresolved_gauge_range_ids == {
+            "Open Enrollment Submission Status"
+        }
+
+
+class TestGaugeRangePayload:
+    def node(self):
+        return Node(
+            node_id=node_id_for(NodeKind.GAUGE_RANGE, "GR1"),
+            kind=NodeKind.GAUGE_RANGE,
+            source_wid="GR1",
+            reference_id="Open Enrollment Submission Status",
+            name="Open Enrollment Submission Status",
+            payload=gauge_range(),
+        )
+
+    def test_create_omits_the_reference_but_keeps_the_business_id(self):
+        """Gauge_Range_Data.ID carries the Custom_Analytic_Range_ID, so the
+        created range stays findable by it in the destination."""
+        built = build_gauge_range_payload(self.node(), {}, action=Action.CREATE)
+        assert "Gauge_Range_Reference" not in built
+        assert built["Gauge_Range_Data"]["ID"] == "Open Enrollment Submission Status"
+
+    def test_update_without_a_destination_wid_is_refused(self):
+        with pytest.raises(WriteError):
+            build_gauge_range_payload(self.node(), {}, action=Action.UPDATE)
+
+    def test_the_put_operation_is_put_gauge_range(self):
+        assert operation_for(self.node()) == "Put_Gauge_Range"

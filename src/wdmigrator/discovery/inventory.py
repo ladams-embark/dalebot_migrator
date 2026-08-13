@@ -167,6 +167,15 @@ class CalculatedMeasureSummary:
 
 
 @dataclass(frozen=True)
+class GaugeRangeSummary:
+    """A custom analytic range — the colour banding on a report's gauge."""
+
+    wid: str
+    reference_id: str | None
+    name: str | None
+
+
+@dataclass(frozen=True)
 class PromptFieldSummary:
     """A tenanted external parameter — what a prompt set's members point at."""
 
@@ -608,6 +617,58 @@ def lookup_dashboard(
     )
 
 
+def lookup_gauge_range(
+    connection: Connection,
+    *,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one gauge range by ``Custom_Analytic_Range_ID`` or WID.
+
+    The business ID lives inside ``Gauge_Range_Data.ID`` as well as on the
+    reference, so a created range carries the same ID into the destination and
+    stays findable by it afterwards.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    ref = (
+        _reference("Custom_Analytic_Range_ID", reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        response = connection.service.Get_Gauge_Ranges(
+            Request_References={"Gauge_Range_Reference": [ref]},
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get("Gauge_Range") or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get("Gauge_Range_Reference"))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get("Custom_Analytic_Range_ID") or reference_id,
+    )
+
+
 def lookup_prompt_field(
     connection: Connection,
     *,
@@ -893,10 +954,10 @@ def _iter_index(
     *,
     kind: str,
     operation_name: str,
-    response_group: dict,
     collection_key: str,
     summarise: Callable[[dict], Any],
     page_size: int,
+    response_group: dict | None = None,
 ) -> Iterator[IndexProgress]:
     """Shared pagination driver for both object kinds."""
     started = time.monotonic()
@@ -909,10 +970,12 @@ def _iter_index(
 
     while True:
         connection.limiter.wait()
-        response = operation(
-            Response_Filter={"Page": page, "Count": page_size},
-            Response_Group=response_group,
-        )
+        # Get_Gauge_Ranges has no Response_Group at all in the WSDL, and zeep
+        # rejects the keyword outright rather than ignoring it.
+        kwargs = {"Response_Filter": {"Page": page, "Count": page_size}}
+        if response_group is not None:
+            kwargs["Response_Group"] = response_group
+        response = operation(**kwargs)
         data = serialize_object(response)
 
         results = data.get("Response_Results") or {}
@@ -1013,6 +1076,21 @@ def _calculated_measure_summary(item: dict) -> CalculatedMeasureSummary | None:
         reference_id=ids.get("BI_Calculated_Measure_ID"),
         name=data.get("Name"),
         business_object_wid=ids_of(data.get("Business_Object_Reference")).get("WID"),
+    )
+
+
+def _gauge_range_summary(item: dict) -> GaugeRangeSummary | None:
+    ids = ids_of(item.get("Gauge_Range_Reference"))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = item.get("Gauge_Range_Data") or {}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return GaugeRangeSummary(
+        wid=wid,
+        reference_id=ids.get("Custom_Analytic_Range_ID"),
+        name=(data or {}).get("Name"),
     )
 
 
@@ -1141,6 +1219,31 @@ def iter_calculated_measure_index(
     )
 
 
+def iter_gauge_range_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every gauge range (custom analytic range). One page: 14 on dpt1,
+    10 on dpt5.
+
+    A report's gauge layout points at one through ``Analytic_Range_Reference``,
+    and the report cannot be written until it exists — confirmed live
+    2026-08-12, ``Put_Tenanted_Report_Definition`` failed on
+    ``'80605873bea110011df7b34ea3060000' is not a valid ID value for type =
+    'WID'`` for `Benefits - OE Submission %`.
+
+    ``Get_Gauge_Ranges`` has **no Response_Group** in the WSDL — unusually — and
+    returns ``Gauge_Range_Data`` regardless.
+    """
+    return _iter_index(
+        connection,
+        kind="gauge_range",
+        operation_name="Get_Gauge_Ranges",
+        collection_key="Gauge_Range",
+        summarise=_gauge_range_summary,
+        page_size=page_size,
+    )
+
+
 def iter_prompt_field_index(
     connection: Connection, *, page_size: int = PAGE_SIZE
 ) -> Iterator[IndexProgress]:
@@ -1249,6 +1352,7 @@ _SUMMARY_TYPES = {
     "calculated_field": CalculatedFieldSummary,
     "calculated_measure": CalculatedMeasureSummary,
     "prompt_field": PromptFieldSummary,
+    "gauge_range": GaugeRangeSummary,
     "report": ReportSummary,
     "dashboard": DashboardSummary,
     "prompt_set": PromptSetSummary,
