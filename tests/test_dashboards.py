@@ -1202,6 +1202,22 @@ class TestDisplayOptionStripping:
         measures = data["Tenanted_Report_Definition_Data"]["Matrix_Measures_Data"]
         assert [m["ID"] for m in measures] == ["a", "b"]
 
+    def test_a_report_column_indicator_is_stripped_too(self):
+        """The same object is reached from two elements: a matrix measure names
+        it as a display option, a report column names it directly. Missing the
+        second left a run failing one object from the end."""
+        data = {
+            "Tenanted_Report_Definition_Data": {
+                "Tenanted_Report_Column_Data": [
+                    {"Analytic_Indicator_Reference": ref(
+                        WID="AI9", Analytic_Indicator_ID="DNUOLDVERSION")}
+                ]
+            }
+        }
+        assert _strip_display_options(data, {"AI9"}) == 1
+        column = data["Tenanted_Report_Definition_Data"]["Tenanted_Report_Column_Data"][0]
+        assert "Analytic_Indicator_Reference" not in column
+
     def test_a_fault_naming_an_indicator_is_recognised(self):
         assert _names_analytic_indicator(
             "Validation error occurred. Invalid ID value.  'X' is not a valid "
