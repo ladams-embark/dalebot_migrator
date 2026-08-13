@@ -353,6 +353,23 @@ def _collect_by_id_type(obj: Any, id_types: Iterable[str], found: dict) -> None:
 _PROMPT_SET_ID_TYPE = "Prompt_Set_ID"
 
 
+_ANALYTIC_INDICATOR_ID_TYPE = "Analytic_Indicator_ID"
+
+
+def extract_analytic_indicator_refs(obj: Any) -> dict[str, str]:
+    """Analytic-indicator references inside ``obj``, as ``{wid: id}``.
+
+    A matrix measure names one through ``Matrix_Display_Option_Reference``.
+    Unlike prompt fields and gauge ranges, most of these need no migration at
+    all — indicator WIDs are shared across tenants — but the ones the
+    destination lacks have to be created first, and the ones that exist nowhere
+    have to be dropped rather than block the run.
+    """
+    collected: dict[str, tuple[str, str]] = {}
+    _collect_by_id_type(obj, (_ANALYTIC_INDICATOR_ID_TYPE,), collected)
+    return {wid: business for wid, (_, business) in collected.items()}
+
+
 #: A report gauge colour banding. Carries a business id when custom; a
 #: Workday-delivered range would carry none and pass through.
 _GAUGE_RANGE_ID_TYPE = "Custom_Analytic_Range_ID"

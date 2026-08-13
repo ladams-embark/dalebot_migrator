@@ -15,6 +15,7 @@ import pytest
 
 from wdmigrator.discovery.inventory import (
     DASHBOARD_FLAVOURS,
+    AnalyticIndicatorSummary,
     DashboardSummary,
     GaugeRangeSummary,
     Index,
@@ -29,7 +30,7 @@ from wdmigrator.migrate.ordering import (
     extract_prompt_set_refs,
     extract_report_refs,
 )
-from wdmigrator.migrate.planner import Action, MigrationPlan
+from wdmigrator.migrate.planner import Action, MigrationPlan, build_plan, validate_plan
 from wdmigrator.migrate.resolver import (
     DASHBOARD_KINDS,
     Node,
@@ -39,6 +40,8 @@ from wdmigrator.migrate.resolver import (
 )
 from wdmigrator.migrate.writer import (
     WriteError,
+    _names_analytic_indicator,
+    _strip_display_options,
     build_dashboard_payload,
     build_gauge_range_payload,
     build_prompt_field_payload,
@@ -1075,3 +1078,139 @@ class TestGaugeRangePayload:
 
     def test_the_put_operation_is_put_gauge_range(self):
         assert operation_for(self.node()) == "Put_Gauge_Range"
+
+
+# ── Analytic indicators (matrix display options) ─────────────────────────────
+
+
+def analytic_indicator(wid="AI1", reference_id="Worker-Retention-Retention Risk Indicator"):
+    return {
+        "Analytic_Indicator_Reference": ref(WID=wid, Analytic_Indicator_ID=reference_id),
+        "Analytic_Indicator_Data": {
+            "Analytic_Indicator_Reference_ID": reference_id,
+            "Name": "Retention Risk Indicator",
+            "Business_Object_Reference": ref(WID="BO1"),
+        },
+    }
+
+
+def analytic_indicator_index(*payloads):
+    index = Index(kind="analytic_indicator", tenant="t", fetched_at=time.time())
+    for p in payloads:
+        wid = p["Analytic_Indicator_Reference"]["ID"][0]["_value_1"]
+        index.summaries[wid] = AnalyticIndicatorSummary(
+            wid=wid,
+            reference_id=p["Analytic_Indicator_Reference"]["ID"][1]["_value_1"],
+            name=p["Analytic_Indicator_Data"]["Name"],
+        )
+        index.payloads[wid] = p
+    return index
+
+
+def report_with_indicator(wid="RPT1", indicator_wid="AI1"):
+    payload = report(wid=wid, name="Top Performer Retention (as of Effective Date)")
+    payload["Tenanted_Report_Definition_Data"]["Matrix_Measures_Data"] = [
+        {
+            "ID": "Calculation-Retention Rate",
+            "Matrix_Display_Option_Reference": ref(
+                WID=indicator_wid,
+                Analytic_Indicator_ID="CRTMNU01_Commit - HR Dashboard_09_Retention Rate Indicator",
+            ),
+        }
+    ]
+    return payload
+
+
+class TestAnalyticIndicators:
+    """Migrate the indicator when it can be read; drop the marker when it cannot.
+
+    Indicator WIDs are stable across tenants — all 318 of dpt5 appear in dpt1
+    (confirmed live 2026-08-12) — so most resolve untouched. The failing case
+    was an indicator readable on *neither* tenant: a pointer dangling in the
+    source report itself.
+    """
+
+    def resolve(self, indicator_index):
+        return resolve_closure(
+            cf_index=empty_cf_index(),
+            allow_partial_index=True,
+            selected_dashboards={"DB1": tabbed_dashboard()},
+            report_loader=lambda wid: report_with_indicator(wid),
+            analytic_indicator_index=indicator_index,
+        )
+
+    def test_a_readable_indicator_becomes_a_dependency(self):
+        closure = self.resolve(analytic_indicator_index(analytic_indicator()))
+        assert node_id_for(NodeKind.ANALYTIC_INDICATOR, "AI1") in closure.nodes
+
+    def test_the_report_depends_on_it(self):
+        closure = self.resolve(analytic_indicator_index(analytic_indicator()))
+        report_node = closure.nodes[node_id_for(NodeKind.REPORT, "RPT1")]
+        assert node_id_for(NodeKind.ANALYTIC_INDICATOR, "AI1") in report_node.depends_on
+
+    def test_an_indicator_readable_nowhere_does_not_block(self):
+        """It goes to unmigratable_indicator_wids, NOT an unresolved_* set. A
+        missing calculated field must block; an optional marker that is already
+        broken on the source must not."""
+        closure = self.resolve(analytic_indicator_index())
+        assert closure.unmigratable_indicator_wids == {"AI1"}
+        blockers = validate_plan(build_plan(closure, {}))
+        assert not any("analytic indicator" in b.title.lower() for b in blockers)
+
+    def test_the_put_operation_is_put_analytic_indicator(self):
+        node = Node(
+            node_id=node_id_for(NodeKind.ANALYTIC_INDICATOR, "AI1"),
+            kind=NodeKind.ANALYTIC_INDICATOR,
+            source_wid="AI1",
+            reference_id="Worker-Retention-Retention Risk Indicator",
+            name="Retention Risk Indicator",
+            payload=analytic_indicator(),
+        )
+        assert operation_for(node) == "Put_Analytic_Indicator"
+
+
+class TestDisplayOptionStripping:
+    def payload(self):
+        return {
+            "Tenanted_Report_Definition_Data": {
+                "Matrix_Measures_Data": [
+                    {"ID": "a", "Matrix_Display_Option_Reference": ref(WID="AI1")},
+                    {"ID": "b", "Matrix_Display_Option_Reference": ref(WID="AI2")},
+                ]
+            }
+        }
+
+    def test_only_named_indicators_are_stripped(self):
+        """The pre-emptive case: resolution already proved AI1 is unreadable, so
+        only its marker goes. AI2 resolves and must survive."""
+        data = self.payload()
+        assert _strip_display_options(data, {"AI1"}) == 1
+        measures = data["Tenanted_Report_Definition_Data"]["Matrix_Measures_Data"]
+        assert "Matrix_Display_Option_Reference" not in measures[0]
+        assert "Matrix_Display_Option_Reference" in measures[1]
+
+    def test_passing_no_wids_strips_every_display_option(self):
+        """The retry case, after a write has already been rejected over one."""
+        data = self.payload()
+        assert _strip_display_options(data) == 2
+        for measure in data["Tenanted_Report_Definition_Data"]["Matrix_Measures_Data"]:
+            assert "Matrix_Display_Option_Reference" not in measure
+
+    def test_stripping_leaves_the_rest_of_the_measure_alone(self):
+        data = self.payload()
+        _strip_display_options(data)
+        measures = data["Tenanted_Report_Definition_Data"]["Matrix_Measures_Data"]
+        assert [m["ID"] for m in measures] == ["a", "b"]
+
+    def test_a_fault_naming_an_indicator_is_recognised(self):
+        assert _names_analytic_indicator(
+            "Validation error occurred. Invalid ID value.  'X' is not a valid "
+            "ID value for type = 'Analytic_Indicator_ID'"
+        )
+
+    def test_an_unrelated_fault_is_not(self):
+        """The retry must not fire on faults it cannot fix."""
+        assert not _names_analytic_indicator(
+            "Validation error occurred. Invalid ID value.  'X' is not a valid "
+            "ID value for type = 'Calculated_Field_ID'"
+        )
