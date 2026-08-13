@@ -337,9 +337,25 @@ _UNMIGRATABLE_REPORT_REFERENCES = ("Report_Tag_Reference",)
 #: icon, not an inline child — its WID is almost certainly global, it has never
 #: failed, and adding it would be acting on shape rather than evidence. Add
 #: entries here when a write actually fails on one, not before.
+#: **Matrix display options.** Third of the same kind, found live 2026-08-12 on
+#: `Top Performer Retention (as of Effective Date)`:
+#: ``'c2b400a86c1810015cbc47258bde0000' is not a valid ID value for type =
+#: 'WID'``, a ``Matrix_Display_Option_Reference`` naming
+#: ``CRTMNU01_Commit - HR Dashboard_09_Retention Rate Indicator`` inside
+#: ``Matrix_Measures_Data``.
+#:
+#: It looks like a candidate for its own object kind — ``Get_Analytic_Indicators``
+#: and ``Put_Analytic_Indicator`` both exist — and it is not. The indicator is
+#: **unreadable on the source**: absent from a full sweep (339 on dpt1) and
+#: returning zero matches on a targeted lookup by WID *and* by
+#: ``Analytic_Indicator_ID``. There is nothing to read and so nothing to write.
+#: Like the matrix measures and dimensions above it, it exists only inline on
+#: the sub-report, which is why it sits in the same ``Matrix_Measures_Data``
+#: block as they do.
 _INLINE_CHILD_REFERENCES = {
     "Matrix_Measure__All__Reference": "Matrix_Measure_Reference_ID",
     "Matrix_Dimension_Reference": "Matrix_Dimension_Reference_ID",
+    "Matrix_Display_Option_Reference": "Analytic_Indicator_ID",
 }
 
 
