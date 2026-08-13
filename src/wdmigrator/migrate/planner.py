@@ -73,6 +73,11 @@ class Existence:
     #: Recorded so the review step can show that a field was matched on shape
     #: rather than identity — a weaker claim the user should be able to see.
     matched_by: str | None = None
+    #: The destination's OWN business id, when it differs from the source's.
+    #: Nested calculated-field references are by business id, so a reused field
+    #: needs them rewritten or they dangle. Only set on a cross-tenant match —
+    #: an id match means the two agree already.
+    dest_reference_id: str | None = None
 
     @property
     def exists(self) -> bool:
@@ -172,6 +177,10 @@ class MigrationPlan:
     #: than failing the write. Deliberately NOT a blocker.
     unmigratable_indicator_wids: frozenset[str] = frozenset()
     unresolved_dashboard_ids: frozenset[str] = frozenset()
+    #: source Calculated_Field_ID -> destination Calculated_Field_ID, for
+    #: fields the destination already had under a different name. Seeded from
+    #: the probe exactly as ``wid_map`` is, and applied to nested references.
+    reference_id_map: dict[str, str] = field(default_factory=dict)
     #: source WID -> what to do with a reference the destination cannot resolve.
     #: Survives a retry, so the same question is never asked twice, and is
     #: included in the plan hash so a decision invalidates a prior dry run.
@@ -395,6 +404,7 @@ def _match_calculated_field_across_tenants(
             node_id=node.node_id,
             state=LookupOutcome.FOUND,
             dest_wid=candidates[0],
+            dest_reference_id=match_index.reference_id_of.get(candidates[0]),
             matched_by=(
                 f"name + class + business object ({name!r}, {class_name}, "
                 f"{business_object}) — its Calculated_Field_ID differs between "
@@ -413,6 +423,7 @@ def _match_calculated_field_across_tenants(
                     node_id=node.node_id,
                     state=LookupOutcome.FOUND,
                     dest_wid=by_alias[0],
+                    dest_reference_id=match_index.reference_id_of.get(by_alias[0]),
                     matched_by=(
                         f"name + class + business object, tie-broken by WQL "
                         f"alias {source_alias!r} against {len(candidates)} "
@@ -444,6 +455,7 @@ def _match_calculated_field_across_tenants(
                 node_id=node.node_id,
                 state=LookupOutcome.FOUND,
                 dest_wid=alias_candidates[0],
+                dest_reference_id=match_index.reference_id_of.get(alias_candidates[0]),
                 matched_by=(
                     f"WQL alias {source_alias!r} only — the destination's field "
                     "has a different name, so nothing stronger matched"
@@ -466,6 +478,7 @@ def _match_calculated_field_across_tenants(
                         node_id=node.node_id,
                         state=LookupOutcome.FOUND,
                         dest_wid=same_object[0],
+                        dest_reference_id=match_index.reference_id_of.get(same_object[0]),
                         matched_by=(
                             f"WQL alias {source_alias!r} narrowed by business "
                             f"object {shape[2]} — {len(alias_candidates)} "
@@ -629,6 +642,12 @@ def build_plan(
         # dependents get rewritten to the destination's WID even when skipped.
         if found.exists and found.dest_wid:
             plan.wid_map[node.source_wid] = found.dest_wid
+        # And the business-id map, for the same reason one step over: nested
+        # calculated-field references name the field by business id, and a
+        # reused field answers to the destination's id, not the source's.
+        if found.exists and found.dest_reference_id and node.reference_id:
+            if found.dest_reference_id != node.reference_id:
+                plan.reference_id_map[node.reference_id] = found.dest_reference_id
 
     return plan
 

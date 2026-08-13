@@ -30,6 +30,7 @@ from wdmigrator.migrate.planner import (
     probe_node,
     validate_plan,
 )
+from wdmigrator.migrate.ordering import substitute_reference_ids
 from wdmigrator.migrate.resolver import (
     Closure,
     Node,
@@ -964,3 +965,114 @@ class TestCalculatedMeasureMatching:
             measure_payload("DEST1", "y", name="Something Else", business_object="BO")
         )
         assert self._probe(payload, "SRC", index).state is LookupOutcome.NOT_FOUND
+
+
+# ── Nested business-id remapping ─────────────────────────────────────────────
+
+
+class TestSubstituteReferenceIds:
+    """A reused field answers to the DESTINATION's business id, not the source's.
+
+    ``extract_reference_id_refs`` documented the opposite — that a business id
+    is stable across tenants and needs no remapping — and that held only while
+    every field was created rather than matched. Confirmed live 2026-08-13:
+    `Skills Gaps (as of Today)` was refused because it named
+    ``CRTMNU01_Commit - HR Dashboard_03_Learning Points``, which dpt5 calls
+    ``Worker - Learning Points``.
+    """
+
+    def nested(self, value):
+        return {
+            "Calculated_Field_Data": {
+                "Calculated_Field_Reference_ID": "the objects own id",
+                "Business_Object_Field": [
+                    {
+                        "Class_Report_Field_Reference": None,
+                        "Calculated_Field_Reference_ID": value,
+                        "Calculated_Field_Name": "Learning Points",
+                    }
+                ],
+            }
+        }
+
+    def test_a_nested_id_is_rewritten_to_the_destination_id(self):
+        out = substitute_reference_ids(
+            self.nested("SRC_ID"), {"SRC_ID": "Worker - Learning Points"}
+        )
+        nested = out["Calculated_Field_Data"]["Business_Object_Field"][0]
+        assert nested["Calculated_Field_Reference_ID"] == "Worker - Learning Points"
+
+    def test_an_unmapped_id_is_left_alone(self):
+        """Most fields are created rather than matched, and carry the source id
+        into the destination — rewriting those would break them."""
+        out = substitute_reference_ids(self.nested("SRC_ID"), {"OTHER": "X"})
+        nested = out["Calculated_Field_Data"]["Business_Object_Field"][0]
+        assert nested["Calculated_Field_Reference_ID"] == "SRC_ID"
+
+    def test_the_input_is_not_mutated(self):
+        payload = self.nested("SRC_ID")
+        substitute_reference_ids(payload, {"SRC_ID": "DEST_ID"})
+        nested = payload["Calculated_Field_Data"]["Business_Object_Field"][0]
+        assert nested["Calculated_Field_Reference_ID"] == "SRC_ID"
+
+    def test_an_empty_map_is_a_plain_copy(self):
+        payload = self.nested("SRC_ID")
+        out = substitute_reference_ids(payload, {})
+        assert out == payload and out is not payload
+
+    def test_ids_nested_arbitrarily_deep_are_reached(self):
+        payload = {"a": [{"b": {"c": [{"Calculated_Field_Reference_ID": "SRC"}]}}]}
+        out = substitute_reference_ids(payload, {"SRC": "DEST"})
+        assert out["a"][0]["b"]["c"][0]["Calculated_Field_Reference_ID"] == "DEST"
+
+
+class TestReferenceIdMapSeeding:
+    def existence(self, **kwargs):
+        return Existence(node_id="n", state=LookupOutcome.FOUND, **kwargs)
+
+    def test_a_cross_tenant_match_seeds_the_map(self):
+        payload = cf_payload("W1", "SRC_ID")
+        closure = closure_of(payload)
+        node = only_node(closure)
+        plan = build_plan(
+            closure,
+            {
+                node.node_id: Existence(
+                    node_id=node.node_id,
+                    state=LookupOutcome.FOUND,
+                    dest_wid="DEST_WID",
+                    dest_reference_id="DEST_ID",
+                    matched_by="name + class + business object",
+                )
+            },
+        )
+        assert plan.reference_id_map == {"SRC_ID": "DEST_ID"}
+
+    def test_matching_ids_are_not_mapped(self):
+        """An id match means the tenants already agree — a no-op entry would
+        just be noise in the map."""
+        payload = cf_payload("W1", "SAME_ID")
+        closure = closure_of(payload)
+        node = only_node(closure)
+        plan = build_plan(
+            closure,
+            {
+                node.node_id: Existence(
+                    node_id=node.node_id,
+                    state=LookupOutcome.FOUND,
+                    dest_wid="DEST_WID",
+                    dest_reference_id="SAME_ID",
+                )
+            },
+        )
+        assert plan.reference_id_map == {}
+
+    def test_a_missing_object_seeds_nothing(self):
+        payload = cf_payload("W1", "SRC_ID")
+        closure = closure_of(payload)
+        node = only_node(closure)
+        plan = build_plan(
+            closure,
+            {node.node_id: Existence(node_id=node.node_id, state=LookupOutcome.NOT_FOUND)},
+        )
+        assert plan.reference_id_map == {}

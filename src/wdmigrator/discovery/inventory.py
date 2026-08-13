@@ -361,6 +361,11 @@ class CalculatedFieldMatchIndex:
     #: WID -> its own shape, for narrowing an ambiguous ``by_alias`` hit down to
     #: the candidate sharing the source's business object.
     shape_of: dict[str, tuple[str, str, str]] = field(default_factory=dict)
+    #: WID -> its own ``Calculated_Field_ID``. A cross-tenant match learns the
+    #: destination's WID *and* its business id, and nested references use the
+    #: business id — see
+    #: :func:`~wdmigrator.migrate.ordering.substitute_reference_ids`.
+    reference_id_of: dict[str, str] = field(default_factory=dict)
 
 
 def calculated_field_match_index(index: "Index") -> CalculatedFieldMatchIndex:
@@ -375,7 +380,11 @@ def calculated_field_match_index(index: "Index") -> CalculatedFieldMatchIndex:
     by_alias: dict[str, list[str]] = {}
     alias_of: dict[str, str] = {}
     shape_of: dict[str, tuple[str, str, str]] = {}
+    reference_id_of: dict[str, str] = {}
     for wid in index.summaries:
+        summary_reference_id = getattr(index.summaries[wid], "reference_id", None)
+        if summary_reference_id:
+            reference_id_of[wid] = str(summary_reference_id)
         payload = index.payload(wid)
         shape = calculated_field_shape(payload)
         if shape is not None:
@@ -386,7 +395,11 @@ def calculated_field_match_index(index: "Index") -> CalculatedFieldMatchIndex:
             by_alias.setdefault(str(alias), []).append(wid)
             alias_of[wid] = str(alias)
     return CalculatedFieldMatchIndex(
-        by_shape=by_shape, by_alias=by_alias, alias_of=alias_of, shape_of=shape_of
+        by_shape=by_shape,
+        by_alias=by_alias,
+        alias_of=alias_of,
+        shape_of=shape_of,
+        reference_id_of=reference_id_of,
     )
 
 
