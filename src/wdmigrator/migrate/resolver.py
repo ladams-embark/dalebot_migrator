@@ -28,6 +28,7 @@ from wdmigrator.discovery.inventory import DASHBOARD_FLAVOURS, Index, ids_of
 from wdmigrator.migrate.ordering import (
     extract_dashboard_refs,
     extract_measure_refs,
+    extract_gauge_range_refs,
     extract_prompt_field_refs,
     extract_prompt_set_refs,
     extract_reference_id_refs,
@@ -42,6 +43,7 @@ class NodeKind(str, Enum):
     CALCULATED_MEASURE = "calculated_measure"
     PROMPT_SET = "prompt_set"
     PROMPT_FIELD = "prompt_field"
+    GAUGE_RANGE = "gauge_range"
     #: The two dashboard flavours are separate kinds rather than one kind with a
     #: flag, because everything downstream — the data block, the Put operation,
     #: the response reference key, the probe's ID type — is keyed by kind, and a
@@ -113,6 +115,9 @@ class Closure:
     #: absent from the prompt-field index. A prompt set cannot be written
     #: without them, so this is a real gap rather than a pass-through.
     unresolved_prompt_field_ids: set[str] = field(default_factory=set)
+    #: ``Custom_Analytic_Range_ID`` values named by a report gauge but absent
+    #: from the gauge-range index. The report cannot be written without them.
+    unresolved_gauge_range_ids: set[str] = field(default_factory=set)
     #: Dashboard business IDs named by another dashboard but not in the index.
     unresolved_dashboard_ids: set[str] = field(default_factory=set)
 
@@ -187,6 +192,20 @@ def _measure_node(wid: str, payload: dict) -> Node:
     )
 
 
+def _gauge_range_node(wid: str, payload: dict) -> Node:
+    data = payload.get("Gauge_Range_Data") or {}
+    ids = ids_of(payload.get("Gauge_Range_Reference"))
+    return Node(
+        node_id=node_id_for(NodeKind.GAUGE_RANGE, wid),
+        kind=NodeKind.GAUGE_RANGE,
+        source_wid=wid,
+        reference_id=ids.get("Custom_Analytic_Range_ID"),
+        name=data.get("Name"),
+        payload=payload,
+        selected=False,
+    )
+
+
 def _prompt_field_node(wid: str, payload: dict) -> Node:
     data = payload.get("Prompt_Field_Data") or {}
     ids = ids_of(payload.get("Prompt_Field_Reference"))
@@ -237,6 +256,7 @@ _DATA_BLOCK = {
     NodeKind.CALCULATED_MEASURE: "Calculated_Measure_Data",
     NodeKind.PROMPT_SET: "Prompt_Set_Data",
     NodeKind.PROMPT_FIELD: "Prompt_Field_Data",
+    NodeKind.GAUGE_RANGE: "Gauge_Range_Data",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["data"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["data"],
 }
@@ -285,6 +305,7 @@ def resolve_closure(
     report_loader: Callable[[str], dict | None] | None = None,
     prompt_set_index: Index | None = None,
     prompt_field_index: Index | None = None,
+    gauge_range_index: Index | None = None,
     dashboard_index: Index | None = None,
 ) -> Closure:
     """Expand a selection into every object that has to be written.
@@ -467,6 +488,24 @@ def resolve_closure(
                 dep = _prompt_set_node(ps_wid, fetched)
             _link(dep, dep_id, node)
 
+        gauge_ranges: dict[str, str] = (
+            extract_gauge_range_refs(payload)
+            if gauge_range_index is not None
+            else {}
+        )
+        for gr_wid, gr_id in gauge_ranges.items():
+            if gr_wid == node.source_wid:
+                continue
+            dep_id = node_id_for(NodeKind.GAUGE_RANGE, gr_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = gauge_range_index.payload(gr_wid)
+                if fetched is None:
+                    closure.unresolved_gauge_range_ids.add(gr_id)
+                    continue
+                dep = _gauge_range_node(gr_wid, fetched)
+            _link(dep, dep_id, node)
+
         prompt_fields: dict[str, str] = (
             extract_prompt_field_refs(payload)
             if prompt_field_index is not None
@@ -508,6 +547,8 @@ def resolve_closure(
                 continue  # already handled as a prompt set or nested dashboard
             if ref_wid in prompt_fields:
                 continue  # already handled as a prompt field
+            if ref_wid in gauge_ranges:
+                continue  # already handled as a gauge range
             if ref_wid not in cf_index:
                 closure.passthrough_wids.add(ref_wid)
                 continue
