@@ -139,6 +139,12 @@ def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
     prompt_set_index = sweep(
         source_conn, "prompt_set", api.iter_prompt_set_index, "prompt sets"
     )
+    # A prompt set's members point at these, and it cannot be written before
+    # they exist in the destination. Only the custom ones become dependencies;
+    # delivered parameters are WID-only and pass through.
+    prompt_field_index = sweep(
+        source_conn, "prompt_field", api.iter_prompt_field_index, "prompt fields"
+    )
     cf_index = api.load_index(
         api.cache_path(source_conn, "calculated_field"),
         tenant=source_conn.target.tenant,
@@ -193,6 +199,7 @@ def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
         measure_loader=api.measure_loader_for(source_conn),
         report_loader=api.report_loader_for(source_conn),
         prompt_set_index=prompt_set_index,
+        prompt_field_index=prompt_field_index,
         dashboard_index=dashboard_index,
     )
     print(f"Closure: {closure.counts_by_kind()} (total {len(closure)})")

@@ -28,6 +28,7 @@ from wdmigrator.discovery.inventory import DASHBOARD_FLAVOURS, Index, ids_of
 from wdmigrator.migrate.ordering import (
     extract_dashboard_refs,
     extract_measure_refs,
+    extract_prompt_field_refs,
     extract_prompt_set_refs,
     extract_reference_id_refs,
     extract_report_refs,
@@ -40,6 +41,7 @@ class NodeKind(str, Enum):
     REPORT = "report"
     CALCULATED_MEASURE = "calculated_measure"
     PROMPT_SET = "prompt_set"
+    PROMPT_FIELD = "prompt_field"
     #: The two dashboard flavours are separate kinds rather than one kind with a
     #: flag, because everything downstream — the data block, the Put operation,
     #: the response reference key, the probe's ID type — is keyed by kind, and a
@@ -107,6 +109,10 @@ class Closure:
     #: set index. Same reasoning as the others: the reference states outright
     #: that the target is a prompt set, so not finding it is a real gap.
     unresolved_prompt_set_ids: set[str] = field(default_factory=set)
+    #: ``TenantedExternalParameter`` ids named by a prompt set member but
+    #: absent from the prompt-field index. A prompt set cannot be written
+    #: without them, so this is a real gap rather than a pass-through.
+    unresolved_prompt_field_ids: set[str] = field(default_factory=set)
     #: Dashboard business IDs named by another dashboard but not in the index.
     unresolved_dashboard_ids: set[str] = field(default_factory=set)
 
@@ -181,6 +187,20 @@ def _measure_node(wid: str, payload: dict) -> Node:
     )
 
 
+def _prompt_field_node(wid: str, payload: dict) -> Node:
+    data = payload.get("Prompt_Field_Data") or {}
+    ids = ids_of(payload.get("Prompt_Field_Reference"))
+    return Node(
+        node_id=node_id_for(NodeKind.PROMPT_FIELD, wid),
+        kind=NodeKind.PROMPT_FIELD,
+        source_wid=wid,
+        reference_id=ids.get("TenantedExternalParameter"),
+        name=data.get("Name"),
+        payload=payload,
+        selected=False,
+    )
+
+
 def _prompt_set_node(wid: str, payload: dict) -> Node:
     data = payload.get("Prompt_Set_Data") or {}
     ids = ids_of(payload.get("Prompt_Set_Reference"))
@@ -216,6 +236,7 @@ _DATA_BLOCK = {
     NodeKind.CALCULATED_FIELD: "Calculated_Field_Data",
     NodeKind.CALCULATED_MEASURE: "Calculated_Measure_Data",
     NodeKind.PROMPT_SET: "Prompt_Set_Data",
+    NodeKind.PROMPT_FIELD: "Prompt_Field_Data",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["data"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["data"],
 }
@@ -263,6 +284,7 @@ def resolve_closure(
     measure_loader: Callable[[str], dict | None] | None = None,
     report_loader: Callable[[str], dict | None] | None = None,
     prompt_set_index: Index | None = None,
+    prompt_field_index: Index | None = None,
     dashboard_index: Index | None = None,
 ) -> Closure:
     """Expand a selection into every object that has to be written.
@@ -445,6 +467,24 @@ def resolve_closure(
                 dep = _prompt_set_node(ps_wid, fetched)
             _link(dep, dep_id, node)
 
+        prompt_fields: dict[str, str] = (
+            extract_prompt_field_refs(payload)
+            if prompt_field_index is not None
+            else {}
+        )
+        for pf_wid, pf_id in prompt_fields.items():
+            if pf_wid == node.source_wid:
+                continue
+            dep_id = node_id_for(NodeKind.PROMPT_FIELD, pf_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = prompt_field_index.payload(pf_wid)
+                if fetched is None:
+                    closure.unresolved_prompt_field_ids.add(pf_id)
+                    continue
+                dep = _prompt_field_node(pf_wid, fetched)
+            _link(dep, dep_id, node)
+
         dashboards: dict[str, tuple[str, bool]] = (
             extract_dashboard_refs(payload) if dashboard_index is not None else {}
         )
@@ -466,6 +506,8 @@ def resolve_closure(
                 continue  # already handled as a measure or a sub-report
             if ref_wid in prompt_sets or ref_wid in dashboards:
                 continue  # already handled as a prompt set or nested dashboard
+            if ref_wid in prompt_fields:
+                continue  # already handled as a prompt field
             if ref_wid not in cf_index:
                 closure.passthrough_wids.add(ref_wid)
                 continue

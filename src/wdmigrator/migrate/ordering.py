@@ -353,6 +353,32 @@ def _collect_by_id_type(obj: Any, id_types: Iterable[str], found: dict) -> None:
 _PROMPT_SET_ID_TYPE = "Prompt_Set_ID"
 
 
+#: A prompt set member's parameter. Only the *custom* ones carry this business
+#: id — Workday-delivered prompt parameters (Effective Date, Supervisory
+#: Organization) come back as a bare WID with no id at all, and pass through
+#: unchanged because their WID is the same in every tenant.
+_PROMPT_FIELD_ID_TYPE = "TenantedExternalParameter"
+
+
+def extract_prompt_field_refs(obj: Any) -> dict[str, str]:
+    """Custom prompt-field references inside ``obj``, as ``{wid: id}``.
+
+    A prompt set cannot be written before its parameters exist: confirmed live
+    2026-08-12, ``Put_Prompt_Set`` fails with ``Invalid ID value ... for type =
+    'WID'`` naming an ``Abstract_External_Parameter_Reference``.
+
+    Only references carrying a ``TenantedExternalParameter`` id are returned.
+    That is the delivered-vs-custom split, and it is load-bearing: the
+    `Commit - HR Dashboard` prompt set's five members are all WID-only and
+    appear in *neither* tenant's ``Get_Prompt_Fields``, so they are delivered
+    parameters that need no migration at all. Returning them would invent a
+    dependency that cannot be satisfied.
+    """
+    collected: dict[str, tuple[str, str]] = {}
+    _collect_by_id_type(obj, (_PROMPT_FIELD_ID_TYPE,), collected)
+    return {wid: business for wid, (_, business) in collected.items()}
+
+
 def extract_prompt_set_refs(obj: Any) -> dict[str, str]:
     """Every prompt-set reference inside ``obj``, as ``{wid: Prompt_Set_ID}``.
 
