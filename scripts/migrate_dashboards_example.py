@@ -150,6 +150,12 @@ def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
     gauge_range_index = sweep(
         source_conn, "gauge_range", api.iter_gauge_range_index, "gauge ranges"
     )
+    # Matrix measures name one of these. Most need no migration — indicator
+    # WIDs are shared across tenants — but the destination may lack some.
+    analytic_indicator_index = sweep(
+        source_conn, "analytic_indicator", api.iter_analytic_indicator_index,
+        "analytic indicators",
+    )
     cf_index = api.load_index(
         api.cache_path(source_conn, "calculated_field"),
         tenant=source_conn.target.tenant,
@@ -206,6 +212,7 @@ def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
         prompt_set_index=prompt_set_index,
         prompt_field_index=prompt_field_index,
         gauge_range_index=gauge_range_index,
+        analytic_indicator_index=analytic_indicator_index,
         dashboard_index=dashboard_index,
     )
     print(f"Closure: {closure.counts_by_kind()} (total {len(closure)})")

@@ -167,6 +167,15 @@ class CalculatedMeasureSummary:
 
 
 @dataclass(frozen=True)
+class AnalyticIndicatorSummary:
+    """A matrix measure display option — the marker beside a matrix value."""
+
+    wid: str
+    reference_id: str | None
+    name: str | None
+
+
+@dataclass(frozen=True)
 class GaugeRangeSummary:
     """A custom analytic range — the colour banding on a report's gauge."""
 
@@ -614,6 +623,58 @@ def lookup_dashboard(
         data=item,
         wid=ids.get("WID"),
         reference_id=ids.get(spec["id_type"]) or reference_id,
+    )
+
+
+def lookup_analytic_indicator(
+    connection: Connection,
+    *,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one analytic indicator by WID or ``Analytic_Indicator_ID``.
+
+    Prefer the WID: it is the stable identity across tenants here, unusually,
+    while the business id is tenant-specific.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    ref = (
+        _reference("Analytic_Indicator_ID", reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        response = connection.service.Get_Analytic_Indicators(
+            Request_References={"Analytic_Indicator_Reference": [ref]},
+            Response_Group={"Include_Reference": True},
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get("Analytic_Indicator") or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get("Analytic_Indicator_Reference"))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get("Analytic_Indicator_ID") or reference_id,
     )
 
 
@@ -1079,6 +1140,21 @@ def _calculated_measure_summary(item: dict) -> CalculatedMeasureSummary | None:
     )
 
 
+def _analytic_indicator_summary(item: dict) -> AnalyticIndicatorSummary | None:
+    ids = ids_of(item.get("Analytic_Indicator_Reference"))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = item.get("Analytic_Indicator_Data") or {}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return AnalyticIndicatorSummary(
+        wid=wid,
+        reference_id=ids.get("Analytic_Indicator_ID"),
+        name=(data or {}).get("Name"),
+    )
+
+
 def _gauge_range_summary(item: dict) -> GaugeRangeSummary | None:
     ids = ids_of(item.get("Gauge_Range_Reference"))
     wid = ids.get("WID")
@@ -1219,6 +1295,33 @@ def iter_calculated_measure_index(
     )
 
 
+def iter_analytic_indicator_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every analytic indicator. One page: 339 on dpt1, 318 on dpt5.
+
+    **Their WIDs are stable across tenants** — all 318 of dpt5 appear in dpt1
+    under identical WIDs (confirmed live 2026-08-12) — while their business ids
+    are not: the same indicator is ``CRTMNU01_Commit - HR Dashboard_09_Retention
+    Risk Indicator`` on one and ``Worker-Retention-Retention Risk Indicator`` on
+    the other. So a shared indicator resolves by WID with no help at all, and
+    this sweep exists for the 21 that dpt1 has and dpt5 does not.
+
+    A reference naming an indicator that is in *neither* sweep is a pointer
+    dangling in the source itself. Those cannot be migrated and must not block
+    the run — see ``Closure.unmigratable_indicator_wids``.
+    """
+    return _iter_index(
+        connection,
+        kind="analytic_indicator",
+        operation_name="Get_Analytic_Indicators",
+        response_group={"Include_Reference": True},
+        collection_key="Analytic_Indicator",
+        summarise=_analytic_indicator_summary,
+        page_size=page_size,
+    )
+
+
 def iter_gauge_range_index(
     connection: Connection, *, page_size: int = PAGE_SIZE
 ) -> Iterator[IndexProgress]:
@@ -1353,6 +1456,7 @@ _SUMMARY_TYPES = {
     "calculated_measure": CalculatedMeasureSummary,
     "prompt_field": PromptFieldSummary,
     "gauge_range": GaugeRangeSummary,
+    "analytic_indicator": AnalyticIndicatorSummary,
     "report": ReportSummary,
     "dashboard": DashboardSummary,
     "prompt_set": PromptSetSummary,

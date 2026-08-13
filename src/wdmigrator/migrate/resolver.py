@@ -28,6 +28,7 @@ from wdmigrator.discovery.inventory import DASHBOARD_FLAVOURS, Index, ids_of
 from wdmigrator.migrate.ordering import (
     extract_dashboard_refs,
     extract_measure_refs,
+    extract_analytic_indicator_refs,
     extract_gauge_range_refs,
     extract_prompt_field_refs,
     extract_prompt_set_refs,
@@ -44,6 +45,7 @@ class NodeKind(str, Enum):
     PROMPT_SET = "prompt_set"
     PROMPT_FIELD = "prompt_field"
     GAUGE_RANGE = "gauge_range"
+    ANALYTIC_INDICATOR = "analytic_indicator"
     #: The two dashboard flavours are separate kinds rather than one kind with a
     #: flag, because everything downstream — the data block, the Put operation,
     #: the response reference key, the probe's ID type — is keyed by kind, and a
@@ -118,6 +120,12 @@ class Closure:
     #: ``Custom_Analytic_Range_ID`` values named by a report gauge but absent
     #: from the gauge-range index. The report cannot be written without them.
     unresolved_gauge_range_ids: set[str] = field(default_factory=set)
+    #: Analytic-indicator WIDs referenced by a matrix measure but readable on
+    #: NEITHER tenant — a pointer dangling in the source. Not an
+    #: ``unresolved_*`` set on purpose: these must not block, because the
+    #: reference is optional and already broken where it came from. The
+    #: writer drops the display option instead.
+    unmigratable_indicator_wids: set[str] = field(default_factory=set)
     #: Dashboard business IDs named by another dashboard but not in the index.
     unresolved_dashboard_ids: set[str] = field(default_factory=set)
 
@@ -192,6 +200,20 @@ def _measure_node(wid: str, payload: dict) -> Node:
     )
 
 
+def _analytic_indicator_node(wid: str, payload: dict) -> Node:
+    data = payload.get("Analytic_Indicator_Data") or {}
+    ids = ids_of(payload.get("Analytic_Indicator_Reference"))
+    return Node(
+        node_id=node_id_for(NodeKind.ANALYTIC_INDICATOR, wid),
+        kind=NodeKind.ANALYTIC_INDICATOR,
+        source_wid=wid,
+        reference_id=ids.get("Analytic_Indicator_ID"),
+        name=data.get("Name"),
+        payload=payload,
+        selected=False,
+    )
+
+
 def _gauge_range_node(wid: str, payload: dict) -> Node:
     data = payload.get("Gauge_Range_Data") or {}
     ids = ids_of(payload.get("Gauge_Range_Reference"))
@@ -257,6 +279,7 @@ _DATA_BLOCK = {
     NodeKind.PROMPT_SET: "Prompt_Set_Data",
     NodeKind.PROMPT_FIELD: "Prompt_Field_Data",
     NodeKind.GAUGE_RANGE: "Gauge_Range_Data",
+    NodeKind.ANALYTIC_INDICATOR: "Analytic_Indicator_Data",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["data"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["data"],
 }
@@ -306,6 +329,7 @@ def resolve_closure(
     prompt_set_index: Index | None = None,
     prompt_field_index: Index | None = None,
     gauge_range_index: Index | None = None,
+    analytic_indicator_index: Index | None = None,
     dashboard_index: Index | None = None,
 ) -> Closure:
     """Expand a selection into every object that has to be written.
@@ -488,6 +512,29 @@ def resolve_closure(
                 dep = _prompt_set_node(ps_wid, fetched)
             _link(dep, dep_id, node)
 
+        indicators: dict[str, str] = (
+            extract_analytic_indicator_refs(payload)
+            if analytic_indicator_index is not None
+            else {}
+        )
+        for ai_wid, ai_id in indicators.items():
+            if ai_wid == node.source_wid:
+                continue
+            dep_id = node_id_for(NodeKind.ANALYTIC_INDICATOR, ai_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = analytic_indicator_index.payload(ai_wid)
+                if fetched is None:
+                    # Dangling in the SOURCE: readable nowhere, so it can never
+                    # be created. Recorded for the writer to strip rather than
+                    # added to an unresolved_* set, because unlike a missing
+                    # calculated field this must not block — the reference is
+                    # optional and already broken on the source.
+                    closure.unmigratable_indicator_wids.add(ai_wid)
+                    continue
+                dep = _analytic_indicator_node(ai_wid, fetched)
+            _link(dep, dep_id, node)
+
         gauge_ranges: dict[str, str] = (
             extract_gauge_range_refs(payload)
             if gauge_range_index is not None
@@ -549,6 +596,8 @@ def resolve_closure(
                 continue  # already handled as a prompt field
             if ref_wid in gauge_ranges:
                 continue  # already handled as a gauge range
+            if ref_wid in indicators:
+                continue  # already handled as an analytic indicator
             if ref_wid not in cf_index:
                 closure.passthrough_wids.add(ref_wid)
                 continue

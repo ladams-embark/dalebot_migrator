@@ -40,6 +40,7 @@ from wdmigrator.discovery.inventory import (
     lookup_calculated_field,
     lookup_calculated_measure,
     lookup_dashboard,
+    lookup_analytic_indicator,
     lookup_gauge_range,
     lookup_prompt_field,
     lookup_prompt_set,
@@ -166,6 +167,10 @@ class MigrationPlan:
     unresolved_prompt_set_ids: frozenset[str] = frozenset()
     unresolved_prompt_field_ids: frozenset[str] = frozenset()
     unresolved_gauge_range_ids: frozenset[str] = frozenset()
+    #: Analytic indicators readable on neither tenant. Carried so the
+    #: writer can drop the optional display option naming them rather
+    #: than failing the write. Deliberately NOT a blocker.
+    unmigratable_indicator_wids: frozenset[str] = frozenset()
     unresolved_dashboard_ids: frozenset[str] = frozenset()
     #: source WID -> what to do with a reference the destination cannot resolve.
     #: Survives a retry, so the same question is never asked twice, and is
@@ -265,6 +270,10 @@ def probe_node(
             tabbed=DASHBOARD_TABBED_BY_KIND[node.kind],
             reference_id=node.reference_id,
         )
+    elif node.kind is NodeKind.ANALYTIC_INDICATOR:
+        # By WID, not business id: the WID is what is stable across tenants for
+        # indicators, and the business id is what is not.
+        result = lookup_analytic_indicator(connection, wid=node.source_wid)
     elif node.kind is NodeKind.GAUGE_RANGE:
         if not node.reference_id:
             return Existence(
@@ -596,6 +605,7 @@ def build_plan(
         unresolved_prompt_set_ids=frozenset(closure.unresolved_prompt_set_ids),
         unresolved_prompt_field_ids=frozenset(closure.unresolved_prompt_field_ids),
         unresolved_gauge_range_ids=frozenset(closure.unresolved_gauge_range_ids),
+        unmigratable_indicator_wids=frozenset(closure.unmigratable_indicator_wids),
         unresolved_dashboard_ids=frozenset(closure.unresolved_dashboard_ids),
         reference_decisions=dict(reference_decisions or {}),
     )

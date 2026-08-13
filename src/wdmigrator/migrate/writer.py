@@ -121,6 +121,10 @@ class WriteRecord:
     status: WriteStatus
     dest_wid: str | None = None
     exceptions: list[ExceptionDetail] = field(default_factory=list)
+    #: Things that were changed or dropped to make the write succeed. Not
+    #: failures — the object landed — but the user is entitled to know the
+    #: destination copy is not byte-identical to the source.
+    warnings: list[str] = field(default_factory=list)
     fault: str | None = None
     #: Set when the fault named a specific unresolvable identifier, so the UI
     #: can ask about exactly that reference instead of the whole payload.
@@ -405,6 +409,17 @@ _INVALID_ID_PATTERN = re.compile(
     r"Invalid ID value\.\s*'(?P<value>[^']+)' is not a valid ID value "
     r"for type = '(?P<id_type>[^']+)'"
 )
+
+
+def _names_analytic_indicator(fault: str | None) -> bool:
+    """Whether a fault blames an analytic indicator.
+
+    Matches the business id type by name, and the WID case by the element the
+    reference lives in — Workday names the value but not where it sat, so a
+    bare WID fault is only attributable once the payload is searched. Callers
+    do that by attempting the strip and checking it removed something.
+    """
+    return "analytic_indicator_id" in (fault or "").lower()
 
 
 def parse_blocking_reference(fault: str | None) -> BlockingReference | None:
@@ -898,6 +913,70 @@ def build_dashboard_payload(
     return payload
 
 
+#: The element a matrix measure uses to name its indicator. Optional in the
+#: schema, which is what makes dropping it a legitimate fallback.
+_DISPLAY_OPTION_ELEMENT = "Matrix_Display_Option_Reference"
+
+
+def _strip_display_options(obj: object, wids: "set[str] | None" = None) -> int:
+    """Remove ``Matrix_Display_Option_Reference``, in place. Returns the count.
+
+    With ``wids``, only references naming one of those are removed — the
+    pre-emptive case, where resolution already established the indicator is
+    readable on neither tenant. With ``None``, every display option goes: the
+    retry case, after a write has failed naming one.
+    """
+    removed = 0
+    if isinstance(obj, dict):
+        for key in list(obj):
+            value = obj[key]
+            if key == _DISPLAY_OPTION_ELEMENT and isinstance(value, dict):
+                if wids is None or any(
+                    entry.get("_value_1") in wids
+                    for entry in value.get("ID") or []
+                    if isinstance(entry, dict)
+                ):
+                    del obj[key]
+                    removed += 1
+                    continue
+            removed += _strip_display_options(value, wids)
+    elif isinstance(obj, list):
+        for item in obj:
+            removed += _strip_display_options(item, wids)
+    return removed
+
+
+def build_analytic_indicator_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+) -> dict:
+    """Arguments for ``Put_Analytic_Indicator``."""
+    data = node.payload.get("Analytic_Indicator_Data")
+    if not data:
+        raise WriteError(f"{node.name!r} has no Analytic_Indicator_Data to write.")
+
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+
+    payload: dict = {"Analytic_Indicator_Data": remapped}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE {node.name!r} without the destination WID."
+            )
+        payload["Analytic_Indicator_Reference"] = {
+            "ID": [{"type": "WID", "_value_1": dest_wid}]
+        }
+
+    return payload
+
+
 def build_gauge_range_payload(
     node: Node,
     wid_map: Mapping[str, str],
@@ -1027,6 +1106,7 @@ _OPERATIONS = {
     NodeKind.PROMPT_SET: "Put_Prompt_Set",
     NodeKind.PROMPT_FIELD: "Put_Prompt_Field",
     NodeKind.GAUGE_RANGE: "Put_Gauge_Range",
+    NodeKind.ANALYTIC_INDICATOR: "Put_Analytic_Indicator",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["put"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["put"],
 }
@@ -1143,6 +1223,7 @@ _RESPONSE_REFERENCE_KEY = {
     NodeKind.PROMPT_SET: "Prompt_Set_Reference",
     NodeKind.PROMPT_FIELD: "Prompt_Field_Reference",
     NodeKind.GAUGE_RANGE: "Gauge_Range_Reference",
+    NodeKind.ANALYTIC_INDICATOR: "Analytic_Indicator_Reference",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["reference"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["reference"],
 }
@@ -1496,6 +1577,11 @@ def write_node(
                 node, plan.wid_map, action=action, dest_wid=dest_wid,
                 reference_decisions=plan.reference_decisions,
             )
+        elif node.kind is NodeKind.ANALYTIC_INDICATOR:
+            payload = build_analytic_indicator_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
+            )
         elif node.kind is NodeKind.GAUGE_RANGE:
             payload = build_gauge_range_payload(
                 node, plan.wid_map, action=action, dest_wid=dest_wid,
@@ -1536,6 +1622,17 @@ def write_node(
         record.fault = str(exc)
         return record
 
+    # Indicators that resolution proved are readable on neither tenant. The
+    # reference is optional and already dangling on the source, so it goes
+    # rather than failing the write.
+    if plan.unmigratable_indicator_wids:
+        dropped = _strip_display_options(payload, plan.unmigratable_indicator_wids)
+        if dropped:
+            record.warnings.append(
+                f"Dropped {dropped} matrix display option(s) naming an analytic "
+                "indicator that exists on neither tenant."
+            )
+
     # Two deferrals, same shape: an ordering constraint the schema does not
     # express, handled by writing the object twice. Both turn one node into
     # several SOAP calls while staying a single record.
@@ -1573,15 +1670,40 @@ def write_node(
         connection.limiter.wait()
         raw = getattr(connection.service, operation)(**payload)
     except Exception as exc:  # noqa: BLE001 - classified below
-        record.fault = connection.redact(str(exc))
-        record.blocking_reference = parse_blocking_reference(record.fault)
-        record.status = (
-            WriteStatus.INDETERMINATE
-            if _is_transport_failure(exc)
-            else WriteStatus.FAILED
-        )
-        record.duration_ms = int((time.monotonic() - started) * 1000)
-        return record
+        fault = connection.redact(str(exc))
+        # Fallback, once: a write rejected over an analytic indicator is retried
+        # without the display option. Fidelity first — the indicator is kept
+        # whenever it resolves — but a marker beside a matrix value is never
+        # worth failing a whole migration for, and the alternative is a halted
+        # run that a human has to unpick.
+        if _names_analytic_indicator(fault) and _strip_display_options(payload):
+            record.warnings.append(
+                "Write was rejected over an analytic indicator; retried without "
+                f"the matrix display option. Original fault: {fault}"
+            )
+            try:
+                connection.limiter.wait()
+                raw = getattr(connection.service, operation)(**payload)
+            except Exception as retry_exc:  # noqa: BLE001
+                record.fault = connection.redact(str(retry_exc))
+                record.blocking_reference = parse_blocking_reference(record.fault)
+                record.status = (
+                    WriteStatus.INDETERMINATE
+                    if _is_transport_failure(retry_exc)
+                    else WriteStatus.FAILED
+                )
+                record.duration_ms = int((time.monotonic() - started) * 1000)
+                return record
+        else:
+            record.fault = fault
+            record.blocking_reference = parse_blocking_reference(record.fault)
+            record.status = (
+                WriteStatus.INDETERMINATE
+                if _is_transport_failure(exc)
+                else WriteStatus.FAILED
+            )
+            record.duration_ms = int((time.monotonic() - started) * 1000)
+            return record
 
     response = serialize_object(raw) or {}
     record.exceptions = extract_exceptions(response)
