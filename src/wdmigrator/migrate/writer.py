@@ -341,26 +341,63 @@ _UNMIGRATABLE_REPORT_REFERENCES = ("Report_Tag_Reference",)
 #: icon, not an inline child — its WID is almost certainly global, it has never
 #: failed, and adding it would be acting on shape rather than evidence. Add
 #: entries here when a write actually fails on one, not before.
-#: **Matrix display options.** Third of the same kind, found live 2026-08-12 on
-#: `Top Performer Retention (as of Effective Date)`:
-#: ``'c2b400a86c1810015cbc47258bde0000' is not a valid ID value for type =
-#: 'WID'``, a ``Matrix_Display_Option_Reference`` naming
-#: ``CRTMNU01_Commit - HR Dashboard_09_Retention Rate Indicator`` inside
-#: ``Matrix_Measures_Data``.
-#:
-#: It looks like a candidate for its own object kind — ``Get_Analytic_Indicators``
-#: and ``Put_Analytic_Indicator`` both exist — and it is not. The indicator is
-#: **unreadable on the source**: absent from a full sweep (339 on dpt1) and
-#: returning zero matches on a targeted lookup by WID *and* by
-#: ``Analytic_Indicator_ID``. There is nothing to read and so nothing to write.
-#: Like the matrix measures and dimensions above it, it exists only inline on
-#: the sub-report, which is why it sits in the same ``Matrix_Measures_Data``
-#: block as they do.
+#: ``Matrix_Display_Option_Reference`` was briefly listed here and **that was
+#: wrong**. It is the exact inverse case: an analytic indicator keeps the same
+#: WID in both tenants (all 318 of dpt5 appear in dpt1 under identical WIDs)
+#: while its business id is tenant-scoped
+#: (``CRTMNU01_Commit - HR Dashboard_09_Retention Risk Indicator`` against
+#: ``Worker-Retention-Retention Risk Indicator`` for one and the same object).
+#: Dropping its WID removed the half that transfers and kept the half that does
+#: not, turning a WID rejection into a business-id rejection. See
+#: :data:`_TENANT_SCOPED_BUSINESS_IDS`.
 _INLINE_CHILD_REFERENCES = {
     "Matrix_Measure__All__Reference": "Matrix_Measure_Reference_ID",
     "Matrix_Dimension_Reference": "Matrix_Dimension_Reference_ID",
+}
+
+
+#: References whose WID is stable across tenants but whose business id is not —
+#: the mirror image of :data:`_INLINE_CHILD_REFERENCES`. Sending both makes
+#: Workday validate the business id and reject it, so the business id is
+#: dropped and the WID left to resolve on its own.
+_TENANT_SCOPED_BUSINESS_IDS = {
     "Matrix_Display_Option_Reference": "Analytic_Indicator_ID",
 }
+
+
+def _drop_tenant_scoped_business_ids(obj: object) -> int:
+    """Strip tenant-scoped business ids, in place. Returns the count.
+
+    Only touches a reference that still carries a WID — the WID is what will
+    resolve, and removing the only identifier would leave an empty reference.
+    """
+    dropped = 0
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            id_type = _TENANT_SCOPED_BUSINESS_IDS.get(key)
+            for reference in value if isinstance(value, list) else [value]:
+                if id_type is None or not isinstance(reference, dict):
+                    continue
+                entries = reference.get("ID")
+                if not isinstance(entries, list):
+                    continue
+                has_wid = any(
+                    e.get("type") == "WID" for e in entries if isinstance(e, dict)
+                )
+                if not has_wid:
+                    continue
+                kept = [
+                    e for e in entries
+                    if not (isinstance(e, dict) and e.get("type") == id_type)
+                ]
+                if len(kept) != len(entries):
+                    reference["ID"] = kept
+                    dropped += 1
+            dropped += _drop_tenant_scoped_business_ids(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            dropped += _drop_tenant_scoped_business_ids(item)
+    return dropped
 
 
 def _drop_stale_inline_wids(obj: object, wid_map: Mapping[str, str]) -> int:
@@ -773,6 +810,8 @@ def build_report_payload(
         remapped.pop(key, None)
     # Runs AFTER substitute_wids, so "unmapped" means what it says.
     _drop_stale_inline_wids(remapped, wid_map)
+    # The mirror case: keep the WID, drop the tenant-scoped business id.
+    _drop_tenant_scoped_business_ids(remapped)
     if action is Action.CREATE:
         # Only on CREATE: an UPDATE addresses an object that already exists, so
         # a self-reference there is resolvable and must be left alone.
