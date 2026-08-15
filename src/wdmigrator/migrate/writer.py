@@ -1549,6 +1549,8 @@ def _attach_dashboard_worklets(
         except WriteError as exc:
             return f"Could not rebuild worklet report {report_node.name!r}: {exc}"
 
+        payload, _ = _apply_plan_rewrites(payload, plan)
+
         try:
             connection.limiter.wait()
             raw = connection.service.Put_Tenanted_Report_Definition(**payload)
@@ -1585,6 +1587,39 @@ def _attach_dashboard_worklets(
 
 
 # ── Execution ────────────────────────────────────────────────────────────────
+
+
+def _apply_plan_rewrites(payload: dict, plan: "MigrationPlan") -> tuple[dict, list[str]]:
+    """Rewrites every built payload needs, whoever built it.
+
+    Two things that are *not* the builder's job, because they depend on what the
+    destination turned out to contain rather than on the object being written:
+
+    - Nested calculated-field references name their target by BUSINESS id, and a
+      field the destination already had answers to the destination's id, not the
+      source's. Confirmed live 2026-08-13: `Skills Gaps (as of Today)` was
+      refused over a reused `Learning Points` that dpt5 calls
+      `Worker - Learning Points`.
+    - Analytic indicators readable on neither tenant, whose optional reference
+      is dropped rather than allowed to fail the write.
+
+    Extracted into a helper because it was inlined in :func:`write_node` and the
+    dashboard worklet re-write builds its own payloads — so the last object of
+    the whole migration failed on a reference the main path had been stripping
+    correctly for hours. Anything that calls a ``build_*_payload`` must call
+    this too.
+    """
+    notes: list[str] = []
+    if plan.reference_id_map:
+        payload = substitute_reference_ids(payload, plan.reference_id_map)
+    if plan.unmigratable_indicator_wids:
+        dropped = _strip_display_options(payload, plan.unmigratable_indicator_wids)
+        if dropped:
+            notes.append(
+                f"Dropped {dropped} analytic indicator reference(s) naming an "
+                "indicator that exists on neither tenant."
+            )
+    return payload, notes
 
 
 def write_node(
@@ -1688,25 +1723,8 @@ def write_node(
         record.fault = str(exc)
         return record
 
-    # Nested calculated-field references name their target by BUSINESS id, and
-    # a field the destination already had answers to the destination's id, not
-    # the source's. Applied here rather than in each builder because it is the
-    # same rewrite for every object kind. Confirmed live 2026-08-13: without
-    # it, `Skills Gaps (as of Today)` was refused over a reused `Learning
-    # Points` that dpt5 calls `Worker - Learning Points`.
-    if plan.reference_id_map:
-        payload = substitute_reference_ids(payload, plan.reference_id_map)
-
-    # Indicators that resolution proved are readable on neither tenant. The
-    # reference is optional and already dangling on the source, so it goes
-    # rather than failing the write.
-    if plan.unmigratable_indicator_wids:
-        dropped = _strip_display_options(payload, plan.unmigratable_indicator_wids)
-        if dropped:
-            record.warnings.append(
-                f"Dropped {dropped} matrix display option(s) naming an analytic "
-                "indicator that exists on neither tenant."
-            )
+    payload, rewrite_notes = _apply_plan_rewrites(payload, plan)
+    record.warnings.extend(rewrite_notes)
 
     # Two deferrals, same shape: an ordering constraint the schema does not
     # express, handled by writing the object twice. Both turn one node into
