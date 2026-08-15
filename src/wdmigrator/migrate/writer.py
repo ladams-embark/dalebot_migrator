@@ -1530,18 +1530,45 @@ def _attach_dashboard_worklets(
     :func:`_rewrite_worklet_landing_pages`, which is a no-op until exactly that
     mapping is present.
 
-    The report re-writes are reference-less, which **upserts** on
-    ``Custom_Report_ID`` rather than creating a duplicate (verified live earlier
-    in this project: one row before, one after, same WID). The final dashboard
-    write drops ``Add_Only``, which was set on the shell write and would now
-    make the server refuse the very object it just created.
+    Each worklet report is re-written as an **UPDATE when the destination
+    already has it**, carrying the destination reference, and only as a create
+    when it genuinely does not.
+
+    This used to be an unconditional reference-less write, on the belief that
+    such a Put upserts on ``Custom_Report_ID``. It does not, and cannot:
+    ``Custom_Report_ID`` is returned by the API but rejected as a lookup key
+    (see :func:`~wdmigrator.discovery.inventory.lookup_report_by_name`), so a
+    reference-less Put has nothing to match on and simply creates. Confirmed the
+    hard way on 2026-08-13 — dpt5 ended up with two reports named `Span of
+    Control`, one sharing dpt1's WID and one freshly allocated, in a service
+    with no delete operation.
+
+    An ambiguous destination is refused rather than written. If several reports
+    share the name the probe returns UNKNOWN, there is no reference to update
+    against, and writing anyway is what produced the duplicate in the first
+    place.
+
+    The final dashboard write drops ``Add_Only``, which was set on the shell
+    write and would now make the server refuse the very object it just created.
     """
     for report_node in _worklet_reports_for(node, plan):
+        found = plan.existence.get(report_node.node_id)
+        if found is not None and found.is_unknown:
+            return (
+                f"Cannot associate worklet {report_node.name!r} with the "
+                f"dashboard: the destination could not identify it "
+                f"({found.fault}). Writing it anyway would create a duplicate, "
+                "and this service has no delete operation."
+            )
+        # Update in place when it is already there; create only when it is not.
+        dest_wid = found.dest_wid if found is not None else None
+        action = Action.UPDATE if dest_wid else Action.CREATE
         try:
             payload = build_report_payload(
                 report_node,
                 plan.wid_map,
-                action=Action.CREATE,
+                action=action,
+                dest_wid=dest_wid,
                 owner_reference=owner_reference,
                 reference_decisions=plan.reference_decisions,
                 keep_worklet=True,

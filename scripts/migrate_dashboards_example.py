@@ -23,6 +23,13 @@ Run it:
 Without --live it stops after the dry run, which is the only way to get a plan
 hash to review. Live execution is a separate, deliberate invocation.
 
+``--force-update <Object name>`` (repeatable) rewrites an object that already
+exists in the destination, instead of skipping it. Needed when a multi-phase
+dashboard write died partway: the shell exists, so every later run probes it
+as FOUND and skips, and it can never be completed. UPDATE is otherwise never
+automatic — overwriting destination configuration is the destructive direction
+and this service has no delete — so it has to be asked for by name.
+
 ``--treat-as-new <Calculated_Field_ID>`` (repeatable) records a human decision
 that a specific calculated field is absent from the destination, for the case
 where matching genuinely cannot decide — several destination fields share the
@@ -123,7 +130,12 @@ def adjudicate_as_new(closure, existence: dict, reference_ids: set[str]) -> None
         )
 
 
-def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
+def main(
+    names: list[str],
+    live: bool,
+    treat_as_new: set[str],
+    force_update: set[str],
+) -> None:
     source_conn = connect("SOURCE", api.Role.SOURCE)
     dest_conn = connect("DEST", api.Role.DESTINATION)
     verify(source_conn, "source")
@@ -237,7 +249,18 @@ def main(names: list[str], live: bool, treat_as_new: set[str]) -> None:
     if treat_as_new:
         adjudicate_as_new(closure, existence, treat_as_new)
 
-    plan = api.build_plan(closure, existence)
+    overrides = {}
+    for node in closure.nodes.values():
+        if node.name in force_update:
+            overrides[node.node_id] = api.Action.UPDATE
+            ex = existence.get(node.node_id)
+            print(f"  forcing UPDATE: {node.name!r} (dest wid "
+                  f"{ex.dest_wid if ex else None})")
+    missing = force_update - {n.name for n in closure.nodes.values()}
+    if missing:
+        raise SystemExit(f"--force-update named objects not in this closure: {sorted(missing)}")
+
+    plan = api.build_plan(closure, existence, overrides=overrides)
     print(f"\nPlan actions: {plan.counts()}")
     print(f"Plan hash: {plan.plan_hash()}")
 
@@ -321,23 +344,29 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     dashboards: list[str] = []
     new_fields: set[str] = set()
-    expecting_field = False
+    updates: set[str] = set()
+    expecting: str | None = None
     live = False
     for arg in argv:
-        if expecting_field:
-            new_fields.add(arg)
-            expecting_field = False
+        if expecting == "new":
+            new_fields.add(arg); expecting = None
+        elif expecting == "update":
+            updates.add(arg); expecting = None
         elif arg == "--live":
             live = True
         elif arg == "--treat-as-new":
-            expecting_field = True
+            expecting = "new"
         elif arg.startswith("--treat-as-new="):
             new_fields.add(arg.split("=", 1)[1])
+        elif arg == "--force-update":
+            expecting = "update"
+        elif arg.startswith("--force-update="):
+            updates.add(arg.split("=", 1)[1])
         else:
             dashboards.append(arg)
-    if expecting_field:
-        raise SystemExit("--treat-as-new needs a Calculated_Field_ID after it.")
+    if expecting:
+        raise SystemExit(f"--{'treat-as-new' if expecting == 'new' else 'force-update'} needs a value after it.")
     if not dashboards:
         print(__doc__)
         raise SystemExit(1)
-    main(dashboards, live, new_fields)
+    main(dashboards, live, new_fields, updates)
