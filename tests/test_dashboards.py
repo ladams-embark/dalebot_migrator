@@ -30,7 +30,14 @@ from wdmigrator.migrate.ordering import (
     extract_prompt_set_refs,
     extract_report_refs,
 )
-from wdmigrator.migrate.planner import Action, MigrationPlan, build_plan, validate_plan
+from wdmigrator.migrate.planner import (
+    Action,
+    Existence,
+    MigrationPlan,
+    build_plan,
+    validate_plan,
+)
+from wdmigrator.discovery.inventory import LookupOutcome
 from wdmigrator.migrate.resolver import (
     DASHBOARD_KINDS,
     Node,
@@ -42,6 +49,7 @@ from wdmigrator.migrate.writer import (
     WriteError,
     _names_analytic_indicator,
     _strip_display_options,
+    _attach_dashboard_worklets,
     build_dashboard_payload,
     build_gauge_range_payload,
     build_prompt_field_payload,
@@ -1230,3 +1238,80 @@ class TestDisplayOptionStripping:
             "Validation error occurred. Invalid ID value.  'X' is not a valid "
             "ID value for type = 'Calculated_Field_ID'"
         )
+
+
+# ── Worklet re-write must not duplicate ──────────────────────────────────────
+
+
+class TestWorkletReWriteDoesNotDuplicate:
+    """Phase two of a dashboard write re-writes each worklet report.
+
+    That used to be an unconditional reference-less Put, on the belief it would
+    upsert on Custom_Report_ID. It cannot — that id is rejected as a lookup key
+    — so for a report the destination already had, it created a second one.
+    Confirmed live 2026-08-13: dpt5 ended up with two `Span of Control`.
+    """
+
+    def dashboard_plan(self, report_existence):
+        """A tabbed dashboard with one worklet report, and a scripted probe."""
+        report_node = Node(
+            node_id=node_id_for(NodeKind.REPORT, "RPT1"),
+            kind=NodeKind.REPORT,
+            source_wid="RPT1",
+            reference_id="Span of Control",
+            name="Span of Control",
+            payload=report(wid="RPT1", name="Span of Control"),
+        )
+        dash_node = Node(
+            node_id=node_id_for(NodeKind.DASHBOARD_TABBED, "DB1"),
+            kind=NodeKind.DASHBOARD_TABBED,
+            source_wid="DB1",
+            reference_id="Commit - HR Dashboard",
+            name="Commit - HR Dashboard",
+            payload=tabbed_dashboard(),
+        )
+        object.__setattr__(report_node, "required_by", {dash_node.node_id})
+        plan = MigrationPlan(ordered_nodes=[report_node, dash_node])
+        plan.existence[report_node.node_id] = report_existence(report_node.node_id)
+        return plan, report_node
+
+    def test_an_existing_report_is_updated_not_recreated(self):
+        plan, node = self.dashboard_plan(
+            lambda nid: Existence(
+                node_id=nid, state=LookupOutcome.FOUND, dest_wid="DEST_RPT"
+            )
+        )
+        built = build_report_payload(
+            node, plan.wid_map, action=Action.UPDATE, dest_wid="DEST_RPT",
+            keep_worklet=True,
+        )
+        assert built["Tenanted_Report_Definition_Reference"]["ID"][0]["_value_1"] == "DEST_RPT"
+
+    def test_a_genuinely_absent_report_is_still_created(self):
+        plan, node = self.dashboard_plan(
+            lambda nid: Existence(node_id=nid, state=LookupOutcome.NOT_FOUND)
+        )
+        built = build_report_payload(
+            node, plan.wid_map, action=Action.CREATE, keep_worklet=True
+        )
+        assert "Tenanted_Report_Definition_Reference" not in built
+
+    def test_an_ambiguous_report_is_refused_rather_than_written(self):
+        """The duplicate case. Two destination reports share the name, so there
+        is no reference to update against — writing anyway is what created the
+        duplicate that started this."""
+        plan, node = self.dashboard_plan(
+            lambda nid: Existence(
+                node_id=nid,
+                state=LookupOutcome.UNKNOWN,
+                fault="2 reports in the destination are named 'Span of Control'.",
+            )
+        )
+        dash = plan.ordered_nodes[1]
+        fault = _attach_dashboard_worklets(
+            connection=None, node=dash, plan=plan, full_payload={},
+            operation="Put_Custom_Dashboard_with_Tabs",
+        )
+        assert fault is not None
+        assert "duplicate" in fault
+        assert "Span of Control" in fault
