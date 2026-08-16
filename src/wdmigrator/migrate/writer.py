@@ -350,9 +350,21 @@ _UNMIGRATABLE_REPORT_REFERENCES = ("Report_Tag_Reference",)
 #: Dropping its WID removed the half that transfers and kept the half that does
 #: not, turning a WID rejection into a business-id rejection. See
 #: :data:`_TENANT_SCOPED_BUSINESS_IDS`.
+#: **Prompt set members.** Same shape again, confirmed live 2026-08-13. A
+#: dashboard names an individual member through
+#: ``Prompt_Set_Member__All__Reference`` (WID plus ``Prompt_Set_Member_ID``),
+#: and the WID is the source's.
+#:
+#: These cannot be mapped, only dropped. ``Get_Prompt_Sets`` does not expose
+#: member WIDs on *either* tenant — a member carries only
+#: ``Reference_for_Webservices``, its ordinal — so there is nothing to read back
+#: and nothing to build a map from. They are created inline with the prompt set,
+#: which is precisely why they have no independent reference, and precisely why
+#: they belong here.
 _INLINE_CHILD_REFERENCES = {
     "Matrix_Measure__All__Reference": "Matrix_Measure_Reference_ID",
     "Matrix_Dimension_Reference": "Matrix_Dimension_Reference_ID",
+    "Prompt_Set_Member__All__Reference": "Prompt_Set_Member_ID",
 }
 
 
@@ -928,6 +940,10 @@ def build_dashboard_payload(
     remapped = substitute_wids(data, wid_map)
     if reference_decisions:
         _apply_reference_decisions(remapped, reference_decisions)
+    # Prompt set members reach a dashboard as inline children with a source WID
+    # that can never be mapped — see _INLINE_CHILD_REFERENCES. Runs after
+    # substitute_wids so "unmapped" means what it says.
+    _drop_stale_inline_wids(remapped, wid_map)
     _strip_dashboard_tenant_data(remapped)
     for key in _DASHBOARD_CONTENT_FIELDS:
         remapped.pop(key, None)
@@ -1376,68 +1392,6 @@ def is_dashboard_worklet(node: Node) -> bool:
     )
 
 
-def _map_prompt_set_members(
-    connection: Connection, node: Node, dest_wid: str, wid_map: dict
-) -> str | None:
-    """Register destination WIDs for a written prompt set's members.
-
-    Members are written inline as part of the prompt set and get fresh WIDs, but
-    ``Put_Prompt_Set`` returns only the set's own reference — so a dashboard
-    that names an individual member through ``Prompt_Set_Member__All__Reference``
-    (530 such references on this tenant's tabbed dashboards) would otherwise be
-    written pointing at a source WID that means nothing in the destination.
-
-    Reading the set back is the only way to learn them. Matching is on
-    ``Prompt_Set_Member_ID``, the member's own business ID.
-
-    Returns a fault string, or None. A failure here is reported but is **not**
-    treated as a failed write: the prompt set itself is written and correct, and
-    the consequence is a downstream dashboard reference that will not resolve —
-    which surfaces on its own, against the object that actually has the problem.
-    """
-    source_members = (node.payload.get("Prompt_Set_Data") or {}).get(
-        "Tenanted_Prompt_Set_Member_Data"
-    ) or []
-    if isinstance(source_members, dict):
-        source_members = [source_members]
-    if not source_members:
-        return None
-
-    from wdmigrator.discovery.inventory import LookupOutcome, lookup_prompt_set
-
-    result = lookup_prompt_set(connection, wid=dest_wid)
-    if result.outcome is not LookupOutcome.FOUND or not result.data:
-        return (
-            f"Prompt set {node.name!r} was written, but reading it back to map "
-            "its members failed. A dashboard referencing an individual member "
-            f"of it may not resolve: {result.fault or result.outcome.value}"
-        )
-
-    dest_members = (result.data.get("Prompt_Set_Data") or {}).get(
-        "Tenanted_Prompt_Set_Member_Data"
-    ) or []
-    if isinstance(dest_members, dict):
-        dest_members = [dest_members]
-
-    def by_business_id(members):
-        found = {}
-        for member in members:
-            ids = ids_of(member.get("Prompt_Set_Member_Reference"))
-            business = ids.get("Prompt_Set_Member_ID") or member.get(
-                "Reference_for_Webservices"
-            )
-            if business and ids.get("WID"):
-                found[business] = ids["WID"]
-        return found
-
-    source_by_id = by_business_id(source_members)
-    dest_by_id = by_business_id(dest_members)
-    for business, source_member_wid in source_by_id.items():
-        if business in dest_by_id:
-            wid_map[source_member_wid] = dest_by_id[business]
-    return None
-
-
 def _reference_wid(response: dict, node: Node) -> str | None:
     return ids_of(response.get(_RESPONSE_REFERENCE_KEY[node.kind])).get("WID")
 
@@ -1679,22 +1633,6 @@ def write_node(
 
     if action is Action.SKIP:
         record.dest_wid = dest_wid
-        # A skipped prompt set still needs its MEMBERS mapped. Members get
-        # fresh WIDs in the destination and dashboards reference them
-        # individually through Prompt_Set_Member__All__Reference, so without
-        # this a dashboard is written pointing at the source's member WIDs.
-        #
-        # Only ever ran after a successful write before, which hid the gap: it
-        # is exactly the second run — where the prompt set was created earlier
-        # and is now SKIP — that needs it. Confirmed live 2026-08-12, the
-        # `Commit - Open Enrollment Command Center` worklet write-back failed on
-        # a member WID after its prompt set had been created by a prior run.
-        if node.kind is NodeKind.PROMPT_SET and dest_wid and not guard.dry_run:
-            member_fault = _map_prompt_set_members(
-                connection, node, dest_wid, plan.wid_map
-            )
-            if member_fault is not None:
-                record.warnings.append(member_fault)
         return record
 
     operation = operation_for(node)
@@ -1893,15 +1831,6 @@ def write_node(
             record.dest_wid = returned_wid
             record.duration_ms = int((time.monotonic() - started) * 1000)
             return record
-
-    # Prompt set members get fresh WIDs that the Put response does not report.
-    # Recorded as a warning rather than a failure — see _map_prompt_set_members.
-    if node.kind is NodeKind.PROMPT_SET:
-        member_fault = _map_prompt_set_members(
-            connection, node, returned_wid, plan.wid_map
-        )
-        if member_fault is not None:
-            record.fault = member_fault
 
     record.status = WriteStatus.SUCCESS
     record.dest_wid = returned_wid
