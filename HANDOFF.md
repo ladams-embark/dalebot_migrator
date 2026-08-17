@@ -1,6 +1,6 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-08-12 (session 10)_
+_Last updated: 2026-08-13 (session 10)_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields, custom report
@@ -37,22 +37,19 @@ Everything is one installable package, `wdmigrator`, under `src/`:
 
 ## PICK UP HERE — next session
 
-**Branch:** `master`, and everything is merged into it. Session 10 landed
-several commits on `claude/prepaid-certification-migration-ae7877`, each
-merged `--no-ff` matching the pattern of every other feature branch here.
-**Nothing is pushed** — `master` is ahead of `origin/master`. `gh` CLI is
-**not installed** — PRs, if wanted, must be opened in the browser.
+**Branch:** `master`, everything merged, each feature branch `--no-ff` as usual.
+**Nothing is pushed** — `master` is ~34 commits ahead of `origin/master`.
+`gh` CLI is **not installed**; PRs must be opened in the browser.
 
-**State: the tool migrates calculated fields, reports (including composites
-and matrix reports), calculated measures, custom dashboards and prompt sets,
-end to end, live-verified — with the exception noted in next step 0.** Engine
-and `ui/` are both built. **586 offline tests green** (`pytest` reports
-`586 passed, 9 deselected`); no `.env` and no network needed.
+**State: the tool migrates calculated fields, calculated measures, reports
+(composites and matrix reports), prompt fields, prompt sets, gauge ranges,
+analytic indicators and custom dashboards — end to end, live-verified.**
+Engine and `ui/` both built. **625 offline tests green** (`pytest` reports
+`625 passed, 9 deselected`); no `.env` and no network needed.
 
-> The "613 offline tests" figure carried by this file through session 9, and
-> the "618" briefly written during session 10, were both wrong — never
-> measured, only inferred from pytest's progress dots. 571 is the number
-> `pytest` actually prints. Quote the summary line, not the dots.
+> Quote pytest's summary line, never the progress dots. This file carried
+> "613" and then "618" for two sessions; both were inferred, and both were
+> wrong.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -61,12 +58,49 @@ pytest -m live      # read-only source-tenant tests
 python scripts/selfcheck.py
 ```
 
+### The three-dashboard migration is DONE
+
+`Commit - HR Dashboard`, `Commit - Optimize Reporting Dashboard` and
+`Commit - Open Enrollment Command Center`, `commitconsulting_dpt1` →
+`commitconsulting_dpt5`, completed 2026-08-13. **170 objects**: 3 dashboards,
+43 reports, 105 calculated fields, 7 measures, 5 analytic indicators, 3 gauge
+ranges, 2 prompt sets, 2 prompt fields.
+
+Verified by read-back, not by trusting the run summary: all three dashboards
+match the source on tabs, worklet count and prompt-set member references
+(17/17, 7/7, 15/15). **That check matters** — an intermediate run reported
+"0 failed" while two of the three dashboards were empty shells.
+
+Four deliberate differences in dpt5, all decided by the user:
+
+1. Two `Year-Month` calculated fields were **created fresh** rather than reused.
+   Several dpt5 fields matched equally well and the source carried no WQL alias
+   to separate them, so nothing could decide. dpt5 now holds 5 fields named
+   `Year-Month`; 2 are ours.
+2. Two `Analytic_Indicator` references were **stripped** from
+   `Top Performer Retention (as of Effective Date)` and `Skills Gaps (as of
+   Today)`. Those indicators are readable on *neither* tenant — dangling in
+   dpt1 itself — so there was nothing to migrate.
+3. `Learning Points` was removed from the source report by the user, so its
+   absence in dpt5 is not a gap.
+4. Standard behaviour: reports land `Shared=False` unless they are dashboard
+   worklets, report tags stripped, tenanted security groups stripped and
+   repopulated by Workday.
+
+**One cleanup was needed and is done.** dpt5 briefly held two reports named
+`Span of Control`; the user deleted the one this migration created. An audit of
+all 43 closure reports found that was the only duplicate.
+
+**Do not pass `--treat-as-new` on future runs of this set.** Those two fields
+now exist. The flag forces them to be treated as absent every run, which is an
+assertion that is no longer true. It has been harmless only because
+`Put_Calculated_Field` upserts (see below).
+
 ### Tenants — read this before running anything
 
-**The destination changed TWICE during session 10**, without announcement:
-`commitconsulting` @ wd501 through session 9, then `_dpt3`, then `_dpt5`
-partway through the session — discovered only because a run printed the tenant
-it had just authenticated to. As of the end of 2026-08-12 `.env` names:
+**The destination changed twice during session 10**, without announcement:
+`commitconsulting` @ wd501 → `_dpt3` → `_dpt5`, discovered only because a run
+printed the tenant it had authenticated to. As of 2026-08-13 `.env` names:
 
 | | tenant | services host |
 |---|---|---|
@@ -74,147 +108,79 @@ it had just authenticated to. As of the end of 2026-08-12 `.env` names:
 | destination | `commitconsulting_dpt5` | `impl-services1.wd12.myworkday.com` |
 
 **Read `.env` at the start of every run and print what you connected to.**
-Never carry a destination over from a previous turn, let alone a previous
-session. Then verify the pairing live. Hosts confirmed so far: `commitconsulting_dpt1`, `_dpt3` and
-`_dpt5` are all on `impl-services1.wd12.myworkday.com`; plain
-`commitconsulting` is on `impl-services1.wd501.myworkday.com`.
+Never carry a destination across turns, let alone sessions.
 
-**`.env` has had the host/tenant pairing wrong in every session so far**, and
-still did at the start of session 10 — it pointed *both* tenants at `wd501`
-when both were on `wd12`. Session 9 had it pairing `commitconsulting_dpt1`
-with `wd501` and `commitconsulting` with `wd2-impl-services1.workday.com`. A
-mismatch returns HTTP 500 on the WSDL fetch, which reads like an outage rather
-than a config error, so **check this first on any connection failure — it has
-never once been the code.** Confirm a pairing by fetching
-`https://{host}/ccx/service/{tenant}/Core_Implementation_Service/v46.0?wsdl`
-and looking for HTTP 200 with a ~5.5 MB body.
+Host/tenant pairings confirmed live: `commitconsulting_dpt1`, `_dpt3` and
+`_dpt5` on `impl-services1.wd12.myworkday.com`; plain `commitconsulting` on
+`impl-services1.wd501.myworkday.com`. A mismatch returns HTTP 500 on the WSDL
+fetch, which reads like an outage rather than a config error — **check this
+first on any connection failure; it has never once been the code.** `.env` was
+wrong in every session up to and including the start of session 10, and was
+corrected by the user partway through.
 
-The host lines were wrong for most of session 10 (both on `wd501` for tenants
-on `wd12`) and were **corrected by the user partway through**, along with the
-destination change. They are right as of the end of the session.
+**Both connections must be implementer accounts** for anything dashboard-,
+prompt-set- or prompt-field-shaped. A normal ISU reads calculated fields and
+reports fine and fails all of those with "The task submitted is not
+authorized." It is an account-type gate, not a domain grant.
 
-**The destination refreshes.** `commitconsulting` was refreshed overnight
-during session 9 and lost 24 migrated objects. That is normal for an
-implementation tenant and not a bug — but it means a "the destination already
-has this" assumption goes stale without warning. The planner's destination
-probe handles it correctly (everything reverts to CREATE), and a full
-destination sweep is the reliable check when a probe result looks surprising.
+**The destination refreshes without warning**, and objects can disappear
+between runs: `Commit - Optimize Reporting Dashboard` existed in dpt5 at the
+start of session 10 and was gone by the end. Re-probe rather than trusting a
+previous result.
 
-**Dashboards require an implementer account on both tenants.** `ladams-impl`
-works. A normal ISU (`lmcneil`) fails every dashboard operation with
-`Processing error occurred. The task submitted is not authorized.` while
-reading calculated fields and reports perfectly well. This is an account-type
-gate, not a domain grant — see CLAUDE.md. Reports and calculated fields are
-unaffected, and the UI explains the limitation once rather than surfacing a
-raw fault.
+**The tenant will drop you if you hammer it.** A full report sweep with data
+times out at the 60s read limit, and ~40 rapid sequential name lookups got the
+connection closed outright. Back off and retry.
 
 ### Next steps, roughly in order
 
-0. **The three-dashboard migration is PART WRITTEN and blocked.** `Commit - HR
-   Dashboard`, `Commit - Optimize Reporting Dashboard` and `Commit - Open
-   Enrollment Command Center`, dpt1 → **dpt5**.
-
-   **22 objects are already in dpt5** — roughly 19 calculated fields and
-   3 reports, written across two halted runs on 2026-08-12. They are valid and
-   carry their source business IDs, so a re-run finds and skips them: the
-   migration is **resumable, not corrupt**. No dashboard was created, and
-   dpt5's pre-existing `Commit - Optimize Reporting Dashboard` was never
-   touched (it probes as FOUND and stays SKIP — note that means this run will
-   never *update* it).
-
-   **Blocked on a missing object kind: prompt fields.** `Put_Prompt_Set`
-   failed with `'bfd569ef594210011985fb557c140000' is not a valid ID value for
-   type = 'WID'`. That is a `Tenanted_Prompt_Set_Member_Data` →
-   `Abstract_External_Parameter_Reference`, which carries a source WID *and* a
-   business ID (`TenantedExternalParameter = 'DateOE Open Date'`).
-
-   It looks exactly like the `_INLINE_CHILD_REFERENCES` case — drop the stale
-   WID, let the business ID resolve — **and it is not.** Checked before
-   assuming: these are standalone tenant objects, not defined inline and not
-   defined by any report in the closure. `Get_Prompt_Fields` returns 28 on dpt1
-   and 13 on dpt5, and both parameters the prompt set needs are **absent from
-   dpt5**. Dropping the WID would just fail on the business ID instead.
-
-   `Get_Prompt_Fields` / `Put_Prompt_Field` both exist, so this is migratable —
-   as a **new object kind**: resolver edge from prompt set, payload builder,
-   destination probe, ordering. Comparable in size to the session 9 dashboard
-   work. Note `Get_Prompt_Fields` is implementer-gated.
-
-   One thread not yet pulled: the other prompt set,
-   `CRTMNU0104_Commit HR Dashboard Prompt Set`, has 5 members with **no**
-   `TenantedExternalParameter` ID at all. Different shape, possibly a different
-   problem — investigate before assuming the prompt-field work covers it.
-
-   Re-run with:
-   ```
-   python scripts/migrate_dashboards_example.py --live      "Commit - HR Dashboard" "Commit - Optimize Reporting Dashboard"      "Commit - Open Enrollment Command Center"      --treat-as-new "CRTMNU01_Commit - HR Dashboard_03_Year-Month"      --treat-as-new "CRTMNU01_Commit - HR Dashboard_03_Year-MonthHDCT"
-   ```
-   The two `--treat-as-new` flags carry a decision the user made on 2026-08-12:
-   two dpt1 `Year-Month` fields match two dpt5 candidates equally well and
-   carry no WQL alias to separate them, so they are created fresh. They cannot
-   collide, precisely because they have no alias.
-
-1. **Drive the Streamlit wizard end to end by hand.** Still never done, and
-   session 10 raised the stakes: every live migration this project has
-   performed went through scripts in `scripts/` or the scratchpad, never the
-   wizard's own Execute step, because driving credential-entry forms is not
-   something the assistant can do. The dashboard picker (session 9) and the
-   rewritten report/dashboard selection banking (session 10) are covered by
-   `AppTest` only. **Session 10 fixed a bug that made it impossible to select
-   objects across two different searches, and nobody has confirmed by hand
-   that the fix feels right** — the tests pin the state contract, not the
-   interaction. Someone with hands needs to do this once.
-2. **Migrate an untabbed dashboard.** Only the tabbed flavour has been
-   written live. `Cost Center Manager Dashboard` on the source resolves
-   cleanly to 42 objects **including a prompt set**, so it exercises both the
-   untabbed Put and the prompt-set write path — neither of which has ever run
-   against a tenant.
-3. **`validation/verify.py` is still a stub.** Every read-back this project
-   has done was hand-written in a throwaway script.
-4. **Report tags could be migrated properly.** They are currently stripped
-   from every report because they always fail cross-tenant, but
-   `Get_Report_Tags` / `Put_Report_Tag` both exist, so this is a clean
-   follow-up rather than a limitation.
+1. **Drive the Streamlit wizard end to end by hand.** Still never done. Every
+   live migration this project has performed went through `scripts/`, never the
+   wizard's Execute step, because driving credential forms is not something the
+   assistant can do. Everything added in sessions 9 and 10 — the dashboard
+   picker, the selection banking fix, and five new object kinds — is covered by
+   `AppTest` only.
+2. **The UI does not expose the new engine features.** `iter_check_existence`
+   now takes `match_index` and `measure_match_index`, `resolve` takes four new
+   indexes, and none of that is wired into `ui/steps/`. A wizard run today would
+   duplicate every shared calculated field, exactly as the scripts did before
+   the fix. **This is the biggest gap in the project.**
+3. **`validation/verify.py` is still a stub.** Every read-back this project has
+   done was hand-written in a throwaway script — including the one that caught
+   the empty dashboards.
+4. **Report tags could be migrated properly.** Stripped from every report today
+   because they always fail cross-tenant, but `Get_Report_Tags` /
+   `Put_Report_Tag` both exist.
 
 ### Blockers and open questions
 
 1. **`Put_Calculated_Field` with a reference: replace or merge?** Still
-   unverified after ten sessions. Live runs have only exercised CREATE and
-   SKIP for calculated fields, never UPDATE. Keep preferring CREATE/SKIP —
-   session 9 deliberately excluded calculated fields from a forced-rewrite
-   pass for exactly this reason, and session 10's run was 1 CREATE / 5 SKIP.
-2. **Can `Data_Source_Reference` existence be probed in the destination?**
-   Still open.
-3. **`Prompt_Set_Member__All__Reference` remapping is unproven.**
-   `writer._map_prompt_set_members` reads a written prompt set back and maps
-   member WIDs by `Prompt_Set_Member_ID`, because `Put_Prompt_Set` returns
-   only the set's own reference. No prompt set has ever been written, so this
-   has never run. See next step 2.
-4. **Genuine `Custom_Field`-space references remain out of scope** — no
-   operation exists for them — but still no live case has been confirmed,
-   only theorized. Every `NOT_FOUND` investigated so far turned out to be a
-   report-scoped calculated field needing promotion, or a delivered field
-   passing through fine.
+   unverified after ten sessions, and now *partly* answered from the other
+   direction: a **reference-less** `Put_Calculated_Field` **upserts** on
+   `Calculated_Field_ID`. Proven by accident — `--treat-as-new` forced two
+   fields to CREATE on every run for a dozen runs and produced exactly one copy
+   each. The same is **not** true of reports; see the writer note below.
+2. **Dashboard UPDATE now has one live data point.** Both incomplete dashboards
+   were completed with a forced `Action.UPDATE` and came out matching the
+   source exactly. That is one success, not a characterisation.
+3. **Can `Data_Source_Reference` existence be probed in the destination?** Open.
+4. **A dashboard that fails partway leaves a shell that then probes as FOUND**,
+   so every later run skips it and it can never complete. `--force-update` in
+   `scripts/migrate_dashboards_example.py` is the escape hatch. Worth making
+   the planner notice a worklet-less dashboard on its own.
 
 ### Local machine state (not in git)
 
-`out/cache/<tenant>/{calculated_field,report,dashboard,prompt_set}.json` —
-gitignored. The calculated-field index is the big one (~44 MB, **9,734 fields
-on the source as of session 10**, up from 9,717 in session 9; it grows as
-fields are promoted from report-scoped to global). Dashboard and prompt-set
-indexes are trivial (179 and 57 items, one page each). Rebuilding the CF index
-costs ~25s; `load_index()` reads it instantly.
+`out/cache/<tenant>/{calculated_field,report,dashboard,prompt_set,prompt_field,
+gauge_range,analytic_indicator,calculated_measure}.json` — gitignored. The
+calculated-field indexes are the big ones (~44 MB source, 9,734 fields; dpt5
+has 8,749). Everything else is one page.
 
-**Stale cache risk, confirmed live three times** — and session 10's instance
-cost most of the debugging time for a migration that turned out to have
-nothing wrong with it. A calculated field that exists in the tenant is absent
-from an index swept before it appeared, and `resolve` then hard-blocks
-reporting it as a genuinely missing dependency, which is indistinguishable
-from a real one. In session 10 a 4-day-old index made
-`Prepaid Spend Amortization Installment - CF LRV - Supplier Invoice
-Accounting Date - 1212285275` look missing; a fresh sweep found it
-immediately. **If `unresolved_reference_ids` is non-empty, rebuild the index
-before believing it.** Do not trust a cache's age.
+**Stale cache risk, confirmed live three times.** A field that exists is absent
+from an index swept before it appeared, and `resolve` then reports it as a
+genuinely missing dependency — indistinguishable from a real one. If
+`unresolved_reference_ids` is non-empty, rebuild the index before believing it.
+Delete the cache file rather than trusting its age.
 
 ### The approved build plan
 
@@ -223,162 +189,96 @@ holds the full architecture, the Streamlit design, and the safety model.
 
 ---
 
-## Done this session (2026-08-12, session 10) — Prepaid Certification migrated, picker selection bug fixed
+## Done this session (2026-08-12 → 13, session 10) — five new object kinds, cross-tenant identity, three dashboards migrated
 
-Two pieces of work: a live report migration to a **new destination tenant**,
-and a UI bug the migration had nothing to do with. Commit `2f61065`, merge
-`e716e6d`. 618 offline tests.
+Started as "migrate one report", became the session that found the tool's
+central assumption about cross-tenant identity was wrong, and ended with three
+dashboards live in a third destination tenant. ~34 commits, 625 offline tests
+(from 556).
 
-### `Prepaid Certification` migrated live, dpt1 → dpt3
+**The through-line: an object's business ID is not a cross-tenant identity.**
+CLAUDE.md had asserted since 2026-07-31 that `Calculated_Field_Reference_ID`
+was "a stable cross-tenant ID; use this for identity, NOT WID". It is stable
+only when both tenants acquired the object the same way, which independently
+built tenants have no reason to have done. Everything below follows from that.
 
-The user reported it "failing". **Neither cause was the report**, and both are
-environment conditions this handoff had already warned about in general terms:
+### What was built
 
-1. **Both `.env` services hosts pointed at the wrong pod** — `wd501` for two
-   tenants that are both on `wd12`. Presents as HTTP 500 on the WSDL fetch.
-2. **The cached calculated-field index was 4 days stale**, so `resolve`
-   hard-blocked claiming a real calculated field was a missing dependency. A
-   fresh sweep (9,717 → 9,734 fields) resolved it with no code change.
+- **Cross-tenant calculated-field matching**, three tiers (shape → shape
+  tie-broken by WQL alias → alias narrowed by business object), returning
+  UNKNOWN rather than guessing. Without it the first live plan would have
+  created **62 duplicate fields**.
+- **Cross-tenant calculated-measure matching** on (name, business object).
+  Worse than the field case and unavoidable: `BI_Calculated_Measure_ID` is
+  Workday-generated with tenant-local sequence numbers, so two tenants can
+  never agree on one.
+- **Nested business-id remapping.** A *reused* field answers to the
+  destination's ID, so every nested reference naming the source's ID dangles.
+  Two shapes had to be handled — the bare scalar (field→field) and an ID-list
+  entry typed `Calculated_Field_ID` (report column→field).
+- **Three new object kinds**: prompt fields, gauge ranges, analytic indicators.
+- **Email-address ISU usernames**, and a **picker selection fix** (reports and
+  dashboards could not be selected across two different searches).
 
-With both corrected the migration was unremarkable: closure of 6 objects
-(3 reports, 3 calculated fields), **1 CREATE and 5 SKIP** — every dependency
-already existed in dpt3. Plan hash `f6d6a0fcbfc6027f`, re-verified on re-probe
-before the live write. Result 1 success / 0 failed / 0 indeterminate. Dest WID
-`332111f5bc6610011af1dadfd9750000`.
+### Five failure modes, and what each taught
 
-`Prepaid Certification` is a **composite** report — no columns of its own, it
-renders two sub-reports. Read-back confirmed every field matches the source
-except `Shared` (stripped deliberately; not a dashboard worklet), both
-composite sub-report references point at destination WIDs, and no migrated
-dependency's source WID survived anywhere in the payload.
+1. **`WQL_Alias` must be unique per business object.** The message reads like a
+   character-set complaint and means "this already exists". Zero of 9,734
+   source fields had an illegal character.
+2. **"Enter a unique name for the System-Wide Summarization Calculation"** —
+   same trap, for measures.
+3. **"Effective date field is not valid for functional constraints"** — an
+   *activation delay*, not a configuration problem. It cleared by itself on the
+   next run once the dependency written moments earlier had settled. **Re-running
+   is a legitimate remedy**; several runs each got further than the last.
+4. **"You can't migrate the report ... because it uses deprecated fields"** —
+   Workday's wording for an unresolvable field reference. Reading it literally
+   cost two wrong diagnoses.
+5. **A reference carrying both a WID and a business ID has now meant four
+   different things**: a stale inline WID, a wrong-tenant identity, a genuinely
+   absent object, and a pointer dangling in the source. Shape never
+   distinguishes them. **Check the destination, and check the source.**
 
-Worth knowing: this migration leaned on pre-existing destination state. The
-three calculated fields belong to the sub-reports, not to the composite
-parent, and all five dependencies were already in dpt3. **A refresh of dpt3
-would make this a much larger run.**
+### Two mistakes worth not repeating
 
-### The picker selection bug — reports *and* dashboards
+**`Matrix_Display_Option_Reference` was added to `_INLINE_CHILD_REFERENCES`,
+which drops the WID and keeps the business id.** For analytic indicators that
+is exactly inverted — the WID is stable across tenants and the business id is
+not — so it turned a WID rejection into a business-id rejection. It now lives
+in `_TENANT_SCOPED_BUSINESS_IDS`, doing the opposite.
 
-Selecting reports across more than one search term was impossible. The report
-and dashboard pickers rebuilt their selection every rerun by reading
-`st.dataframe`'s live selection, which is **a list of row positions into the
-frame the widget was just handed**. Retyping the filter above the table
-repointed those positions at different objects, or at nothing, silently
-discarding everything picked under the previous search.
+**Then that was fixed for one element rather than for the object type**, so the
+identical problem resurfaced 45 objects later on a report column instead of a
+matrix measure.
 
-`state.py` had encoded the wrong assumption outright — *"the report index
-table's own widget state already persists its row selection across reruns"* —
-true only while the frame is unchanged, which is exactly not the case when
-filtering.
+### The duplicate, and why the guard fired late
 
-Both now bank on an explicit add button into a persistent dict, the pattern
-`_render_calculated_fields` already used and which is why that picker never
-had the bug. `selected_reports_manual` → `selected_reports_added`;
-`selected_dashboards_added` is new.
+dpt5 ended up with two reports named `Span of Control`. Phase two of a
+dashboard write re-wrote every worklet report with a **reference-less** Put, on
+a docstring claim that this upserts on `Custom_Report_ID`. It does not and
+cannot — that ID is rejected as a lookup key, which is why reports are matched
+by name everywhere else in this tool.
 
-Since selections are no longer visible as highlighted rows once the filter
-moves on, each picker lists what it holds by name — picking the wrong object
-cannot be undone in the destination. The dashboard picker also gained the
-clear button it never had.
+It hid because a dashboard that fails partway leaves a shell, the shell probes
+as FOUND, and every later run skips the dashboard without re-entering that
+code. The duplicate was created once and then sat there while runs reported
+clean. An audit of all 43 closure reports found it was the only one; the user
+deleted it.
 
-**Audited every other widget read back into state.** The two `st.data_editor`
-call sites are safe and were left alone: neither has a filter that can reorder
-its frame, `conflicts.py` applies edits keyed on `node_id`, and
-`execute.py:_apply_decisions` already documents why positional matching holds
-there. `_render_calculated_fields` was already correct.
+Worklet reports are now written as an UPDATE carrying the destination
+reference, created only when genuinely absent, and **refused** when the name is
+ambiguous.
 
-Five new `AppTest` cases. Note the standing limitation — the Select step
-cannot be reached in a browser without tenant credentials, so this is
-`AppTest` coverage only.
+Note the asymmetry this exposed: a reference-less `Put_Calculated_Field`
+*does* upsert, because `Calculated_Field_ID` is a valid lookup key. Reports
+duplicate; calculated fields do not.
 
-### Cross-tenant calculated-field matching — the big one
+### The verification that mattered
 
-Migrating three dashboards to dpt3 surfaced a defect that had been latent since
-2026-07-31, and it is the most consequential thing found this session.
-
-**`Calculated_Field_Reference_ID` is not a stable cross-tenant identity.**
-CLAUDE.md had asserted it was since the read path was first verified. It is
-stable only when both tenants acquired the field the same way, and dpt1 and
-dpt3 have completely different conventions —
-`CRTMNU01_Commit - HR Dashboard_03_Is Top Performer` against
-`Custom Object Data - Is Top Performer` for one and the same field.
-
-The destination probe therefore reported **62 of 110 calculated fields as
-absent when they were present**. The original plan was 164 CREATE / 1 SKIP;
-the correct plan is 99 / 66. Running the first one would have put 62 duplicate
-fields into dpt3, on the same business objects, with no delete operation.
-
-**How it surfaced** is worth remembering, because the symptom pointed nowhere
-near the cause. Object 1 of the live run failed with `Enter a unique WQL alias
-for the business object using zero through 9, A through Z, a through z, or the
-_ symbol` — which reads as a character-set complaint and is a **uniqueness**
-complaint. The alias was entirely legal characters. Of 9,734 source fields,
-zero had an illegal character.
-
-**The first fix considered was wrong and was rejected on the user's challenge.**
-Stripping `WQL_Alias` (it is `minOccurs="0"`, so legal) would have made all 164
-writes succeed — and produced 62 duplicates, because a colliding alias is
-nearly always evidence that the destination already *has* the field. Across all
-62 live collisions, **zero** turned out to be an unrelated field squatting on
-the alias. The lesson generalises: an error that can be silenced by deleting a
-field from the payload deserves a check on whether the error was telling you
-something true.
-
-`planner._match_calculated_field_across_tenants` re-checks an ID miss in three
-tiers, returning UNKNOWN rather than guessing whenever a tier finds more than
-one candidate — see CLAUDE.md for the tiers and their justification. Opt-in via
-`iter_check_existence(..., match_index=...)` since it costs a destination sweep.
-
-**One attempted change was reverted.** Forcing an UNKNOWN object to CREATE via
-`overrides` trips `validate_plan`, so `MigrationPlan.overridden` was added to
-let a human override bypass that blocker — until two existing tests
-(`test_writing_an_unknown_object_blocks`,
-`test_writing_an_ambiguously_named_report_is_blocked`) showed the rule was
-deliberate, not an oversight. The right encoding is to adjudicate **existence**
-rather than the action, which is what the run script now does for the two
-`Year-Month` fields. **Do not weaken that blocker.**
-
-15 new offline tests in `test_planner.py`.
-
-### Calculated measures have the same defect, structurally
-
-Migrating the three dashboards to **dpt5** halted 67 objects in on
-`Enter a unique name for the System-Wide Summarization Calculation`.
-
-Same root cause as calculated fields, but for measures it is not a matter of
-convention — it is unavoidable. `BI_Calculated_Measure_ID` is Workday-generated
-with tenant-local sequence numbers: dpt5 has
-`ARITHMETIC_CALCULATED_MEASURE-11-210` where dpt1 has
-`CRTMNU01_Commit - HR Dashboard_08_Annual - Turnover %`. **No two tenants can
-ever agree on one.**
-
-Matching is on `(name, business object)` — thinner than the calculated-field
-shape because `Calculated_Measure_DataType` has no comparable scalar for type.
-It holds here: dpt5 has 47 measures and **zero** duplicate names. Several
-candidates still returns UNKNOWN.
-
-`iter_calculated_measure_index` is new. Measures remain un-indexed for
-*resolution* — that reasoning was always about the source and still stands —
-but recognising one in the *destination* needs the whole destination set. One
-page, swept per run, not cached.
-
-Took the live plan from 74 creates to 55, reusing 2 of 7 measures. 7 tests.
-
-### Prompt fields: a missing object kind, not a stale WID
-
-See next step 0 for the full detail. The short version: the failure *looks*
-like the `_INLINE_CHILD_REFERENCES` pattern and is not, and the difference was
-only established by checking `Get_Prompt_Fields` on both tenants rather than
-reasoning from the shape of the reference. **That check is the lesson** — the
-same shape has now meant three different things across this project (stale
-inline WID, wrong-tenant identity, genuinely absent object).
-
-### A correction worth carrying forward
-
-The dates in this file and CLAUDE.md for session 10 were first written as
-2026-08-11 and are actually **2026-08-12**; the test count was quoted as 613
-and then 618 when `pytest` prints 571 (now 586). Both were written from
-inference rather than measurement. Quote the tool's own output.
+An intermediate run reported **"0 failed"** while two of the three dashboards
+were empty shells — right tabs, right admin configurations, zero worklets.
+Only a read-back against the source caught it. **A clean run summary is not
+evidence the objects are correct.**
 
 ---
 
