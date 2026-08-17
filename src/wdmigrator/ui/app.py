@@ -11,6 +11,14 @@ read-only progress display, not a nav control — see
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
+load_dotenv()
+
 import streamlit as st
 
 from wdmigrator.api import redact
@@ -47,6 +55,13 @@ def main() -> None:
         layout="wide",
     )
     theme.inject()
+
+    allow_non_impl = os.environ.get("WDMIGRATOR_ALLOW_NON_IMPL")
+    if allow_non_impl == "1":
+        st.caption("ALLOW_NON_IMPL = 1")
+    else:
+        st.caption(f"ALLOW_NON_IMPL = {allow_non_impl!r}")
+
     state = get_state()
 
     theme.page_header(
