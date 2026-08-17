@@ -83,6 +83,62 @@ def test_the_implementer_requirement_is_explained_rather_than_shown_as_an_error(
     assert "implementer account" in rendered
 
 
+class TestConflictsRefusesToProbeUnmatched:
+    """The Conflicts step has to sweep the destination before it probes it.
+
+    A probe with no destination sweep answers "does the destination hold an
+    object created the same way this one was", which is not the question — the
+    same calculated field carries a different `Calculated_Field_ID` on each
+    tenant. Acting on that answer plans a CREATE for something already present,
+    and the write is rejected with "Enter a unique WQL alias for the business
+    object". Renders offline: with nothing cached for the stub tenant, no
+    button is pressed and no sweep starts.
+    """
+
+    def _app(self, ready: bool):
+        import time
+
+        from wdmigrator.api import Closure, Index
+        from wdmigrator.ui.state import STATE_KEY, WizardState
+
+        at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+        state = WizardState(step="conflicts")
+        state.source.connection = _StubConnection()
+        state.dest.connection = _StubConnection()
+        state.closure = Closure()
+        if ready:
+            for attr, kind in (
+                ("dest_cf_index", "calculated_field"),
+                ("dest_measure_index", "calculated_measure"),
+            ):
+                setattr(state, attr, Index(kind=kind, tenant="stub_tenant",
+                                           fetched_at=time.time()))
+        at.session_state[STATE_KEY] = state
+        at.run(timeout=20)
+        return at
+
+    def _probe_button(self, at):
+        found = [b for b in at.button if b.key == "conflicts_start"]
+        assert found, "the existence-check button is missing"
+        return found[0]
+
+    def test_the_destination_sweeps_are_offered_before_the_probe(self):
+        at = self._app(ready=False)
+        assert not at.exception
+        rendered = " ".join(str(w.value) for w in at.markdown)
+        assert "Destination calculated field index" in rendered
+        assert "Destination calculated measure index" in rendered
+
+    def test_the_probe_button_is_disabled_until_both_sweeps_exist(self):
+        at = self._app(ready=False)
+        assert self._probe_button(at).disabled
+
+    def test_the_probe_button_unlocks_once_both_sweeps_exist(self):
+        at = self._app(ready=True)
+        assert not at.exception
+        assert not self._probe_button(at).disabled
+
+
 def _report_index(*names):
     """A tiny in-memory report index, enough for the picker to render a table."""
     import time

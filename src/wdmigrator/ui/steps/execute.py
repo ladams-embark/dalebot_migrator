@@ -26,6 +26,7 @@ from wdmigrator.api import (
 )
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
+from wdmigrator.ui.indexes import destination_match_indexes
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import WizardState, build_guard, owner_reference
 
@@ -124,8 +125,16 @@ def _apply_decisions(state: WizardState, rows: list, edited) -> None:
 
 
 def _start_reprobe(state: WizardState) -> None:
+    # Same match indexes as the Conflicts probe, and not optional here either:
+    # a re-probe without them would revert every cross-tenant match back to
+    # CREATE, so answering one reference question would silently arm a run that
+    # duplicates every shared object.
     state.reprobe_job = start_job(
-        iter_check_existence(state.dest.connection, state.closure)
+        iter_check_existence(
+            state.dest.connection,
+            state.closure,
+            **destination_match_indexes(state),
+        )
     )
     state.execute_records = []
     state.execute_job = None

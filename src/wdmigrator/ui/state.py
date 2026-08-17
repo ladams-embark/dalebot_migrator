@@ -96,9 +96,36 @@ class WizardState:
     dashboard_index_job: Optional[JobState] = None
     prompt_set_index: Optional[Index] = None
     prompt_set_index_job: Optional[JobState] = None
-    #: Set when a dashboard/prompt-set sweep failed with the implementer fault,
-    #: so the Select step can explain it once rather than showing a raw error.
+    # A prompt set's members name these; a report's gauge layout names a gauge
+    # range; a matrix measure names an analytic indicator. All three are single
+    # pages, and all three are read by `resolve` rather than by a picker — with
+    # any of them absent, `resolve_closure` does not even *look* for that kind
+    # of reference, so the dependency silently never enters the closure and the
+    # write fails live. Prompt fields share the dashboard implementer gate;
+    # gauge ranges and analytic indicators do not.
+    prompt_field_index: Optional[Index] = None
+    prompt_field_index_job: Optional[JobState] = None
+    gauge_range_index: Optional[Index] = None
+    gauge_range_index_job: Optional[JobState] = None
+    analytic_indicator_index: Optional[Index] = None
+    analytic_indicator_index_job: Optional[JobState] = None
+    #: Set when a dashboard/prompt-set/prompt-field sweep failed with the
+    #: implementer fault, so the Select step can explain it once rather than
+    #: showing a raw error.
     implementer_required: bool = False
+
+    # DESTINATION sweeps. These are what make cross-tenant matching possible,
+    # and they are a correctness requirement rather than an optimization:
+    # `Calculated_Field_ID` and `BI_Calculated_Measure_ID` are not stable
+    # identities between independently-built tenants, so without these every
+    # shared object probes as absent and is planned as CREATE. The destination
+    # then rejects the duplicate ("Enter a unique WQL alias for the business
+    # object") and the run halts on the first one. Held on the wizard rather
+    # than rebuilt per probe because the calculated-field sweep costs ~25s.
+    dest_cf_index: Optional[Index] = None
+    dest_cf_index_job: Optional[JobState] = None
+    dest_measure_index: Optional[Index] = None
+    dest_measure_index_job: Optional[JobState] = None
 
     # wid -> True for directly-selected calculated fields
     selected_field_wids: set = field(default_factory=set)
@@ -181,6 +208,20 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.dashboard_index_job = None
         state.prompt_set_index = None
         state.prompt_set_index_job = None
+        state.prompt_field_index = None
+        state.prompt_field_index_job = None
+        state.gauge_range_index = None
+        state.gauge_range_index_job = None
+        state.analytic_indicator_index = None
+        state.analytic_indicator_index_job = None
+        # Credential-scoped, like the source indexes above: this reset is what
+        # runs when a connection changes, and a destination index swept against
+        # a *different* destination would silently authorise skipping objects
+        # that tenant has never had.
+        state.dest_cf_index = None
+        state.dest_cf_index_job = None
+        state.dest_measure_index = None
+        state.dest_measure_index_job = None
         state.implementer_required = False
         state.selected_field_wids = set()
         state.selected_reports_added = {}

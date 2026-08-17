@@ -46,9 +46,18 @@ def _compute(state: WizardState) -> None:
             # named the same way.
             report_loader=report_loader_for(state.source.connection),
             selected_dashboards=state.selected_dashboards,
-            # Indexes rather than loaders: neither object kind has usable
-            # request criteria, so there is no on-demand route to take.
+            # Indexes rather than loaders: none of these object kinds has
+            # usable request criteria, so there is no on-demand route to take.
+            #
+            # Passing None is NOT the same as "there are none of these" — the
+            # resolver skips extracting that kind of reference entirely, so an
+            # index left out here means the dependency never enters the closure
+            # and is discovered by the destination rejecting the write. The
+            # Select gate refuses to advance without them for that reason.
             prompt_set_index=state.prompt_set_index,
+            prompt_field_index=state.prompt_field_index,
+            gauge_range_index=state.gauge_range_index,
+            analytic_indicator_index=state.analytic_indicator_index,
             dashboard_index=state.dashboard_index,
         )
     except PartialIndexError as exc:
@@ -190,6 +199,17 @@ def gate(state: WizardState) -> list[Blocker]:
             "prompt set",
             "Rebuild the prompt set index in Select. Reading prompt sets needs an "
             "implementer account, so confirm the source connection is one.",
+        ),
+        (
+            sorted(state.closure.unresolved_prompt_field_ids),
+            "prompt field",
+            "Rebuild the prompt field index in Select. Reading prompt fields needs "
+            "an implementer account, so confirm the source connection is one.",
+        ),
+        (
+            sorted(state.closure.unresolved_gauge_range_ids),
+            "gauge range",
+            "Rebuild the gauge range index in Select (one page).",
         ),
         (
             sorted(state.closure.unresolved_dashboard_ids),
