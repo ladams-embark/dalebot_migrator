@@ -211,7 +211,8 @@ def build_calculated_field_payload(
 
 
 def _strip_filter_instance_references(obj: object) -> None:
-    """Remove ``Filter_Instances_Reference`` from every filter condition, in place.
+    """Remove a *populated* ``Filter_Instances_Reference`` from a filter
+    condition, in place.
 
     A filter condition's fixed comparison value is a reference to a specific
     business object instance in the *source* tenant — a particular Cost
@@ -228,12 +229,25 @@ def _strip_filter_instance_references(obj: object) -> None:
     the reference is safe in the direction that matters: worst case the
     migrated report's filter has no default value and someone sets one in
     Workday afterward, versus the whole report being blocked outright.
-    ``Ignore_When_No_Target_Value`` is stripped alongside it since it has
-    nothing left to apply to.
+    ``Ignore_When_No_Target_Value`` is stripped alongside it, but only when a
+    reference actually got removed — it has "nothing left to apply to" only
+    in that case.
+
+    **Every** ``Condition_Item_Data`` carries the ``Filter_Instances_Reference``
+    key per the WSDL, populated or not — a prompt-driven condition with no
+    fixed instance value has it present as ``[]``. The first version of this
+    function checked key *presence*, not non-emptiness, so it stripped
+    ``Ignore_When_No_Target_Value`` off every prompt-driven condition too —
+    found live 2026-08-17 comparing a migrated report's filter against its
+    source: "Prompt the user for the value and ignore the filter condition if
+    the value is blank" silently became "Prompt the user for the value" on
+    every such condition, in every report this tool had migrated. The flag
+    has real, independent meaning when there is no fixed instance to strip —
+    it governs what happens when the *prompted* value is left blank — so it
+    must survive except when it was genuinely a fixed instance's flag.
     """
     if isinstance(obj, dict):
-        if "Filter_Instances_Reference" in obj:
-            obj.pop("Filter_Instances_Reference", None)
+        if obj.pop("Filter_Instances_Reference", None):
             obj.pop("Ignore_When_No_Target_Value", None)
         for value in obj.values():
             _strip_filter_instance_references(value)

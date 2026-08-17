@@ -119,6 +119,36 @@ def report_payload_with_filter_instance(wid, name="Report", instance_wid="SRC_IN
     }
 
 
+def report_payload_with_prompt_only_filter(wid, name="Report"):
+    """A prompt-driven condition with no fixed instance value — the shape
+    that exposed the 2026-08-17 bug: Filter_Instances_Reference present but
+    empty, Ignore_When_No_Target_Value carrying real meaning of its own."""
+    return {
+        "Tenanted_Report_Definition_Reference": {
+            "ID": [
+                {"type": "WID", "_value_1": wid},
+                {"type": "Custom_Report_ID", "_value_1": name},
+            ]
+        },
+        "Tenanted_Report_Definition_Data": {
+            "Name": name,
+            "Tenanted_Report_Definition_Top_Level_Filter_Data": {
+                "Tenanted_Report_Filter_Data": {
+                    "Condition_Item_Data": [
+                        {
+                            "Relational_Operator_Reference_Data": {
+                                "ID": [{"type": "WID", "_value_1": "OP_EQUALS"}]
+                            },
+                            "Filter_Instances_Reference": [],
+                            "Ignore_When_No_Target_Value": True,
+                        }
+                    ]
+                }
+            },
+        },
+    }
+
+
 def report_payload(wid, name="Report", refs=(), owner="source_user"):
     return {
         "Tenanted_Report_Definition_Reference": {
@@ -581,7 +611,12 @@ class TestFilterInstanceStripping:
     instance in the source tenant — tenant-specific data this tool has no
     way to verify or create. Confirmed live 2026-08-03 that Workday rejects
     an unresolvable one outright and that Ignore_When_No_Target_Value does
-    not suppress that validation, so both are stripped unconditionally."""
+    not suppress that validation, so both are stripped together — but only
+    when there was an actual instance reference to strip. A prompt-driven
+    condition with no fixed instance (Filter_Instances_Reference present but
+    empty) must keep its own Ignore_When_No_Target_Value untouched — see
+    _strip_filter_instance_references's docstring for the 2026-08-17 bug this
+    guards against."""
 
     def _report_node(self, instance_wid="SRC_INSTANCE"):
         closure, _ = plan_for(
@@ -623,6 +658,23 @@ class TestFilterInstanceStripping:
         assert "Tenanted_Report_Definition_Top_Level_Filter_Data" not in payload[
             "Tenanted_Report_Definition_Data"
         ]
+
+    def test_ignore_when_no_target_value_survives_an_empty_instance_list(self):
+        """The 2026-08-17 regression: a prompt-driven condition with no fixed
+        instance value (Filter_Instances_Reference == []) must keep its own
+        Ignore_When_No_Target_Value — it was never a leftover of a stripped
+        reference, it's the condition's own "don't require the prompt" flag."""
+        closure, _ = plan_for(
+            reports={"r1": report_payload_with_prompt_only_filter("r1")}
+        )
+        payload = build_report_payload(
+            closure.nodes["report:r1"], {}, action=Action.CREATE
+        )
+        condition = payload["Tenanted_Report_Definition_Data"][
+            "Tenanted_Report_Definition_Top_Level_Filter_Data"
+        ]["Tenanted_Report_Filter_Data"]["Condition_Item_Data"][0]
+        assert condition["Ignore_When_No_Target_Value"] is True
+        assert "Filter_Instances_Reference" not in condition
 
 
 class TestSkippedObjects:
