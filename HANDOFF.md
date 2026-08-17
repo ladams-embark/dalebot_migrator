@@ -140,11 +140,25 @@ connection closed outright. Back off and retry.
    assistant can do. Everything added in sessions 9 and 10 — the dashboard
    picker, the selection banking fix, and five new object kinds — is covered by
    `AppTest` only.
-2. **The UI does not expose the new engine features.** `iter_check_existence`
-   now takes `match_index` and `measure_match_index`, `resolve` takes four new
-   indexes, and none of that is wired into `ui/steps/`. A wizard run today would
-   duplicate every shared calculated field, exactly as the scripts did before
-   the fix. **This is the biggest gap in the project.**
+2. ~~**The UI does not expose the new engine features.**~~ **Closed
+   2026-08-16.** It cost a real failed wizard run first: the three dashboards
+   halted on object 1 of the closure, `Is Top Performer`, with "Enter a unique
+   WQL alias for the business object" — the destination already had the field
+   under `Custom Object Data - Is Top Performer`, and with no `match_index` the
+   probe could not see it. `ui/steps/` is now at parity with
+   `scripts/migrate_dashboards_example.py`:
+   - Conflicts sweeps the destination (calculated fields + calculated measures)
+     and passes `match_index`/`measure_match_index` to `iter_check_existence`.
+     The probe button is disabled and `gate()` blocks until both exist, so the
+     unmatched probe is not reachable. Execute's re-probe uses the same
+     indexes, via `ui/indexes.destination_match_indexes` so the two cannot
+     drift apart.
+   - Select builds the prompt field, gauge range and analytic indicator
+     indexes, and Resolve passes them to `resolve`. These were the quiet ones:
+     `resolve_closure` does not extract that class of reference at all when the
+     index is None, so the dependency never entered the closure and the gap
+     surfaced as a live write failure rather than a blocker.
+   Still **not driven end to end by hand** — see item 1.
 3. **`validation/verify.py` is still a stub.** Every read-back this project has
    done was hand-written in a throwaway script — including the one that caught
    the empty dashboards.

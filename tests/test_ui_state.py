@@ -17,12 +17,23 @@ import pytest
 pytest.importorskip("streamlit")
 
 from wdmigrator import api
-from wdmigrator.ui import state as ui_state
+from wdmigrator.ui import indexes, state as ui_state
 from wdmigrator.ui.runner import JobState
 from wdmigrator.ui.steps import confirm, conflicts, connect, execute, resolve, select
 
 SOURCE = api.target_from_parts("impl-services1.wd12.myworkday.com", "source_tenant")
 DEST = api.target_from_parts("impl-services1.wd12.myworkday.com", "dest_tenant")
+
+
+def _index(kind: str) -> api.Index:
+    return api.Index(kind=kind, tenant="t", fetched_at=time.time())
+
+
+def _matching_ready(state: ui_state.WizardState) -> ui_state.WizardState:
+    """Give the wizard the two destination sweeps cross-tenant matching needs."""
+    state.dest_cf_index = _index("calculated_field")
+    state.dest_measure_index = _index("calculated_measure")
+    return state
 
 
 def _verified_side(target: api.TenantTarget, username: str = "u") -> ui_state.ConnectionState:
@@ -75,11 +86,61 @@ class TestSelectStepGate:
         for them do not filter — so the index is the only route, and a dashboard
         that binds one would otherwise resolve as if it had no prompts."""
         state = ui_state.WizardState()
-        state.cf_index = api.Index(kind="calculated_field", tenant="t", fetched_at=time.time())
+        state.cf_index = _index("calculated_field")
         state.selected_dashboards = {"DB1": {}}
         assert any("Prompt set index" in b.title for b in select.gate(state))
 
-        state.prompt_set_index = api.Index(kind="prompt_set", tenant="t", fetched_at=time.time())
+        state.prompt_set_index = _index("prompt_set")
+        state.prompt_field_index = _index("prompt_field")
+        state.gauge_range_index = _index("gauge_range")
+        state.analytic_indicator_index = _index("analytic_indicator")
+        assert select.gate(state) == []
+
+    def test_a_dashboard_selection_requires_the_prompt_field_index(self):
+        """A prompt set names its parameters as prompt fields, and `resolve`
+        does not even look for that kind of reference when the index is absent
+        — the dependency never enters the closure, so the gap surfaces as a
+        live write failure rather than here."""
+        state = ui_state.WizardState()
+        state.cf_index = _index("calculated_field")
+        state.prompt_set_index = _index("prompt_set")
+        state.gauge_range_index = _index("gauge_range")
+        state.analytic_indicator_index = _index("analytic_indicator")
+        state.selected_dashboards = {"DB1": {}}
+        assert any("Prompt field index" in b.title for b in select.gate(state))
+
+        state.prompt_field_index = _index("prompt_field")
+        assert select.gate(state) == []
+
+    @pytest.mark.parametrize(
+        "attr, kind, title",
+        [
+            ("gauge_range_index", "gauge_range", "Gauge range index"),
+            ("analytic_indicator_index", "analytic_indicator", "Analytic indicator index"),
+        ],
+    )
+    def test_a_report_selection_requires_the_report_dependency_indexes(
+        self, attr, kind, title
+    ):
+        """Both are report dependencies — a gauge layout names a gauge range, a
+        matrix measure names an analytic indicator — and both are silently
+        skipped by `resolve` when the index is None."""
+        state = ui_state.WizardState()
+        state.cf_index = _index("calculated_field")
+        state.gauge_range_index = _index("gauge_range")
+        state.analytic_indicator_index = _index("analytic_indicator")
+        state.selected_reports = {"R1": {}}
+        assert select.gate(state) == []
+
+        setattr(state, attr, None)
+        assert any(title in b.title for b in select.gate(state))
+
+    def test_a_calculated_field_only_selection_needs_none_of_the_report_indexes(self):
+        """Nothing here depends on a gauge range or an indicator, so demanding
+        those sweeps would be two pointless tenant calls."""
+        state = ui_state.WizardState()
+        state.cf_index = _index("calculated_field")
+        state.selected_field_wids = {"W1"}
         assert select.gate(state) == []
 
 
@@ -100,12 +161,93 @@ class TestResolveStepGate:
 
 class TestConflictsStepGate:
     def test_blocks_without_a_plan(self):
-        assert conflicts.gate(ui_state.WizardState())
+        assert conflicts.gate(_matching_ready(ui_state.WizardState()))
 
     def test_delegates_to_validate_plan(self):
-        state = ui_state.WizardState()
+        state = _matching_ready(ui_state.WizardState())
         state.plan = api.MigrationPlan()
         assert conflicts.gate(state) == api.validate_plan(state.plan)
+
+    @pytest.mark.parametrize(
+        "attr", ["dest_cf_index", "dest_measure_index"]
+    )
+    def test_blocks_until_the_destination_has_been_swept(self, attr):
+        """`Calculated_Field_ID` and `BI_Calculated_Measure_ID` are not
+        cross-tenant identities. Probing without a destination sweep reports
+        every object whose ID differs as absent, plans a CREATE, and the write
+        is then rejected as a duplicate alias — which is exactly how a wizard
+        run failed on `Is Top Performer`."""
+        state = _matching_ready(ui_state.WizardState())
+        state.plan = api.MigrationPlan()
+        setattr(state, attr, None)
+
+        blockers = conflicts.gate(state)
+        assert any("cross-tenant matching" in b.title for b in blockers)
+
+    def test_the_matching_blocker_outranks_the_not_probed_one(self):
+        """Order matters for the remedy shown: telling the user to click
+        'Check existence' when the button is disabled is a dead end."""
+        state = ui_state.WizardState()
+        assert conflicts.gate(state)[0].title.startswith("Destination not swept")
+
+
+class TestCrossTenantMatchingReachesTheProbe:
+    """The wizard must probe the destination the same way the scripts do.
+
+    This is the gap that produced a real failed migration: `iter_check_existence`
+    grew `match_index`/`measure_match_index` and the UI kept calling it without
+    them, so every calculated field whose `Calculated_Field_ID` differs between
+    the tenants — the same field is
+    `CRTMNU01_Commit - HR Dashboard_03_Is Top Performer` on one and
+    `Custom Object Data - Is Top Performer` on another — probed NOT_FOUND,
+    planned as CREATE, and was rejected on write with "Enter a unique WQL alias
+    for the business object". The run halted on the first one.
+
+    Both call sites are pinned. A re-probe without the indexes is the worse of
+    the two: it would revert matches the first probe got right, so answering one
+    reference question would arm a run that duplicates everything.
+    """
+
+    def _state(self) -> ui_state.WizardState:
+        state = _matching_ready(ui_state.WizardState())
+        state.closure = api.Closure()
+        state.plan = api.MigrationPlan()
+        state.dest = _verified_side(DEST)
+        return state
+
+    def _captured_kwargs(self, monkeypatch, module, start) -> dict:
+        seen: dict = {}
+
+        def fake(connection, closure, **kwargs):
+            seen.update(kwargs)
+            return iter(())
+
+        monkeypatch.setattr(module, "iter_check_existence", fake)
+        start(self._state())
+        return seen
+
+    def test_the_conflicts_probe_is_given_both_match_indexes(self, monkeypatch):
+        seen = self._captured_kwargs(monkeypatch, conflicts, conflicts._start_probe)
+        assert seen["match_index"] is not None
+        assert seen["measure_match_index"] is not None
+
+    def test_the_execute_reprobe_is_given_both_match_indexes(self, monkeypatch):
+        seen = self._captured_kwargs(monkeypatch, execute, execute._start_reprobe)
+        assert seen["match_index"] is not None
+        assert seen["measure_match_index"] is not None
+
+    def test_matching_is_off_only_when_the_destination_was_never_swept(self):
+        """`destination_match_indexes` returning {} is what the gate exists to
+        prevent, not a supported mode — so it must be reachable *only* from the
+        unswept state, never from a half-built one."""
+        state = _matching_ready(ui_state.WizardState())
+        assert indexes.destination_match_indexes(state).keys() == {
+            "match_index", "measure_match_index"
+        }
+
+        state.dest_measure_index = None
+        assert indexes.destination_match_indexes(state) == {}
+        assert not indexes.destination_matching_ready(state)
 
 
 class TestConfirmStepGate:
@@ -260,6 +402,27 @@ class TestResetDownstream:
         assert state.prompt_set_index is None
         assert state.selected_dashboards == {}
         assert state.implementer_required is False
+
+    def test_credential_scoped_reset_wipes_the_destination_sweeps(self):
+        """A destination index swept against a *different* destination would
+        vouch for objects this tenant has never had, and every one of those is
+        an object the plan would then skip instead of creating."""
+        state = _matching_ready(ui_state.WizardState())
+
+        ui_state.reset_downstream(state, from_step="select")
+
+        assert state.dest_cf_index is None
+        assert state.dest_measure_index is None
+
+    def test_resolve_scoped_reset_keeps_the_destination_sweeps(self):
+        """They are scoped to the connection, not the plan — re-resolving after
+        an override should not cost a second 25-second destination sweep."""
+        state = _matching_ready(ui_state.WizardState())
+
+        ui_state.reset_downstream(state, from_step="resolve")
+
+        assert state.dest_cf_index is not None
+        assert state.dest_measure_index is not None
 
     def test_resolve_scoped_reset_keeps_selections_and_indexes(self):
         """Re-resolving after an override shouldn't force rebuilding a

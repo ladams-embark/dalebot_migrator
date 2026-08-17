@@ -16,20 +16,18 @@ from wdmigrator.api import (
     IMPLEMENTER_REQUIRED_REMEDY,
     Blocker,
     LookupOutcome,
-    cache_path,
+    iter_analytic_indicator_index,
     iter_calculated_field_index,
     iter_dashboard_index,
+    iter_gauge_range_index,
+    iter_prompt_field_index,
     iter_prompt_set_index,
     iter_report_index,
-    load_index,
     lookup_report,
     lookup_report_by_name,
-    requires_implementer,
-    save_index,
 )
 from wdmigrator.ui import theme
-from wdmigrator.ui.components import render_job_progress
-from wdmigrator.ui.runner import pump, start_job
+from wdmigrator.ui.indexes import load_or_prompt_index
 from wdmigrator.ui.state import WizardState
 
 STEP_ID = "select"
@@ -41,18 +39,6 @@ STEP_ID = "select"
 _CF_MAX_RESULTS = 500
 _REPORT_MAX_ROWS = 5000
 
-#: Measured live against commitconsulting_dpt1 (~9,650 fields / ~5,150 reports
-#: at Count=999). Shown up front so a first-time user knows which button is
-#: the 25-second one and which is the two-and-a-half-minute one before
-#: clicking, not after.
-_BUILD_ESTIMATE = {
-    "calculated_field": "about 25 seconds",
-    "report": "about 2.5 minutes",
-    # Both single-page on the test tenant (179 dashboards, 57 prompt sets).
-    "dashboard": "a few seconds",
-    "prompt_set": "a few seconds",
-}
-
 #: What the user picks first. Dashboards are listed last deliberately — they sit
 #: at the end of the dependency chain, and they are the only kind with an
 #: account-level prerequisite.
@@ -61,99 +47,6 @@ _OBJECT_KINDS = {
     "calculated_fields": "Calculated fields",
     "dashboards": "Custom dashboards",
 }
-
-
-def _age_label(seconds: float) -> str:
-    """Human-readable cache age.
-
-    Worth surfacing rather than hiding: a calculated field promoted from
-    report-scoped to global in the Workday UI stays invisible to a sweep for
-    several minutes afterward (confirmed live — see CLAUDE.md). When a
-    dependency unexpectedly won't resolve, "this index is 3 days old" is the
-    first thing worth knowing.
-    """
-    minutes = seconds / 60
-    if minutes < 1:
-        return "just now"
-    if minutes < 60:
-        return f"{int(minutes)} min ago"
-    hours = minutes / 60
-    if hours < 24:
-        return f"{int(hours)}h ago"
-    return f"{int(hours / 24)}d ago"
-
-
-def _load_or_prompt_index(state, *, kind, iterator_fn, job_attr, index_attr, label, connection):
-    index = getattr(state, index_attr)
-    job = getattr(state, job_attr)
-
-    if index is None and job is None:
-        cached = load_index(cache_path(connection, kind), tenant=connection.target.tenant)
-        if cached is not None:
-            setattr(state, index_attr, cached)
-            index = cached
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if job is not None:
-            status = "building…"
-        elif index is None:
-            status = f"not built — takes {_BUILD_ESTIMATE[kind]}"
-        else:
-            status = f"{len(index):,} items, cached {_age_label(index.age_seconds())}"
-        st.write(f"**{label} index**: {status}")
-    with col2:
-        if job is not None:
-            # The report sweep runs about two and a half minutes. Without this
-            # the only way out is a browser refresh, which loses the session.
-            if st.button("Cancel", key=f"cancel_{kind}", use_container_width=True):
-                job.cancel()
-                st.rerun()
-        else:
-            button_label = "Rebuild" if index is not None else "Build"
-            if st.button(f"{button_label} {label.lower()} index", key=f"build_{kind}",
-                         use_container_width=True):
-                setattr(state, job_attr, start_job(iterator_fn(connection)))
-                setattr(state, index_attr, None)
-                st.rerun()
-
-    job = getattr(state, job_attr)
-    if job is not None:
-        pump(job, time_budget=0.8)
-        last = job.last_event
-        fraction = last.fraction if last is not None else 0.0
-        render_job_progress(job, label=f"{label} index", fraction=fraction)
-        if job.error is not None:
-            setattr(state, job_attr, None)
-            # A dashboard or prompt-set sweep failing this way is not a bug and
-            # not a transient error — it means the connected account is not an
-            # implementer. Recorded once so the picker can explain it, rather
-            # than surfacing a raw SOAP fault the user cannot act on.
-            if requires_implementer(str(job.error)):
-                state.implementer_required = True
-            st.rerun()
-        elif job.cancelled:
-            # A partial sweep is real data but it is not the whole tenant, and
-            # resolve_closure refuses a partial index for exactly that reason.
-            # Discard it rather than cache a half-tenant index to disk.
-            setattr(state, job_attr, None)
-            theme.banner(
-                "warning",
-                f"{label} index build cancelled",
-                "The partial sweep was discarded — a half-built index would make "
-                "dependency resolution look complete when it isn't.",
-            )
-        elif job.done:
-            built = job.events[-1].index if job.events else None
-            setattr(state, index_attr, built)
-            setattr(state, job_attr, None)
-            if built is not None:
-                save_index(built, cache_path(connection, kind))
-            st.rerun()
-        else:
-            st.rerun()
-
-    return getattr(state, index_attr)
 
 
 def _render_calculated_fields(state: WizardState) -> None:
@@ -435,7 +328,7 @@ def render(state: WizardState) -> None:
     # dependencies needs the complete index even when the user selected only a
     # report or a dashboard — every WID they reference is classified against it,
     # and a partial one silently under-resolves.
-    _load_or_prompt_index(
+    load_or_prompt_index(
         state,
         kind="calculated_field",
         iterator_fn=iter_calculated_field_index,
@@ -444,8 +337,34 @@ def render(state: WizardState) -> None:
         label="Calculated field",
         connection=connection,
     )
+    if "reports" in chosen or "dashboards" in chosen:
+        # Neither of these is a pickable object kind — both are only ever
+        # reached as a dependency of a report (a gauge layout names a gauge
+        # range; a matrix measure names an analytic indicator). They are built
+        # here because `resolve_closure` skips that whole class of reference
+        # when the index is absent, so a missing one does not error, it just
+        # quietly drops the dependency and the write fails against the live
+        # tenant instead. One page each.
+        load_or_prompt_index(
+            state,
+            kind="gauge_range",
+            iterator_fn=iter_gauge_range_index,
+            job_attr="gauge_range_index_job",
+            index_attr="gauge_range_index",
+            label="Gauge range",
+            connection=connection,
+        )
+        load_or_prompt_index(
+            state,
+            kind="analytic_indicator",
+            iterator_fn=iter_analytic_indicator_index,
+            job_attr="analytic_indicator_index_job",
+            index_attr="analytic_indicator_index",
+            label="Analytic indicator",
+            connection=connection,
+        )
     if "reports" in chosen:
-        _load_or_prompt_index(
+        load_or_prompt_index(
             state,
             kind="report",
             iterator_fn=iter_report_index,
@@ -455,7 +374,7 @@ def render(state: WizardState) -> None:
             connection=connection,
         )
     if "dashboards" in chosen:
-        _load_or_prompt_index(
+        load_or_prompt_index(
             state,
             kind="dashboard",
             iterator_fn=iter_dashboard_index,
@@ -463,10 +382,11 @@ def render(state: WizardState) -> None:
             index_attr="dashboard_index",
             label="Dashboard",
             connection=connection,
+            implementer_gated=True,
         )
         # Prompt sets are only ever reached as a dashboard dependency, so their
         # index is built alongside rather than offered as its own choice.
-        _load_or_prompt_index(
+        load_or_prompt_index(
             state,
             kind="prompt_set",
             iterator_fn=iter_prompt_set_index,
@@ -474,6 +394,20 @@ def render(state: WizardState) -> None:
             index_attr="prompt_set_index",
             label="Prompt set",
             connection=connection,
+            implementer_gated=True,
+        )
+        # And a prompt set's own members point at prompt fields, which have to
+        # exist in the destination before the prompt set can be written. Same
+        # implementer gate as the two above.
+        load_or_prompt_index(
+            state,
+            kind="prompt_field",
+            iterator_fn=iter_prompt_field_index,
+            job_attr="prompt_field_index_job",
+            index_attr="prompt_field_index",
+            label="Prompt field",
+            connection=connection,
+            implementer_gated=True,
         )
 
     st.divider()
@@ -523,6 +457,54 @@ def gate(state: WizardState) -> list[Blocker]:
                 remedy="Build the prompt set index above (a few seconds).",
             )
         )
+    if state.selected_dashboards and state.prompt_field_index is None:
+        blockers.append(
+            Blocker(
+                node_id=None,
+                title="Prompt field index not built",
+                detail=(
+                    "A prompt set names its parameters as prompt fields, and a prompt "
+                    "set cannot be written until they exist in the destination. "
+                    "Without the index, resolution does not look for them at all — "
+                    "the dependency never enters the closure and the prompt set "
+                    "fails against the live tenant instead of here."
+                ),
+                remedy="Build the prompt field index above (a few seconds).",
+            )
+        )
+    # Both are dependencies of *reports*, and a dashboard drags its worklet
+    # reports in, so either selection needs them.
+    if state.selected_reports or state.selected_dashboards:
+        for index, title, detail in (
+            (
+                state.gauge_range_index,
+                "Gauge range index not built",
+                "A report with a gauge layout names a gauge range, which has to "
+                "exist in the destination first.",
+            ),
+            (
+                state.analytic_indicator_index,
+                "Analytic indicator index not built",
+                "A matrix measure names an analytic indicator. Most need no "
+                "migration — indicator WIDs are shared across tenants — but "
+                "without the index the writer also cannot tell which ones are "
+                "dangling on the source and must be stripped.",
+            ),
+        ):
+            if index is None:
+                blockers.append(
+                    Blocker(
+                        node_id=None,
+                        title=title,
+                        detail=(
+                            detail
+                            + " Resolution skips this whole class of reference when "
+                            "the index is absent, so the gap surfaces as a live "
+                            "write failure rather than a blocker here."
+                        ),
+                        remedy="Build it above (a few seconds).",
+                    )
+                )
     if state.cf_index is None:
         blockers.append(
             Blocker(

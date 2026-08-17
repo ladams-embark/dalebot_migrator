@@ -7,6 +7,17 @@ either — only CREATE (missing) or SKIP (exists, or existence is UNKNOWN). An
 UNKNOWN existence result must never be treated as "missing": that's exactly
 the case that would create a duplicate of something that's actually already
 there, and it hard-blocks via ``validate_plan``.
+
+**The probe is not allowed to run without cross-tenant matching.** A targeted
+lookup by ``Calculated_Field_ID`` answers "does the destination hold a field
+that was created the same way this one was", which is a different question
+from "does the destination already have this field" — the same field is
+``CRTMNU01_Commit - HR Dashboard_03_Is Top Performer`` on one tenant and
+``Custom Object Data - Is Top Performer`` on another. Answering the first
+question and acting on it plans a CREATE for a field that is already there;
+Workday then rejects the write with "Enter a unique WQL alias for the business
+object" and the run halts on the first one. Recovering the real answer needs a
+sweep of the destination, which is why this step now sweeps before it probes.
 """
 
 from __future__ import annotations
@@ -14,9 +25,22 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from wdmigrator.api import Action, Blocker, build_plan, iter_check_existence, validate_plan
+from wdmigrator.api import (
+    Action,
+    Blocker,
+    build_plan,
+    iter_calculated_field_index,
+    iter_calculated_measure_index,
+    iter_check_existence,
+    validate_plan,
+)
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_blockers, render_job_progress
+from wdmigrator.ui.indexes import (
+    destination_match_indexes,
+    destination_matching_ready,
+    load_or_prompt_index,
+)
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import WizardState, reset_downstream
 
@@ -24,9 +48,72 @@ STEP_ID = "conflicts"
 
 
 def _start_probe(state: WizardState) -> None:
-    state.existence_job = start_job(iter_check_existence(state.dest.connection, state.closure))
+    state.existence_job = start_job(
+        iter_check_existence(
+            state.dest.connection,
+            state.closure,
+            **destination_match_indexes(state),
+        )
+    )
     state.plan = None
     reset_downstream(state, from_step="confirm")
+
+
+def _render_destination_indexes(state: WizardState) -> None:
+    """The two destination sweeps that make cross-tenant matching possible.
+
+    Both are destination reads, not writes. The calculated-field sweep is the
+    expensive one (~25s, ~9,700 fields) and is cached to disk per tenant like
+    the source sweeps; the measure sweep is a single page.
+    """
+    theme.section(
+        "Destination matching",
+        "Business IDs are not identities across independently-built tenants, so "
+        "matching an object by ID alone reports fields the destination already "
+        "has as missing. These two sweeps let the probe recognise them by name, "
+        "class and business object instead, and reuse them rather than creating "
+        "duplicates that cannot be deleted.",
+        eyebrow="Required before probing",
+    )
+    load_or_prompt_index(
+        state,
+        kind="calculated_field",
+        iterator_fn=iter_calculated_field_index,
+        job_attr="dest_cf_index_job",
+        index_attr="dest_cf_index",
+        label="Destination calculated field",
+        connection=state.dest.connection,
+    )
+    # A measure's BI_Calculated_Measure_ID is Workday-generated with a
+    # tenant-local sequence number, so two tenants can never agree on one —
+    # which makes this index the *only* thing standing between a shared measure
+    # and a duplicate. It is one page, so rebuilding it is nearly free; the
+    # caption below says when that is worth doing.
+    load_or_prompt_index(
+        state,
+        kind="calculated_measure",
+        iterator_fn=iter_calculated_measure_index,
+        job_attr="dest_measure_index_job",
+        index_attr="dest_measure_index",
+        label="Destination calculated measure",
+        connection=state.dest.connection,
+    )
+    if not destination_matching_ready(state):
+        theme.banner(
+            "warning",
+            "Destination sweeps not built",
+            "The existence check stays disabled until both are present. Probing "
+            "without them plans a CREATE for every object whose business ID "
+            "happens to differ between the two tenants, and this service has no "
+            "delete operation to undo one.",
+            remedy="Build both indexes above.",
+        )
+    else:
+        st.caption(
+            "Stale is worse than absent here: the destination refreshes without "
+            "warning, and an index swept before a refresh will vouch for objects "
+            "that are no longer there. Rebuild if either is more than a session old."
+        )
 
 
 def _pump_probe(state: WizardState) -> None:
@@ -101,8 +188,16 @@ def render(state: WizardState) -> None:
         theme.banner("danger", "No resolved closure", remedy="Go back to Resolve.")
         return
 
+    if state.existence_job is None:
+        _render_destination_indexes(state)
+        st.divider()
+
     if state.existence_job is None and state.plan is None:
-        if st.button(f"Check existence for {len(state.closure)} objects", key="conflicts_start"):
+        if st.button(
+            f"Check existence for {len(state.closure)} objects",
+            key="conflicts_start",
+            disabled=not destination_matching_ready(state),
+        ):
             _start_probe(state)
             st.rerun()
         return
@@ -113,10 +208,38 @@ def render(state: WizardState) -> None:
 
     counts = state.plan.counts()
     unknown = state.plan.unknown_nodes()
+    # A cross-tenant match is a weaker claim than an ID match — it says "this
+    # looks like the same field" — so the count is shown rather than left
+    # implicit. Every one of these is an object that would otherwise have been
+    # duplicated.
+    matched = [e for e in state.plan.existence.values() if e.matched_by]
     theme.figures(
-        [(k.capitalize(), v) for k, v in counts.items()] + [("Unknown", len(unknown))],
+        [(k.capitalize(), v) for k, v in counts.items()]
+        + [("Unknown", len(unknown)), ("Matched cross-tenant", len(matched))],
         tones={"Create": "write", "Unknown": "danger" if unknown else "muted"},
     )
+    if matched:
+        with st.expander(
+            f"{len(matched)} object(s) matched on shape, not on business ID"
+        ):
+            st.caption(
+                "These exist in the destination under a different ID, so they will "
+                "be reused and their dependents rewritten to point at them."
+            )
+            by_id = {n.node_id: n for n in state.plan.ordered_nodes}
+            st.dataframe(
+                [
+                    {
+                        "name": (by_id[e.node_id].name if e.node_id in by_id else None)
+                        or e.node_id,
+                        "matched by": e.matched_by,
+                        "dest_wid": e.dest_wid,
+                    }
+                    for e in matched
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
     if unknown:
         theme.banner(
             "danger",
@@ -139,6 +262,23 @@ def render(state: WizardState) -> None:
 
 
 def gate(state: WizardState) -> list[Blocker]:
+    if not destination_matching_ready(state):
+        # Belt and braces with the disabled button: this is the check that
+        # holds if the plan was carried in from anywhere else, and it is the
+        # difference between reusing a shared object and duplicating it.
+        return [
+            Blocker(
+                node_id=None,
+                title="Destination not swept for cross-tenant matching",
+                detail=(
+                    "Business IDs do not identify an object across tenants. Without "
+                    "the destination calculated-field and calculated-measure "
+                    "indexes, every object whose ID differs is reported absent and "
+                    "planned as a CREATE."
+                ),
+                remedy="Build both destination indexes above, then re-check existence.",
+            )
+        ]
     if state.plan is None:
         return [
             Blocker(
