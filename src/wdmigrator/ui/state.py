@@ -82,33 +82,28 @@ class WizardState:
     source: ConnectionState = field(default_factory=ConnectionState)
     dest: ConnectionState = field(default_factory=ConnectionState)
 
+    # SOURCE indexes. Everything Select needs to browse pickers and to resolve
+    # dependencies. Dashboards, prompt sets, and prompt fields require an
+    # implementer account — a normal ISU gets "The task submitted is not
+    # authorized" — so they're separate from the always-needed calculated-field
+    # sweep and are skipped rather than blocking the whole build.
+    #
+    # A prompt set's members name prompt fields; a report's gauge layout names
+    # a gauge range; a matrix measure names an analytic indicator. All three
+    # are single pages, and all three are read by `resolve` rather than by a
+    # picker — with any of them absent, `resolve_closure` does not even *look*
+    # for that kind of reference, so the dependency silently never enters the
+    # closure and the write fails live.
     cf_index: Optional[Index] = None
-    cf_index_job: Optional[JobState] = None
     report_index: Optional[Index] = None
-    report_index_job: Optional[JobState] = None
-    # Dashboards and prompt sets both require an implementer account to read at
-    # all — a normal ISU gets "The task submitted is not authorized" from every
-    # dashboard operation regardless of domain grants. Kept as separate indexes
-    # rather than folded into the others because they are cheap (one page each)
-    # and because a user without an implementer account should still be able to
-    # migrate reports and calculated fields with no degraded experience.
     dashboard_index: Optional[Index] = None
-    dashboard_index_job: Optional[JobState] = None
     prompt_set_index: Optional[Index] = None
-    prompt_set_index_job: Optional[JobState] = None
-    # A prompt set's members name these; a report's gauge layout names a gauge
-    # range; a matrix measure names an analytic indicator. All three are single
-    # pages, and all three are read by `resolve` rather than by a picker — with
-    # any of them absent, `resolve_closure` does not even *look* for that kind
-    # of reference, so the dependency silently never enters the closure and the
-    # write fails live. Prompt fields share the dashboard implementer gate;
-    # gauge ranges and analytic indicators do not.
     prompt_field_index: Optional[Index] = None
-    prompt_field_index_job: Optional[JobState] = None
     gauge_range_index: Optional[Index] = None
-    gauge_range_index_job: Optional[JobState] = None
     analytic_indicator_index: Optional[Index] = None
-    analytic_indicator_index_job: Optional[JobState] = None
+    #: One job drains every source index sweep back-to-back — Build once,
+    #: everything comes in. See ``wdmigrator.ui.indexes.bulk_build_indexes``.
+    source_index_job: Optional[JobState] = None
     #: Set when a dashboard/prompt-set/prompt-field sweep failed with the
     #: implementer fault, so the Select step can explain it once rather than
     #: showing a raw error.
@@ -123,9 +118,8 @@ class WizardState:
     # object") and the run halts on the first one. Held on the wizard rather
     # than rebuilt per probe because the calculated-field sweep costs ~25s.
     dest_cf_index: Optional[Index] = None
-    dest_cf_index_job: Optional[JobState] = None
     dest_measure_index: Optional[Index] = None
-    dest_measure_index_job: Optional[JobState] = None
+    dest_index_job: Optional[JobState] = None
 
     # wid -> True for directly-selected calculated fields
     selected_field_wids: set = field(default_factory=set)
@@ -201,27 +195,20 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
 
     if idx <= STEP_ORDER.index("select"):
         state.cf_index = None
-        state.cf_index_job = None
         state.report_index = None
-        state.report_index_job = None
         state.dashboard_index = None
-        state.dashboard_index_job = None
         state.prompt_set_index = None
-        state.prompt_set_index_job = None
         state.prompt_field_index = None
-        state.prompt_field_index_job = None
         state.gauge_range_index = None
-        state.gauge_range_index_job = None
         state.analytic_indicator_index = None
-        state.analytic_indicator_index_job = None
+        state.source_index_job = None
         # Credential-scoped, like the source indexes above: this reset is what
         # runs when a connection changes, and a destination index swept against
         # a *different* destination would silently authorise skipping objects
         # that tenant has never had.
         state.dest_cf_index = None
-        state.dest_cf_index_job = None
         state.dest_measure_index = None
-        state.dest_measure_index_job = None
+        state.dest_index_job = None
         state.implementer_required = False
         state.selected_field_wids = set()
         state.selected_reports_added = {}

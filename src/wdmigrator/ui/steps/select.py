@@ -27,7 +27,7 @@ from wdmigrator.api import (
     lookup_report_by_name,
 )
 from wdmigrator.ui import theme
-from wdmigrator.ui.indexes import load_or_prompt_index
+from wdmigrator.ui.indexes import IndexSpec, bulk_build_indexes
 from wdmigrator.ui.state import WizardState
 
 STEP_ID = "select"
@@ -47,6 +47,88 @@ _OBJECT_KINDS = {
     "calculated_fields": "Calculated fields",
     "dashboards": "Custom dashboards",
 }
+
+
+def _source_specs(chosen: list[str], connection) -> list[IndexSpec]:
+    """Which source sweeps this selection needs, in the order they should run.
+
+    The calculated-field sweep is always first: resolving dependencies needs the
+    complete index no matter what the user picked from it, since every WID
+    encountered inside a report or dashboard is classified against it. Report-
+    dependency indexes (gauge range, analytic indicator) run next when there's
+    any report-shaped selection — reports directly, or dashboards that carry
+    them as worklets. The dashboard implementer-gated three come last so that
+    the cheap common-case sweeps are already in when a non-implementer account
+    hits the wall.
+    """
+    specs = [
+        IndexSpec(
+            kind="calculated_field",
+            label="Calculated field",
+            iterator_fn=iter_calculated_field_index,
+            connection=connection,
+            index_attr="cf_index",
+        )
+    ]
+    if "reports" in chosen or "dashboards" in chosen:
+        specs.append(
+            IndexSpec(
+                kind="gauge_range",
+                label="Gauge range",
+                iterator_fn=iter_gauge_range_index,
+                connection=connection,
+                index_attr="gauge_range_index",
+            )
+        )
+        specs.append(
+            IndexSpec(
+                kind="analytic_indicator",
+                label="Analytic indicator",
+                iterator_fn=iter_analytic_indicator_index,
+                connection=connection,
+                index_attr="analytic_indicator_index",
+            )
+        )
+    if "reports" in chosen:
+        specs.append(
+            IndexSpec(
+                kind="report",
+                label="Report",
+                iterator_fn=iter_report_index,
+                connection=connection,
+                index_attr="report_index",
+            )
+        )
+    if "dashboards" in chosen:
+        specs.extend(
+            [
+                IndexSpec(
+                    kind="dashboard",
+                    label="Dashboard",
+                    iterator_fn=iter_dashboard_index,
+                    connection=connection,
+                    index_attr="dashboard_index",
+                    implementer_gated=True,
+                ),
+                IndexSpec(
+                    kind="prompt_set",
+                    label="Prompt set",
+                    iterator_fn=iter_prompt_set_index,
+                    connection=connection,
+                    index_attr="prompt_set_index",
+                    implementer_gated=True,
+                ),
+                IndexSpec(
+                    kind="prompt_field",
+                    label="Prompt field",
+                    iterator_fn=iter_prompt_field_index,
+                    connection=connection,
+                    index_attr="prompt_field_index",
+                    implementer_gated=True,
+                ),
+            ]
+        )
+    return specs
 
 
 def _render_calculated_fields(state: WizardState) -> None:
@@ -324,91 +406,13 @@ def render(state: WizardState) -> None:
         key="object_kinds",
     )
 
-    # The calculated field index is built regardless of what is ticked. Resolving
-    # dependencies needs the complete index even when the user selected only a
-    # report or a dashboard — every WID they reference is classified against it,
-    # and a partial one silently under-resolves.
-    load_or_prompt_index(
+    specs = _source_specs(chosen, connection)
+    bulk_build_indexes(
         state,
-        kind="calculated_field",
-        iterator_fn=iter_calculated_field_index,
-        job_attr="cf_index_job",
-        index_attr="cf_index",
-        label="Calculated field",
-        connection=connection,
+        specs,
+        job_attr="source_index_job",
+        button_label="Build source indexes",
     )
-    if "reports" in chosen or "dashboards" in chosen:
-        # Neither of these is a pickable object kind — both are only ever
-        # reached as a dependency of a report (a gauge layout names a gauge
-        # range; a matrix measure names an analytic indicator). They are built
-        # here because `resolve_closure` skips that whole class of reference
-        # when the index is absent, so a missing one does not error, it just
-        # quietly drops the dependency and the write fails against the live
-        # tenant instead. One page each.
-        load_or_prompt_index(
-            state,
-            kind="gauge_range",
-            iterator_fn=iter_gauge_range_index,
-            job_attr="gauge_range_index_job",
-            index_attr="gauge_range_index",
-            label="Gauge range",
-            connection=connection,
-        )
-        load_or_prompt_index(
-            state,
-            kind="analytic_indicator",
-            iterator_fn=iter_analytic_indicator_index,
-            job_attr="analytic_indicator_index_job",
-            index_attr="analytic_indicator_index",
-            label="Analytic indicator",
-            connection=connection,
-        )
-    if "reports" in chosen:
-        load_or_prompt_index(
-            state,
-            kind="report",
-            iterator_fn=iter_report_index,
-            job_attr="report_index_job",
-            index_attr="report_index",
-            label="Report",
-            connection=connection,
-        )
-    if "dashboards" in chosen:
-        load_or_prompt_index(
-            state,
-            kind="dashboard",
-            iterator_fn=iter_dashboard_index,
-            job_attr="dashboard_index_job",
-            index_attr="dashboard_index",
-            label="Dashboard",
-            connection=connection,
-            implementer_gated=True,
-        )
-        # Prompt sets are only ever reached as a dashboard dependency, so their
-        # index is built alongside rather than offered as its own choice.
-        load_or_prompt_index(
-            state,
-            kind="prompt_set",
-            iterator_fn=iter_prompt_set_index,
-            job_attr="prompt_set_index_job",
-            index_attr="prompt_set_index",
-            label="Prompt set",
-            connection=connection,
-            implementer_gated=True,
-        )
-        # And a prompt set's own members point at prompt fields, which have to
-        # exist in the destination before the prompt set can be written. Same
-        # implementer gate as the two above.
-        load_or_prompt_index(
-            state,
-            kind="prompt_field",
-            iterator_fn=iter_prompt_field_index,
-            job_attr="prompt_field_index_job",
-            index_attr="prompt_field_index",
-            label="Prompt field",
-            connection=connection,
-            implementer_gated=True,
-        )
 
     st.divider()
     if "dashboards" in chosen:

@@ -1,4 +1,4 @@
-"""Sweeping tenant indexes inside the wizard, shared by Select and Conflicts.
+"""Bulk index sweeps inside the wizard, shared by Select and Conflicts.
 
 Two steps sweep tenants, for opposite reasons. **Select** builds the SOURCE
 indexes that dependency resolution reads. **Conflicts** builds the DESTINATION
@@ -9,16 +9,22 @@ share probes as absent, is planned as CREATE, and the write is then rejected by
 the destination's own uniqueness rule ("Enter a unique WQL alias for the
 business object").
 
-Both need the same machinery — load a cached index if there is one, otherwise
-sweep it through the chunked runner so the page stays responsive and
-cancellable — so it lives here rather than being written twice.
+Both build the same set of indexes the same way — pre-load anything already
+cached to disk, then run every remaining sweep back-to-back inside one job so
+the user clicks Build once and walks away. Individual per-index buttons and
+per-index job slots are gone; a single ``JobState`` per side is what remains.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Callable, Iterator
+
 import streamlit as st
 
 from wdmigrator.api import (
+    Connection,
+    IndexProgress,
     cache_path,
     calculated_field_match_index,
     calculated_measure_match_index,
@@ -31,14 +37,30 @@ from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.runner import pump, start_job
 
 #: Measured live against commitconsulting_dpt1 (~9,650 fields / ~5,150 reports
-#: at Count=999). Shown up front so a first-time user knows which button is
-#: the 25-second one and which is the two-and-a-half-minute one before
-#: clicking, not after. Everything not listed is a single page.
+#: at Count=999). Shown up front so a first-time user knows what they're
+#: waiting on before clicking, not after. Everything not listed is a single
+#: page.
 BUILD_ESTIMATE = {
     "calculated_field": "about 25 seconds",
     "report": "about 2.5 minutes",
 }
 _DEFAULT_ESTIMATE = "a few seconds"
+
+
+@dataclass(frozen=True)
+class IndexSpec:
+    """One index to sweep: what to call, where to stash the result."""
+
+    kind: str
+    label: str
+    iterator_fn: Callable[[Connection], Iterator[IndexProgress]]
+    connection: Connection
+    index_attr: str
+    #: Dashboard/prompt-set/prompt-field sweeps fail with a distinct "task not
+    #: authorized" fault on non-implementer accounts. When one gated stage
+    #: fails that way the bulk build marks the flag and skips the other gated
+    #: stages, rather than raising three identical errors in a row.
+    implementer_gated: bool = False
 
 
 def destination_matching_ready(state) -> bool:
@@ -87,94 +109,181 @@ def age_label(seconds: float) -> str:
     return f"{int(hours / 24)}d ago"
 
 
-def load_or_prompt_index(
-    state,
-    *,
-    kind,
-    iterator_fn,
-    job_attr,
-    index_attr,
-    label,
-    connection,
-    implementer_gated: bool = False,
-):
-    """Show one index's status, offer to build it, and pump a running build.
+@dataclass
+class _StageEvent:
+    """One tick from :func:`_chained_build`. Carries the current stage's
+    label and the underlying :class:`IndexProgress` so the UI can show one
+    combined bar."""
 
-    ``implementer_gated`` says this object kind cannot be read at all by a
-    plain ISU. Only those kinds may set ``state.implementer_required`` — a
-    calculated-field or report sweep failing is an ordinary error, and letting
-    it raise the implementer banner would explain the failure wrongly.
+    stage: int
+    total_stages: int
+    label: str
+    kind: str
+    fraction: float
+    progress: IndexProgress | None = None
+
+
+def _load_cached(state, specs: list[IndexSpec]) -> None:
+    """Populate any index attr whose disk cache is present. Free; no clicks."""
+    for spec in specs:
+        if getattr(state, spec.index_attr) is not None:
+            continue
+        cached = load_index(
+            cache_path(spec.connection, spec.kind),
+            tenant=spec.connection.target.tenant,
+        )
+        if cached is not None:
+            setattr(state, spec.index_attr, cached)
+
+
+def _chained_build(state, specs: list[IndexSpec]) -> Iterator[_StageEvent]:
+    """Sweep every spec back-to-back inside one generator.
+
+    Each finished index is stashed on ``state`` and saved to disk before the
+    next one starts, so a cancel mid-run leaves everything already built
+    intact. A gated stage that raises an implementer fault sets
+    ``state.implementer_required`` and moves on; the remaining gated stages in
+    this run are skipped rather than each raising the identical fault.
     """
-    index = getattr(state, index_attr)
+    total = len(specs)
+    for stage, spec in enumerate(specs, start=1):
+        if spec.implementer_gated and state.implementer_required:
+            continue
+        try:
+            for progress in spec.iterator_fn(spec.connection):
+                yield _StageEvent(
+                    stage=stage,
+                    total_stages=total,
+                    label=spec.label,
+                    kind=spec.kind,
+                    fraction=progress.fraction,
+                    progress=progress,
+                )
+                if progress.complete:
+                    setattr(state, spec.index_attr, progress.index)
+                    save_index(progress.index, cache_path(spec.connection, spec.kind))
+        except Exception as exc:  # noqa: BLE001 - classified; a real error re-raises
+            if spec.implementer_gated and requires_implementer(str(exc)):
+                state.implementer_required = True
+                yield _StageEvent(
+                    stage=stage,
+                    total_stages=total,
+                    label=spec.label,
+                    kind=spec.kind,
+                    fraction=1.0,
+                    progress=None,
+                )
+                continue
+            raise
+
+
+def _summarise(state, specs: list[IndexSpec]) -> None:
+    """One status line per index so the UI shows what's built, what's missing,
+    and — for a cached one — how old it is. These labels are what
+    ``test_ui_app_smoke.py`` grep for; keep them stable."""
+    for spec in specs:
+        index = getattr(state, spec.index_attr)
+        if index is not None:
+            status = f"{len(index):,} items, cached {age_label(index.age_seconds())}"
+        elif spec.implementer_gated and state.implementer_required:
+            status = "skipped — implementer account required"
+        else:
+            estimate = BUILD_ESTIMATE.get(spec.kind, _DEFAULT_ESTIMATE)
+            status = f"not built — takes {estimate}"
+        st.write(f"**{spec.label} index**: {status}")
+
+
+def _missing(state, specs: list[IndexSpec]) -> list[IndexSpec]:
+    return [
+        s
+        for s in specs
+        if getattr(state, s.index_attr) is None
+        and not (s.implementer_gated and state.implementer_required)
+    ]
+
+
+def bulk_build_indexes(
+    state,
+    specs: list[IndexSpec],
+    *,
+    job_attr: str,
+    button_label: str,
+) -> None:
+    """Render one status list + one Build button + one progress bar.
+
+    Any spec whose cache is on disk is filled in silently — no click needed.
+    The Build button only surfaces the sweeps left; a Rebuild button under it
+    handles the "destination refreshed, this cache is stale" case (confirmed
+    live — see CLAUDE.md). ``job_attr`` is a plain attribute name on ``state``
+    so Select and Conflicts can share this function while keeping independent
+    jobs.
+    """
+    _load_cached(state, specs)
+    _summarise(state, specs)
+
     job = getattr(state, job_attr)
 
-    if index is None and job is None:
-        cached = load_index(cache_path(connection, kind), tenant=connection.target.tenant)
-        if cached is not None:
-            setattr(state, index_attr, cached)
-            index = cached
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if job is not None:
-            status = "building…"
-        elif index is None:
-            estimate = BUILD_ESTIMATE.get(kind, _DEFAULT_ESTIMATE)
-            status = f"not built — takes {estimate}"
-        else:
-            status = f"{len(index):,} items, cached {age_label(index.age_seconds())}"
-        st.write(f"**{label} index**: {status}")
-    with col2:
-        if job is not None:
-            # The report sweep runs about two and a half minutes. Without this
-            # the only way out is a browser refresh, which loses the session.
-            if st.button("Cancel", key=f"cancel_{kind}_{index_attr}", use_container_width=True):
+    if job is not None:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            last = job.last_event
+            fraction = 0.0
+            label = button_label
+            if isinstance(last, _StageEvent):
+                stage_frac = (last.stage - 1 + max(0.0, min(1.0, last.fraction))) / last.total_stages
+                fraction = min(1.0, stage_frac)
+                label = f"{last.label} ({last.stage}/{last.total_stages})"
+            render_job_progress(job, label=label, fraction=fraction)
+        with col2:
+            if st.button("Cancel", key=f"{job_attr}_cancel", use_container_width=True):
                 job.cancel()
                 st.rerun()
-        else:
-            button_label = "Rebuild" if index is not None else "Build"
-            if st.button(f"{button_label} {label.lower()} index",
-                         key=f"build_{kind}_{index_attr}",
-                         use_container_width=True):
-                setattr(state, job_attr, start_job(iterator_fn(connection)))
-                setattr(state, index_attr, None)
-                st.rerun()
 
-    job = getattr(state, job_attr)
-    if job is not None:
         pump(job, time_budget=0.8)
-        last = job.last_event
-        fraction = last.fraction if last is not None else 0.0
-        render_job_progress(job, label=f"{label} index", fraction=fraction)
         if job.error is not None:
             setattr(state, job_attr, None)
-            # A dashboard, prompt-set or prompt-field sweep failing this way is
-            # not a bug and not a transient error — it means the connected
-            # account is not an implementer. Recorded once so the picker can
-            # explain it, rather than surfacing a raw SOAP fault the user
-            # cannot act on.
-            if implementer_gated and requires_implementer(str(job.error)):
-                state.implementer_required = True
             st.rerun()
         elif job.cancelled:
-            # A partial sweep is real data but it is not the whole tenant, and
-            # resolve_closure refuses a partial index for exactly that reason.
-            # Discard it rather than cache a half-tenant index to disk.
             setattr(state, job_attr, None)
             theme.banner(
                 "warning",
-                f"{label} index build cancelled",
-                "The partial sweep was discarded — a half-built index would make "
-                "dependency resolution look complete when it isn't.",
+                "Index build cancelled",
+                "Whichever indexes had already finished are kept — the one running "
+                "when you cancelled was discarded, since a half-built index would "
+                "make dependency resolution look complete when it isn't.",
             )
+            st.rerun()
         elif job.done:
-            built = job.events[-1].index if job.events else None
-            setattr(state, index_attr, built)
             setattr(state, job_attr, None)
-            if built is not None:
-                save_index(built, cache_path(connection, kind))
             st.rerun()
         else:
             st.rerun()
+        return
 
-    return getattr(state, index_attr)
+    missing = _missing(state, specs)
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if missing:
+            estimates = ", ".join(
+                BUILD_ESTIMATE.get(s.kind, _DEFAULT_ESTIMATE) for s in missing
+            )
+            if st.button(
+                f"{button_label} ({len(missing)} to build: {estimates})",
+                key=f"{job_attr}_start",
+                type="primary",
+                use_container_width=True,
+            ):
+                setattr(state, job_attr, start_job(_chained_build(state, missing)))
+                st.rerun()
+    with col2:
+        built = [s for s in specs if getattr(state, s.index_attr) is not None]
+        if built and st.button(
+            "Rebuild all",
+            key=f"{job_attr}_rebuild",
+            use_container_width=True,
+        ):
+            for spec in built:
+                setattr(state, spec.index_attr, None)
+            state.implementer_required = False
+            setattr(state, job_attr, start_job(_chained_build(state, specs)))
+            st.rerun()

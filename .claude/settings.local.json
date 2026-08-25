@@ -7,7 +7,15 @@
       "Bash(git log *)",
       "Bash(git push *)",
       "Bash(git check-ignore *)",
-      "Bash(git diff *)"
+      "Bash(git diff *)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_ui_state.py tests/test_ui_app_smoke.py tests/test_ui_boundaries.py tests/test_ui_reference_decisions.py -x --tb=short)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/test_ui_state.py tests/test_ui_app_smoke.py tests/test_ui_boundaries.py tests/test_ui_reference_decisions.py -x --tb=short 2>&1)",
+      "Bash(ls -la .venv/ 2>/dev/null | head; ls ../../.venv 2>/dev/null | head; ls ../../../.venv 2>/dev/null | head)",
+      "Bash(../../../.venv/Scripts/python.exe -m pytest tests/test_ui_state.py tests/test_ui_app_smoke.py -x --tb=short)",
+      "Bash(../../../.venv/Scripts/python.exe -m pytest --tb=short)",
+      "Bash(../../../.venv/Scripts/python.exe -m pytest tests/test_ui_app_smoke.py -v --tb=short)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
