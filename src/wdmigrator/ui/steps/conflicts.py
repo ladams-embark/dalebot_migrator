@@ -37,9 +37,10 @@ from wdmigrator.api import (
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_blockers, render_job_progress
 from wdmigrator.ui.indexes import (
+    IndexSpec,
+    bulk_build_indexes,
     destination_match_indexes,
     destination_matching_ready,
-    load_or_prompt_index,
 )
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import WizardState, reset_downstream
@@ -75,28 +76,32 @@ def _render_destination_indexes(state: WizardState) -> None:
         "duplicates that cannot be deleted.",
         eyebrow="Required before probing",
     )
-    load_or_prompt_index(
-        state,
-        kind="calculated_field",
-        iterator_fn=iter_calculated_field_index,
-        job_attr="dest_cf_index_job",
-        index_attr="dest_cf_index",
-        label="Destination calculated field",
-        connection=state.dest.connection,
-    )
     # A measure's BI_Calculated_Measure_ID is Workday-generated with a
     # tenant-local sequence number, so two tenants can never agree on one —
     # which makes this index the *only* thing standing between a shared measure
     # and a duplicate. It is one page, so rebuilding it is nearly free; the
     # caption below says when that is worth doing.
-    load_or_prompt_index(
+    specs = [
+        IndexSpec(
+            kind="calculated_field",
+            label="Destination calculated field",
+            iterator_fn=iter_calculated_field_index,
+            connection=state.dest.connection,
+            index_attr="dest_cf_index",
+        ),
+        IndexSpec(
+            kind="calculated_measure",
+            label="Destination calculated measure",
+            iterator_fn=iter_calculated_measure_index,
+            connection=state.dest.connection,
+            index_attr="dest_measure_index",
+        ),
+    ]
+    bulk_build_indexes(
         state,
-        kind="calculated_measure",
-        iterator_fn=iter_calculated_measure_index,
-        job_attr="dest_measure_index_job",
-        index_attr="dest_measure_index",
-        label="Destination calculated measure",
-        connection=state.dest.connection,
+        specs,
+        job_attr="dest_index_job",
+        button_label="Build destination indexes",
     )
     if not destination_matching_ready(state):
         theme.banner(
