@@ -146,6 +146,44 @@ def requires_implementer(fault: str | None) -> bool:
     return IMPLEMENTER_REQUIRED_FRAGMENT in (fault or "").lower()
 
 
+#: Payload keys that carry worklet configurations at any level of the dashboard
+#: tree. Untabbed dashboards use ``Content_Data`` at the top; tabbed dashboards
+#: bury ``Worklets_Data`` inside each tab. Whichever appears with a non-empty
+#: value means the dashboard has content; none of them means the destination
+#: object is a shell — admin metadata written but the mid-run failure left
+#: every tab (or the single page) empty.
+_DASHBOARD_WORKLET_KEYS = ("Worklets_Data", "Content_Data")
+
+
+def dashboard_has_worklets(payload: Mapping | None) -> bool:
+    """Does this dashboard payload carry any actual worklet configuration?
+
+    Recursive, because tabbed dashboards nest worklets inside tabs and no
+    single field names them at the top. Used to detect shell dashboards: a
+    dashboard that failed mid-write leaves its admin config in place but every
+    tab empty, and every subsequent run then probes FOUND and skips it (see
+    HANDOFF.md). Callers that see a FOUND dashboard should re-check with this
+    and route to UPDATE when it returns False.
+    """
+    if payload is None:
+        return False
+
+    stack: list[object] = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in _DASHBOARD_WORKLET_KEYS:
+                    if isinstance(value, list) and value:
+                        return True
+                    if isinstance(value, dict) and value:
+                        return True
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    return False
+
+
 @dataclass(frozen=True)
 class DashboardSummary:
     wid: str

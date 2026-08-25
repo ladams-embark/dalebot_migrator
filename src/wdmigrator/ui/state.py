@@ -167,6 +167,12 @@ class WizardState:
     execute_job: Optional[JobState] = None
     execute_paused: bool = False
     execute_records: list = field(default_factory=list)
+    #: Post-run read-back verifier. Formalises the hand-written scripts every
+    #: prior migration relied on to prove the objects landed — the writer's
+    #: SUCCESS bit has been observed to lie (HANDOFF: "0 failed" with two
+    #: empty-shell dashboards). Populated by :mod:`~wdmigrator.validation`.
+    verify_job: Optional[JobState] = None
+    verify_records: list = field(default_factory=list)
     # source WID -> {"reference", "node_id", "node_name", "sites"} for every
     # reference the destination could not resolve. Accumulates across attempts:
     # Workday reports one failure at a time, so the complete picture only
@@ -239,6 +245,8 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.execute_records = []
         state.blocking_references = {}
         state.reprobe_job = None
+        state.verify_job = None
+        state.verify_records = []
 
     # Never leave the user parked past the point their data just got wiped.
     if STEP_ORDER.index(state.step) > idx:

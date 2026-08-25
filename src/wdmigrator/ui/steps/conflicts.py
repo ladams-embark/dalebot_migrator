@@ -157,9 +157,23 @@ def _render_overrides(state: WizardState) -> None:
         )
     df = pd.DataFrame(rows)
 
+    shells = [
+        e for e in plan.existence.values()
+        if getattr(e, "is_shell", False)
+    ]
+    if shells:
+        theme.banner(
+            "warning",
+            f"{len(shells)} shell dashboard(s) will be completed by UPDATE",
+            "A shell is a dashboard whose admin config exists in the destination "
+            "but every tab is empty — the trace of a prior mid-run failure. It "
+            "would otherwise probe as FOUND and skip forever; UPDATE has been "
+            "verified live for exactly this case.",
+        )
     st.caption(
-        "Only create and skip are offered. Whether a Put with a reference replaces or "
-        "merges is unverified against a live tenant, so update is treated as unsafe."
+        "Create and skip are the default choices. Update is only set automatically "
+        "for shell dashboards where completing the prior run is safe; whether a "
+        "Put with a reference replaces or merges in the general case is unverified."
     )
     edited = st.data_editor(
         df,
@@ -167,7 +181,9 @@ def _render_overrides(state: WizardState) -> None:
         use_container_width=True,
         disabled=["node_id", "kind", "name", "existence"],
         column_config={
-            "action": st.column_config.SelectboxColumn(options=["create", "skip"], required=True),
+            "action": st.column_config.SelectboxColumn(
+                options=["create", "skip", "update"], required=True
+            ),
         },
         key="conflicts_editor",
     )

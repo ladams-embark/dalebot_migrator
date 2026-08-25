@@ -183,6 +183,17 @@ from wdmigrator.migrate import (
     write_node,
 )
 
+# ── Validation: read-back verification after a live run ────────────────────
+from wdmigrator.validation import (
+    VerifyFinding,
+    VerifyProgress,
+    VerifyRecord,
+    VerifyStatus,
+    iter_verify,
+    verify_record,
+)
+from wdmigrator.validation.verify import summarise as summarise_verify
+
 # ── Safety: the gate between a plan and a write ─────────────────────────────
 from wdmigrator.safety import (
     ALLOW_NON_IMPL_ENV_VAR,
@@ -353,6 +364,14 @@ __all__ = [
     "install_redacting_log_filter",
     "redact",
     "redact_envelope",
+    # validation
+    "VerifyFinding",
+    "VerifyProgress",
+    "VerifyRecord",
+    "VerifyStatus",
+    "iter_verify",
+    "summarise_verify",
+    "verify_record",
 ]
 
 
