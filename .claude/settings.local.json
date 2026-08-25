@@ -15,7 +15,12 @@
       "Bash(../../../.venv/Scripts/python.exe -m pytest --tb=short)",
       "Bash(../../../.venv/Scripts/python.exe -m pytest tests/test_ui_app_smoke.py -v --tb=short)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git -C /c/dev/dalebot_migrator merge --no-ff claude/dalebot-migrator-cleanup-f3a7f4 -m \"Merge branch 'claude/dalebot-migrator-cleanup-f3a7f4'\")",
+      "Bash(git -C /c/dev/dalebot_migrator log --oneline -3)",
+      "Bash(git -C /c/dev/dalebot_migrator remote -v)",
+      "Bash(git -C /c/dev/dalebot_migrator log --oneline origin/master..master)",
+      "Bash(git -C /c/dev/dalebot_migrator push origin master)"
     ]
   }
 }

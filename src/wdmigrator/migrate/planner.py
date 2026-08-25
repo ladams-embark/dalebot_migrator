@@ -37,6 +37,7 @@ from wdmigrator.discovery.inventory import (
     calculated_field_data,
     calculated_field_shape,
     calculated_measure_shape,
+    dashboard_has_worklets,
     lookup_calculated_field,
     lookup_calculated_measure,
     lookup_dashboard,
@@ -78,6 +79,14 @@ class Existence:
     #: needs them rewritten or they dangle. Only set on a cross-tenant match —
     #: an id match means the two agree already.
     dest_reference_id: str | None = None
+    #: True when the destination holds this object but it's an empty shell — a
+    #: dashboard that failed mid-write and left its admin config behind with no
+    #: worklets. A shell probes as FOUND and would default to SKIP, so every
+    #: subsequent run silently leaves it broken. Marking the shell here routes
+    #: :func:`default_action` to UPDATE for the one case (dashboard completion)
+    #: where UPDATE is empirically safe (confirmed live 2026-08-13 —
+    #: HANDOFF.md).
+    is_shell: bool = False
 
     @property
     def exists(self) -> bool:
@@ -231,9 +240,17 @@ def default_action(existence: Existence) -> Action:
 
     EXISTS defaults to SKIP rather than UPDATE: overwriting destination config
     is the destructive direction, and replace-vs-merge semantics are unverified.
+
+    The one exception is a shell dashboard — a dashboard that failed mid-write
+    and left its admin config in place but every tab empty. It probes as FOUND
+    and would otherwise SKIP forever, so every subsequent run silently leaves
+    it broken. UPDATE has been verified live for exactly this case (HANDOFF.md,
+    2026-08-13), so a shell routes to UPDATE.
     """
     if existence.state is LookupOutcome.NOT_FOUND:
         return Action.CREATE
+    if existence.is_shell:
+        return Action.UPDATE
     return Action.SKIP
 
 
@@ -279,6 +296,21 @@ def probe_node(
             tabbed=DASHBOARD_TABBED_BY_KIND[node.kind],
             reference_id=node.reference_id,
         )
+        if result.outcome is LookupOutcome.FOUND and not dashboard_has_worklets(result.data):
+            # A dashboard that failed partway through a previous run leaves its
+            # admin config in place but every tab empty. Without this it probes
+            # FOUND and defaults to SKIP forever; with it, default_action routes
+            # to UPDATE so the run can complete what a prior one couldn't.
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.FOUND,
+                dest_wid=result.wid,
+                is_shell=True,
+                matched_by=(
+                    "destination holds this dashboard but it has no worklets — "
+                    "likely a shell from a mid-run failure of a prior migration"
+                ),
+            )
     elif node.kind is NodeKind.ANALYTIC_INDICATOR:
         # By WID, not business id: the WID is what is stable across tenants for
         # indicators, and the business id is what is not.

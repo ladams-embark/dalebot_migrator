@@ -191,6 +191,96 @@ class TestDefaultActions:
     def test_unknown_defaults_to_skip(self):
         assert default_action(Existence("n", LookupOutcome.UNKNOWN)) is Action.SKIP
 
+    def test_shell_dashboard_defaults_to_update_not_skip(self):
+        """A FOUND-but-shell dashboard is the one FOUND case that must not
+        SKIP. Skipping it silently leaves a broken dashboard in the
+        destination that every subsequent run then also skips — HANDOFF flags
+        this as the escape hatch that used to require `--force-update` in
+        the scripts and nothing in the wizard."""
+        shell = Existence("dashboard:D1", LookupOutcome.FOUND, "W1", is_shell=True)
+        assert default_action(shell) is Action.UPDATE
+
+
+class TestShellDashboardDetection:
+    """A dashboard that failed mid-write leaves admin config in place but no
+    worklets, and would otherwise re-probe FOUND forever. `probe_node`
+    detects the shell and routes to UPDATE; the writer already supports
+    UPDATE on dashboards (verified live 2026-08-13, HANDOFF.md)."""
+
+    def _dashboard_node(self, reference_id="Commit - HR Dashboard"):
+        return Node(
+            node_id=f"dashboard_tabbed:D1",
+            kind=NodeKind.DASHBOARD_TABBED,  # type: ignore[attr-defined]
+            source_wid="D1",
+            reference_id=reference_id,
+            name=reference_id,
+            payload={},
+        )
+
+    def _dest(self, response_item):
+        """A minimal FakeDestination that returns one dashboard on lookup."""
+        dest = FakeDestination()
+
+        def _get(**kwargs):
+            return {
+                "Response_Data": {
+                    "Custom_Dashboard_with_Tabs": [response_item]
+                }
+            }
+
+        dest.service = SimpleNamespace(Get_Custom_Dashboards_with_Tabs=_get)
+        return dest
+
+    def test_dashboard_with_worklets_is_a_normal_found_not_a_shell(self):
+        node = self._dashboard_node()
+        item = {
+            "Custom_Dashboard_with_Tabs_Reference": {
+                "ID": [
+                    {"type": "WID", "_value_1": "DEST_D1"},
+                    {"type": "Custom_Landing_Page_Group_ID", "_value_1": node.reference_id},
+                ]
+            },
+            "Custom_Dashboard_with_Tabs_Data": {
+                "Custom_Dashboard_Tab_Data": [
+                    {"Worklets_Data": [{"Worklet_Reference": "..."}]}
+                ]
+            },
+        }
+        existence = probe_node(self._dest(item), node)
+        assert existence.state is LookupOutcome.FOUND
+        assert existence.is_shell is False
+
+    def test_dashboard_with_empty_tabs_is_a_shell(self):
+        node = self._dashboard_node()
+        item = {
+            "Custom_Dashboard_with_Tabs_Reference": {
+                "ID": [
+                    {"type": "WID", "_value_1": "DEST_D1"},
+                    {"type": "Custom_Landing_Page_Group_ID", "_value_1": node.reference_id},
+                ]
+            },
+            "Custom_Dashboard_with_Tabs_Data": {
+                "Custom_Dashboard_Tab_Data": [{"Tab_Name": "Overview"}]
+            },
+        }
+        existence = probe_node(self._dest(item), node)
+        assert existence.state is LookupOutcome.FOUND
+        assert existence.is_shell is True
+        assert existence.dest_wid == "DEST_D1"
+
+    def test_dashboard_with_no_data_block_at_all_is_a_shell(self):
+        node = self._dashboard_node()
+        item = {
+            "Custom_Dashboard_with_Tabs_Reference": {
+                "ID": [
+                    {"type": "WID", "_value_1": "DEST_D1"},
+                    {"type": "Custom_Landing_Page_Group_ID", "_value_1": node.reference_id},
+                ]
+            },
+        }
+        existence = probe_node(self._dest(item), node)
+        assert existence.is_shell is True
+
 
 class TestProbing:
     def test_missing_object_is_marked_create(self):

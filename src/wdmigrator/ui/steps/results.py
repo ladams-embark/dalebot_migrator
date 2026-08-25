@@ -15,8 +15,10 @@ import json
 
 import streamlit as st
 
-from wdmigrator.api import Blocker, summarise
+from wdmigrator.api import Blocker, VerifyStatus, iter_verify, summarise, summarise_verify
 from wdmigrator.ui import theme
+from wdmigrator.ui.components import render_job_progress
+from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import WizardState, reset_downstream
 
 STEP_ID = "results"
@@ -119,10 +121,99 @@ def render(state: WizardState) -> None:
                 use_container_width=True,
             )
 
+    if is_live:
+        st.divider()
+        _render_verify(state)
+
     st.divider()
     if st.button("Start a new migration", key="results_restart"):
         reset_downstream(state, from_step="select")
         state.step = "select"
+        st.rerun()
+
+
+def _render_verify(state: WizardState) -> None:
+    """Read every written object back and compare structural signals.
+
+    The writer's SUCCESS bit has been observed to lie — HANDOFF names the
+    "0 failed" run in which two of three dashboards came back as empty
+    shells. Only a read-back caught it, and every migration since has run
+    one by hand. This is that check, wired to a button.
+    """
+    theme.section(
+        "Verification",
+        "Read every written object back from the destination and compare "
+        "structural signals to the source (tab count, worklet count, member "
+        "count, columns). The writer's own success bit has reported clean "
+        "runs where dashboards came back as empty shells — this is the "
+        "check that catches that.",
+        eyebrow="Post-run read-back",
+    )
+
+    if state.verify_job is not None:
+        pump(state.verify_job, time_budget=0.8)
+        last = state.verify_job.last_event
+        fraction = last.fraction if last is not None else 0.0
+        render_job_progress(state.verify_job, label="Verification", fraction=fraction)
+        if state.verify_job.error is not None:
+            state.verify_job = None
+            st.rerun()
+        elif state.verify_job.done:
+            state.verify_records = [event.record for event in state.verify_job.events]
+            state.verify_job = None
+            st.rerun()
+        else:
+            st.rerun()
+        return
+
+    if not state.verify_records:
+        if st.button("Verify against destination", key="verify_start", type="primary"):
+            state.verify_job = start_job(
+                iter_verify(state.dest.connection, state.plan.ordered_nodes, state.execute_records)
+            )
+            st.rerun()
+        return
+
+    counts = summarise_verify(state.verify_records)
+    shown = {k: v for k, v in counts.items() if v}
+    theme.figures(
+        list(shown.items()),
+        tones={
+            VerifyStatus.MISMATCH.value: "danger",
+            VerifyStatus.MISSING.value: "danger",
+            VerifyStatus.ERROR.value: "danger",
+        },
+    )
+
+    problems = [r for r in state.verify_records if not r.ok and r.status is not VerifyStatus.SKIPPED]
+    if problems:
+        theme.banner(
+            "danger",
+            f"{len(problems)} object(s) did not verify",
+            "Read-back disagreed with the source or the destination reports "
+            "the object missing. Each row below shows which signals differ.",
+        )
+        st.dataframe(
+            [
+                {
+                    "name": r.name,
+                    "kind": r.kind,
+                    "status": r.status.value,
+                    "findings": "; ".join(str(f) for f in r.findings) or r.fault or "",
+                }
+                for r in problems
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        theme.banner(
+            "success",
+            "Every written object verified against the source",
+        )
+
+    if st.button("Re-verify", key="verify_rerun"):
+        state.verify_records = []
         st.rerun()
 
 
