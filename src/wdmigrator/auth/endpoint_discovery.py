@@ -55,12 +55,14 @@ class DataCenter:
 #: Two naming families confirmed live so far, and they do NOT reduce to one
 #: formula — a data center's real host has to be confirmed independently,
 #: not derived:
-#:   - "impl-services1.wdNN.myworkday.com" (wd12, and now wd501 too — 2/2 of
-#:     the data centers with an explicit "wdNN" in their production URL,
-#:     confirmed 2026-08-03 via commitconsulting's REST API Endpoint page)
+#:   - "impl-services1.wdNN.myworkday.com" (wd12, wd501, and wd504 — 3/3 of
+#:     the data centers with an explicit "wdNN" in their production URL.
+#:     wd12/wd501 confirmed 2026-08-03 via commitconsulting's REST API
+#:     Endpoint page; wd504 confirmed 2026-08-26 by probing the "walmart"
+#:     tenant.)
 #:   - "wdN-impl-services1.workday.com" (dc1 only — the one data center with
 #:     NO "wdNN" in its production URL at all, e.g. plain workday.com)
-#: Since the wdNN-numbered data centers are now 2/2 on the myworkday.com
+#: Since the wdNN-numbered data centers are now 3/3 on the myworkday.com
 #: pattern, the still-unverified wd3/5/10/102/103/105 entries below try that
 #: pattern first, then fall back to the workday.com-style guess.
 KNOWN_IMPL_DATA_CENTERS: tuple[DataCenter, ...] = (
@@ -79,6 +81,7 @@ KNOWN_IMPL_DATA_CENTERS: tuple[DataCenter, ...] = (
     DataCenter("wd103 (workday guess)", "wd103-impl-services1.workday.com", verified=False),
     DataCenter("wd105 (myworkday guess)", "impl-services1.wd105.myworkday.com", verified=False),
     DataCenter("wd105 (workday guess)", "wd105-impl-services1.workday.com", verified=False),
+    DataCenter("wd504", "impl-services1.wd504.myworkday.com", verified=True),
 )
 
 
