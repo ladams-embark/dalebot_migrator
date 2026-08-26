@@ -10,6 +10,8 @@ real destination tenant exists.
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 
 from wdmigrator.api import (
@@ -148,7 +150,18 @@ def _pump_discovery(side: ConnectionState, *, target_widget_key: str) -> None:
     st.rerun()
 
 
-def _quick_fill(side: ConnectionState, *, target_widget_key: str) -> None:
+def _quick_fill(
+    side: ConnectionState,
+    role: Role,
+    *,
+    target_widget_key: str,
+    user_widget_key: str,
+    pass_widget_key: str,
+) -> bool:
+    """Fill this side's target URL, and any credentials found in .env for its
+    role. Returns True if both username and password ended up populated —
+    that's the caller's cue to auto-run the connection test.
+    """
     side.target_raw = (
         f"https://{_QUICK_FILL_SERVICES_HOST}/ccx/service/"
         f"{_QUICK_FILL_TENANT}/{DEFAULT_SERVICE_NAME}/{DEFAULT_VERSION}"
@@ -161,6 +174,17 @@ def _quick_fill(side: ConnectionState, *, target_widget_key: str) -> None:
     except TenantURLError:
         side.target = None
 
+    env_prefix = "WD_SOURCE" if role is Role.SOURCE else "WD_DEST"
+    env_user = os.environ.get(f"{env_prefix}_ISU_USERNAME", "")
+    env_pass = os.environ.get(f"{env_prefix}_ISU_PASSWORD", "")
+    if env_user:
+        side.username = env_user
+        st.session_state[user_widget_key] = env_user
+    if env_pass:
+        side.password = env_pass
+        st.session_state[pass_widget_key] = env_pass
+    return bool(env_user and env_pass)
+
 
 def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
     theme.section(
@@ -169,7 +193,15 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
     )
 
     if st.button(f"Quick fill: {_QUICK_FILL_TENANT}", key=f"{key}_quick_fill"):
-        _quick_fill(side, target_widget_key=f"{key}_target")
+        creds_filled = _quick_fill(
+            side,
+            role,
+            target_widget_key=f"{key}_target",
+            user_widget_key=f"{key}_user",
+            pass_widget_key=f"{key}_pass",
+        )
+        if creds_filled:
+            _attempt_connect(state, side, role, label)
         st.rerun()
 
     with st.expander(
@@ -197,16 +229,16 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
         help="A pasted browser URL, or a bare tenant name.",
     )
     side.username = secrets_ui.username_input(
-        f"{label} ISU username",
+        f"{label} Username",
         key=f"{key}_user",
         value=side.username,
         help=(
-            "Just the ISU name — the tenant is appended for you. An email "
+            "Just the username — the tenant is appended for you. An email "
             "address works too. If it is already written as `name@tenant`, "
             "that is accepted as-is rather than suffixed twice."
         ),
     )
-    side.password = secrets_ui.password_input(f"{label} ISU password", key=f"{key}_pass")
+    side.password = secrets_ui.password_input(f"{label} Password", key=f"{key}_pass")
 
     if st.button(f"Test {label.lower()} connection", key=f"{key}_test"):
         _attempt_connect(state, side, role, label)

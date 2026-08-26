@@ -24,6 +24,7 @@ delete operation. Hence the three-valued :class:`LookupOutcome`.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -1488,7 +1489,15 @@ def cache_path(connection: Connection, kind: str, root: Path | None = None) -> P
 
 
 def save_index(index: Index, path: Path) -> Path:
-    """Persist an index. Contains tenant config only — never credentials."""
+    """Persist an index. Contains tenant config only — never credentials.
+
+    Writes atomically via a same-directory temp file + ``os.replace``. This
+    matters when the app is hosted and two sessions sweep the same tenant at
+    once: a plain ``write_text`` truncates the target first, so a concurrent
+    reader (or the other writer) could see a partial or empty JSON file.
+    ``os.replace`` is atomic on both Windows and POSIX, so any reader either
+    sees the previous complete file or the new one — never a torn write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {
         "kind": index.kind,
@@ -1497,7 +1506,11 @@ def save_index(index: Index, path: Path) -> Path:
         "summaries": {w: asdict(s) for w, s in index.summaries.items()},
         "payloads": index.payloads,
     }
-    path.write_text(json.dumps(document, default=str), encoding="utf-8")
+    # Suffix with pid so two concurrent writers get distinct temp files rather
+    # than one clobbering the other's temp before either rename lands.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(document, default=str), encoding="utf-8")
+    os.replace(tmp, path)
     return path
 
 
