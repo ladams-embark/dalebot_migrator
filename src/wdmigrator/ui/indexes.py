@@ -46,6 +46,17 @@ BUILD_ESTIMATE = {
 }
 _DEFAULT_ESTIMATE = "a few seconds"
 
+#: The same estimates as :data:`BUILD_ESTIMATE`, as seconds rather than prose.
+#: Used only to project a remaining-time countdown for stages that have not
+#: started yet — a stage already running reports its own live elapsed/fraction
+#: instead (see :func:`_estimate_remaining_seconds`), so these numbers only
+#: ever matter for the *rest* of the queue.
+BUILD_ESTIMATE_SECONDS = {
+    "calculated_field": 25.0,
+    "report": 150.0,
+}
+_DEFAULT_ESTIMATE_SECONDS = 5.0
+
 
 @dataclass(frozen=True)
 class IndexSpec:
@@ -109,11 +120,37 @@ def age_label(seconds: float) -> str:
     return f"{int(hours / 24)}d ago"
 
 
+def _format_duration(seconds: float) -> str:
+    """Render a countdown the way a user actually wants to read it.
+
+    Coarse on purpose — a "remaining" estimate built from one in-flight page's
+    elapsed time is noisy, and printing ``1m 47.3s`` would advertise a
+    precision the underlying math cannot back up. Rounds to the nearest 5s
+    under a minute, then to the nearest whole minute, then to one decimal
+    hour — and never rounds *up into* the next unit's territory (57s reads
+    as "about 55s", not "about 1 min").
+    """
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        rounded = int(round(seconds / 5.0) * 5)
+        if rounded <= 0:
+            return "a few seconds"
+        if rounded >= 60:
+            return "about 1 min"
+        return f"about {rounded}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"about {max(1, int(minutes + 0.5))} min"
+    hours = minutes / 60
+    return f"about {hours:.1f}h"
+
+
 @dataclass
 class _StageEvent:
     """One tick from :func:`_chained_build`. Carries the current stage's
     label and the underlying :class:`IndexProgress` so the UI can show one
-    combined bar."""
+    combined bar.
+    """
 
     stage: int
     total_stages: int
@@ -121,6 +158,13 @@ class _StageEvent:
     kind: str
     fraction: float
     progress: IndexProgress | None = None
+    #: Denormalised off ``progress`` (when present) so the render layer never
+    #: has to reach into it directly — cached indexes and gated-skip events
+    #: carry no ``IndexProgress`` at all, and 0/0.0 is a safe "unknown" for
+    #: those rather than a special case at every call site.
+    fetched: int = 0
+    total: int = 0
+    elapsed: float = 0.0
 
 
 def _load_cached(state, specs: list[IndexSpec]) -> None:
@@ -158,6 +202,9 @@ def _chained_build(state, specs: list[IndexSpec]) -> Iterator[_StageEvent]:
                     kind=spec.kind,
                     fraction=progress.fraction,
                     progress=progress,
+                    fetched=progress.fetched,
+                    total=progress.total,
+                    elapsed=progress.elapsed,
                 )
                 if progress.complete:
                     setattr(state, spec.index_attr, progress.index)
@@ -202,6 +249,49 @@ def _missing(state, specs: list[IndexSpec]) -> list[IndexSpec]:
     ]
 
 
+def _estimate_remaining_seconds(
+    event: _StageEvent, queued_specs: list[IndexSpec] | None
+) -> float:
+    """Project total time left: the rest of the in-flight stage, plus a flat
+    estimate for every stage still queued behind it.
+
+    The in-flight portion is only trusted once a stage has made enough
+    progress to say anything (``fraction`` past a few percent) — a page's
+    first tick reports ``fetched=0`` or close to it, and dividing by a
+    near-zero fraction would swing the estimate wildly rerun to rerun. Below
+    that threshold this falls back to the same flat per-kind figure used for
+    stages that have not started at all.
+    """
+    if event.total and event.fraction > 0.03:
+        remaining = event.elapsed * (1.0 - event.fraction) / event.fraction
+    else:
+        remaining = BUILD_ESTIMATE_SECONDS.get(event.kind, _DEFAULT_ESTIMATE_SECONDS)
+
+    for spec in queued_specs or []:
+        remaining += BUILD_ESTIMATE_SECONDS.get(spec.kind, _DEFAULT_ESTIMATE_SECONDS)
+    return remaining
+
+
+def _progress_detail(event: _StageEvent, specs_for_job: list[IndexSpec] | None) -> str | None:
+    """The caption under the bar: what's been fetched, and how much longer.
+
+    ``specs_for_job`` is the exact list this run was started with — captured
+    at click time, not re-derived from ``state`` — so a stage that finishes
+    and clears its own "missing" status mid-run does not change what the
+    still-running stages behind it are counted against.
+    """
+    parts: list[str] = []
+    if event.total:
+        parts.append(f"{event.fetched:,} / {event.total:,} fetched")
+        if event.progress is not None and event.progress.total_pages > 1:
+            parts.append(f"page {event.progress.page}/{event.progress.total_pages}")
+
+    queued = (specs_for_job or [])[event.stage :]
+    remaining = _estimate_remaining_seconds(event, queued)
+    parts.append(f"{_format_duration(remaining)} remaining")
+    return " · ".join(parts)
+
+
 def bulk_build_indexes(
     state,
     specs: list[IndexSpec],
@@ -222,6 +312,7 @@ def bulk_build_indexes(
     _summarise(state, specs)
 
     job = getattr(state, job_attr)
+    specs_attr = f"_{job_attr}_specs"
 
     if job is not None:
         col1, col2 = st.columns([3, 1])
@@ -229,11 +320,13 @@ def bulk_build_indexes(
             last = job.last_event
             fraction = 0.0
             label = button_label
+            detail = None
             if isinstance(last, _StageEvent):
                 stage_frac = (last.stage - 1 + max(0.0, min(1.0, last.fraction))) / last.total_stages
                 fraction = min(1.0, stage_frac)
                 label = f"{last.label} ({last.stage}/{last.total_stages})"
-            render_job_progress(job, label=label, fraction=fraction)
+                detail = _progress_detail(last, getattr(state, specs_attr, None))
+            render_job_progress(job, label=label, fraction=fraction, detail=detail)
         with col2:
             if st.button("Cancel", key=f"{job_attr}_cancel", use_container_width=True):
                 job.cancel()
@@ -242,9 +335,11 @@ def bulk_build_indexes(
         pump(job, time_budget=0.8)
         if job.error is not None:
             setattr(state, job_attr, None)
+            setattr(state, specs_attr, None)
             st.rerun()
         elif job.cancelled:
             setattr(state, job_attr, None)
+            setattr(state, specs_attr, None)
             theme.banner(
                 "warning",
                 "Index build cancelled",
@@ -255,6 +350,7 @@ def bulk_build_indexes(
             st.rerun()
         elif job.done:
             setattr(state, job_attr, None)
+            setattr(state, specs_attr, None)
             st.rerun()
         else:
             st.rerun()
@@ -273,6 +369,7 @@ def bulk_build_indexes(
                 type="primary",
                 use_container_width=True,
             ):
+                setattr(state, specs_attr, missing)
                 setattr(state, job_attr, start_job(_chained_build(state, missing)))
                 st.rerun()
     with col2:
@@ -285,5 +382,6 @@ def bulk_build_indexes(
             for spec in built:
                 setattr(state, spec.index_attr, None)
             state.implementer_required = False
+            setattr(state, specs_attr, specs)
             setattr(state, job_attr, start_job(_chained_build(state, specs)))
             st.rerun()
