@@ -101,6 +101,13 @@ class WizardState:
     prompt_field_index: Optional[Index] = None
     gauge_range_index: Optional[Index] = None
     analytic_indicator_index: Optional[Index] = None
+    #: Time Tracking indexes. Live on Time_Tracking_Implementation_Service and
+    #: are swept through a TT sibling connection built from
+    #: ``state.source.connection``. Only fetched when the user picks
+    #: "time_calculations" in Select.
+    time_calculation_index: Optional[Index] = None
+    time_calculation_tag_index: Optional[Index] = None
+    time_calculation_group_index: Optional[Index] = None
     #: One job drains every source index sweep back-to-back — Build once,
     #: everything comes in. See ``wdmigrator.ui.indexes.bulk_build_indexes``.
     source_index_job: Optional[JobState] = None
@@ -142,6 +149,10 @@ class WizardState:
     # see ``selected_reports_added``.
     selected_dashboards_added: dict = field(default_factory=dict)
     selected_dashboards: dict = field(default_factory=dict)
+    #: Directly-selected Time Calculations (WIDs). Tag and Group dependencies
+    #: are pulled in automatically by resolve_closure using the corresponding
+    #: indexes.
+    selected_time_calculation_wids: set = field(default_factory=set)
 
     closure: Optional[Closure] = None
     closure_error: Optional[str] = None
@@ -207,6 +218,9 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.prompt_field_index = None
         state.gauge_range_index = None
         state.analytic_indicator_index = None
+        state.time_calculation_index = None
+        state.time_calculation_tag_index = None
+        state.time_calculation_group_index = None
         state.source_index_job = None
         # Credential-scoped, like the source indexes above: this reset is what
         # runs when a connection changes, and a destination index swept against
@@ -221,6 +235,7 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.selected_reports = {}
         state.selected_dashboards_added = {}
         state.selected_dashboards = {}
+        state.selected_time_calculation_wids = set()
         state.reference_decisions = {}
 
     if idx <= STEP_ORDER.index("resolve"):

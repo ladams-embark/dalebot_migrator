@@ -46,6 +46,9 @@ from wdmigrator.discovery.inventory import (
     lookup_prompt_field,
     lookup_prompt_set,
     lookup_report_by_name,
+    lookup_time_calculation,
+    lookup_time_calculation_group,
+    lookup_time_calculation_tag,
 )
 from wdmigrator.migrate.ordering import topological_sort
 from wdmigrator.migrate.resolver import (
@@ -53,6 +56,7 @@ from wdmigrator.migrate.resolver import (
     Closure,
     Node,
     NodeKind,
+    TIME_TRACKING_KINDS,
 )
 
 
@@ -186,6 +190,8 @@ class MigrationPlan:
     #: than failing the write. Deliberately NOT a blocker.
     unmigratable_indicator_wids: frozenset[str] = frozenset()
     unresolved_dashboard_ids: frozenset[str] = frozenset()
+    unresolved_time_calculation_tag_ids: frozenset[str] = frozenset()
+    unresolved_time_calculation_group_ids: frozenset[str] = frozenset()
     #: source Calculated_Field_ID -> destination Calculated_Field_ID, for
     #: fields the destination already had under a different name. Seeded from
     #: the probe exactly as ``wid_map`` is, and applied to nested references.
@@ -348,6 +354,39 @@ def probe_node(
                 ),
             )
         result = lookup_prompt_set(connection, reference_id=node.reference_id)
+    elif node.kind is NodeKind.TIME_CALCULATION:
+        if not node.reference_id:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Time Calculation has no Time_Calculation_ID, so it "
+                    "cannot be matched against the destination."
+                ),
+            )
+        result = lookup_time_calculation(connection, reference_id=node.reference_id)
+    elif node.kind is NodeKind.TIME_CALCULATION_GROUP:
+        if not node.reference_id:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Time Calculation Group has no Time_Calculation_Group_ID, "
+                    "so it cannot be matched against the destination."
+                ),
+            )
+        result = lookup_time_calculation_group(connection, reference_id=node.reference_id)
+    elif node.kind is NodeKind.TIME_CALCULATION_TAG:
+        if not node.reference_id:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Time Calculation Tag has no Time_Calculation_Tag_ID, so it "
+                    "cannot be matched against the destination."
+                ),
+            )
+        result = lookup_time_calculation_tag(connection, reference_id=node.reference_id)
     elif node.kind is NodeKind.CALCULATED_MEASURE:
         if not node.reference_id:
             return Existence(
@@ -596,6 +635,7 @@ def iter_check_existence(
     *,
     match_index: CalculatedFieldMatchIndex | None = None,
     measure_match_index: Mapping[tuple[str, str], list[str]] | None = None,
+    tt_connection: Connection | None = None,
 ) -> Iterator[ProbeProgress]:
     """Probe every node against the destination, yielding progress per object.
 
@@ -607,21 +647,47 @@ def iter_check_existence(
     build, so it is opt-in rather than automatic — but without it, two tenants
     with different ``Calculated_Field_ID`` conventions will duplicate every
     field they already share.
+
+    ``tt_connection`` is required whenever the closure contains any node whose
+    kind is in :data:`TIME_TRACKING_KINDS`. Without one, those nodes probe as
+    UNKNOWN with an explanatory fault — the run does not silently skip them.
     """
     ordered = topological_sort(closure.nodes)
     total = len(ordered)
 
     for position, node in enumerate(ordered, start=1):
-        yield ProbeProgress(
-            checked=position,
-            total=total,
-            node=node,
-            existence=probe_node(
+        if node.kind in TIME_TRACKING_KINDS:
+            if tt_connection is None:
+                existence = Existence(
+                    node_id=node.node_id,
+                    state=LookupOutcome.UNKNOWN,
+                    fault=(
+                        f"{node.kind.value} lives on "
+                        "Time_Tracking_Implementation_Service, but no "
+                        "time-tracking connection was provided. Open one with "
+                        "Connection.for_service(TIME_TRACKING_SERVICE_NAME) and "
+                        "pass it as `tt_connection`."
+                    ),
+                )
+            else:
+                existence = probe_node(
+                    tt_connection,
+                    node,
+                    match_index=match_index,
+                    measure_match_index=measure_match_index,
+                )
+        else:
+            existence = probe_node(
                 connection,
                 node,
                 match_index=match_index,
                 measure_match_index=measure_match_index,
-            ),
+            )
+        yield ProbeProgress(
+            checked=position,
+            total=total,
+            node=node,
+            existence=existence,
         )
 
 
@@ -652,6 +718,12 @@ def build_plan(
         unresolved_gauge_range_ids=frozenset(closure.unresolved_gauge_range_ids),
         unmigratable_indicator_wids=frozenset(closure.unmigratable_indicator_wids),
         unresolved_dashboard_ids=frozenset(closure.unresolved_dashboard_ids),
+        unresolved_time_calculation_tag_ids=frozenset(
+            closure.unresolved_time_calculation_tag_ids
+        ),
+        unresolved_time_calculation_group_ids=frozenset(
+            closure.unresolved_time_calculation_group_ids
+        ),
         reference_decisions=dict(reference_decisions or {}),
     )
 

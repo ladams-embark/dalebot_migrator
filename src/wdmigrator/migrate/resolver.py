@@ -34,6 +34,8 @@ from wdmigrator.migrate.ordering import (
     extract_prompt_set_refs,
     extract_reference_id_refs,
     extract_report_refs,
+    extract_time_calculation_group_refs,
+    extract_time_calculation_tag_refs,
     extract_wid_refs,
 )
 
@@ -52,6 +54,25 @@ class NodeKind(str, Enum):
     #: flag would need special-casing at every one of those points.
     DASHBOARD = "dashboard"
     DASHBOARD_TABBED = "dashboard_tabbed"
+    #: Time-tracking kinds. All three live on
+    #: Time_Tracking_Implementation_Service, not Core, and the planner/writer
+    #: route them to the sibling connection accordingly — see
+    #: :data:`TIME_TRACKING_KINDS`.
+    TIME_CALCULATION_TAG = "time_calculation_tag"
+    TIME_CALCULATION_GROUP = "time_calculation_group"
+    TIME_CALCULATION = "time_calculation"
+
+
+#: Kinds that live on ``Time_Tracking_Implementation_Service`` rather than
+#: Core. The planner and writer consult this set to route probes and writes
+#: to the correct sibling connection.
+TIME_TRACKING_KINDS: frozenset[NodeKind] = frozenset(
+    {
+        NodeKind.TIME_CALCULATION_TAG,
+        NodeKind.TIME_CALCULATION_GROUP,
+        NodeKind.TIME_CALCULATION,
+    }
+)
 
 
 #: Which dashboard kind corresponds to which flavour, in both directions.
@@ -128,6 +149,15 @@ class Closure:
     unmigratable_indicator_wids: set[str] = field(default_factory=set)
     #: Dashboard business IDs named by another dashboard but not in the index.
     unresolved_dashboard_ids: set[str] = field(default_factory=set)
+    #: ``Time_Calculation_Tag_ID`` values named by a Time Calculation but
+    #: absent from the tag index. A calculation cannot be written referencing
+    #: a tag the destination does not have — Phase 4 (Time Calculations)
+    #: relies on this bucket. Empty on a Tags-only migration.
+    unresolved_time_calculation_tag_ids: set[str] = field(default_factory=set)
+    #: ``Time_Calculation_Group_ID`` values named by a Time Calculation
+    #: (through ``Time_Calculation_Group_Snapshot_Reference.parent_id``) but
+    #: absent from the group index. Same reasoning as tags — a real gap.
+    unresolved_time_calculation_group_ids: set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
         return len(self.nodes)
@@ -242,6 +272,50 @@ def _prompt_field_node(wid: str, payload: dict) -> Node:
     )
 
 
+def _time_calculation_node(wid: str, payload: dict, *, selected: bool = False) -> Node:
+    data = payload.get("Time_Calculation_Data") or {}
+    ids = ids_of(payload.get("Time_Calculation_Reference"))
+    return Node(
+        node_id=node_id_for(NodeKind.TIME_CALCULATION, wid),
+        kind=NodeKind.TIME_CALCULATION,
+        source_wid=wid,
+        reference_id=ids.get("Time_Calculation_ID"),
+        name=data.get("Name"),
+        payload=payload,
+        selected=selected,
+    )
+
+
+def _time_calculation_group_node(wid: str, payload: dict, *, selected: bool = False) -> Node:
+    data = payload.get("Time_Calculation_Group_Data") or {}
+    ids = ids_of(payload.get("Time_Calculation_Group_Reference"))
+    return Node(
+        node_id=node_id_for(NodeKind.TIME_CALCULATION_GROUP, wid),
+        kind=NodeKind.TIME_CALCULATION_GROUP,
+        source_wid=wid,
+        reference_id=ids.get("Time_Calculation_Group_ID"),
+        name=data.get("Name"),
+        payload=payload,
+        selected=selected,
+    )
+
+
+def _time_calculation_tag_node(wid: str, payload: dict, *, selected: bool = False) -> Node:
+    data = payload.get("Time_Calculation_Tag_Data") or {}
+    ids = ids_of(payload.get("Time_Calculation_Tag_Reference"))
+    # Name slot is Time_Calculation_Tag_Name on this service; see the summary
+    # factory in discovery.inventory for the live confirmation.
+    return Node(
+        node_id=node_id_for(NodeKind.TIME_CALCULATION_TAG, wid),
+        kind=NodeKind.TIME_CALCULATION_TAG,
+        source_wid=wid,
+        reference_id=ids.get("Time_Calculation_Tag_ID"),
+        name=data.get("Time_Calculation_Tag_Name") or data.get("Name"),
+        payload=payload,
+        selected=selected,
+    )
+
+
 def _prompt_set_node(wid: str, payload: dict) -> Node:
     data = payload.get("Prompt_Set_Data") or {}
     ids = ids_of(payload.get("Prompt_Set_Reference"))
@@ -282,6 +356,9 @@ _DATA_BLOCK = {
     NodeKind.ANALYTIC_INDICATOR: "Analytic_Indicator_Data",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["data"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["data"],
+    NodeKind.TIME_CALCULATION_TAG: "Time_Calculation_Tag_Data",
+    NodeKind.TIME_CALCULATION_GROUP: "Time_Calculation_Group_Data",
+    NodeKind.TIME_CALCULATION: "Time_Calculation_Data",
 }
 
 
@@ -322,6 +399,9 @@ def resolve_closure(
     selected_field_wids: Iterable[str] = (),
     selected_reports: Mapping[str, dict] | None = None,
     selected_dashboards: Mapping[str, dict] | None = None,
+    selected_time_calculation_tag_wids: Iterable[str] = (),
+    selected_time_calculation_group_wids: Iterable[str] = (),
+    selected_time_calculation_wids: Iterable[str] = (),
     allow_partial_index: bool = False,
     expected_index_size: int | None = None,
     measure_loader: Callable[[str], dict | None] | None = None,
@@ -331,6 +411,9 @@ def resolve_closure(
     gauge_range_index: Index | None = None,
     analytic_indicator_index: Index | None = None,
     dashboard_index: Index | None = None,
+    time_calculation_tag_index: Index | None = None,
+    time_calculation_group_index: Index | None = None,
+    time_calculation_index: Index | None = None,
 ) -> Closure:
     """Expand a selection into every object that has to be written.
 
@@ -411,6 +494,51 @@ def resolve_closure(
                 f"Calculated field {wid} is not in the source index — it cannot "
                 "be migrated."
             )
+        closure.nodes[node.node_id] = node
+
+    for wid in selected_time_calculation_tag_wids:
+        if time_calculation_tag_index is None:
+            raise ValueError(
+                "selected_time_calculation_tag_wids requires "
+                "time_calculation_tag_index."
+            )
+        payload = time_calculation_tag_index.payload(wid)
+        if payload is None:
+            raise KeyError(
+                f"Time Calculation Tag {wid} is not in the source index — it "
+                "cannot be migrated."
+            )
+        node = _time_calculation_tag_node(wid, payload, selected=True)
+        closure.nodes[node.node_id] = node
+
+    for wid in selected_time_calculation_group_wids:
+        if time_calculation_group_index is None:
+            raise ValueError(
+                "selected_time_calculation_group_wids requires "
+                "time_calculation_group_index."
+            )
+        payload = time_calculation_group_index.payload(wid)
+        if payload is None:
+            raise KeyError(
+                f"Time Calculation Group {wid} is not in the source index — "
+                "it cannot be migrated."
+            )
+        node = _time_calculation_group_node(wid, payload, selected=True)
+        closure.nodes[node.node_id] = node
+
+    for wid in selected_time_calculation_wids:
+        if time_calculation_index is None:
+            raise ValueError(
+                "selected_time_calculation_wids requires "
+                "time_calculation_index."
+            )
+        payload = time_calculation_index.payload(wid)
+        if payload is None:
+            raise KeyError(
+                f"Time Calculation {wid} is not in the source index — it "
+                "cannot be migrated."
+            )
+        node = _time_calculation_node(wid, payload, selected=True)
         closure.nodes[node.node_id] = node
 
     # Expand transitively. A calculated field can be named two different ways
@@ -571,6 +699,61 @@ def resolve_closure(
                 dep = _prompt_field_node(pf_wid, fetched)
             _link(dep, dep_id, node)
 
+        time_calculation_tags: dict[str, str] = (
+            extract_time_calculation_tag_refs(payload)
+            if time_calculation_tag_index is not None
+            else {}
+        )
+        for t_wid, t_id in time_calculation_tags.items():
+            if t_wid == node.source_wid:
+                continue
+            dep_id = node_id_for(NodeKind.TIME_CALCULATION_TAG, t_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = time_calculation_tag_index.payload(t_wid)
+                if fetched is None:
+                    closure.unresolved_time_calculation_tag_ids.add(t_id)
+                    continue
+                dep = _time_calculation_tag_node(t_wid, fetched)
+            _link(dep, dep_id, node)
+
+        # Group refs come through Time_Calculation_Group_Snapshot_Reference and
+        # are keyed by the parent Group's business ID (the snapshot ID itself is
+        # tenant-local). Look up the Group by business ID against the source
+        # index; the snapshot WID we hand back is the source snapshot's WID —
+        # informational only, the writer will still need to remap it against
+        # the destination's current snapshot at write time.
+        group_business_id_to_wid: dict[str, str] = (
+            {
+                (s.reference_id or ""): wid
+                for wid, s in time_calculation_group_index.summaries.items()
+                if getattr(s, "reference_id", None)
+            }
+            if time_calculation_group_index is not None
+            else {}
+        )
+        time_calculation_groups: dict[str, str] = (
+            extract_time_calculation_group_refs(payload)
+            if time_calculation_group_index is not None
+            else {}
+        )
+        for group_business_id, _snapshot_wid in time_calculation_groups.items():
+            group_wid = group_business_id_to_wid.get(group_business_id)
+            if group_wid is None:
+                closure.unresolved_time_calculation_group_ids.add(group_business_id)
+                continue
+            if group_wid == node.source_wid:
+                continue
+            dep_id = node_id_for(NodeKind.TIME_CALCULATION_GROUP, group_wid)
+            dep = closure.nodes.get(dep_id)
+            if dep is None:
+                fetched = time_calculation_group_index.payload(group_wid)
+                if fetched is None:
+                    closure.unresolved_time_calculation_group_ids.add(group_business_id)
+                    continue
+                dep = _time_calculation_group_node(group_wid, fetched)
+            _link(dep, dep_id, node)
+
         dashboards: dict[str, tuple[str, bool]] = (
             extract_dashboard_refs(payload) if dashboard_index is not None else {}
         )
@@ -598,6 +781,8 @@ def resolve_closure(
                 continue  # already handled as a gauge range
             if ref_wid in indicators:
                 continue  # already handled as an analytic indicator
+            if ref_wid in time_calculation_tags:
+                continue  # already handled as a time calculation tag
             if ref_wid not in cf_index:
                 closure.passthrough_wids.add(ref_wid)
                 continue

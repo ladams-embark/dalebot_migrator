@@ -43,6 +43,14 @@ from wdmigrator.secrets import Secret, redact
 #: is rejected live on this tenant — see docs/WSDL_NOTES.md.
 DEFAULT_SERVICE_NAME = "Core_Implementation_Service"
 
+#: Time Tracking configuration lives on its own implementer service. The ops
+#: for Time Calculations (Get/Put_Time_Calculation), Time Calculation Groups,
+#: and Time Calculation Tags are all here — not on Core. Requires an
+#: implementer account on both source and destination, same as dashboards.
+#: Note: these ops do NOT accept `Response_Group` (the WSDL signature is just
+#: Request_References + Response_Filter + version).
+TIME_TRACKING_SERVICE_NAME = "Time_Tracking_Implementation_Service"
+
 #: Hardcoded rather than read from WD_WWS_VERSION — a version has to work
 #: across every tenant this tool talks to in one run (source and destination
 #: are almost always different tenants), and the max supported version isn't
@@ -168,6 +176,10 @@ class Connection:
     limiter: RateLimiter = field(default_factory=RateLimiter)
     #: Kept only so error text and envelopes can be redacted before display.
     _secrets: tuple[Secret, ...] = field(default=(), repr=False)
+    #: Kept so `for_service()` can build a sibling connection for a second
+    #: SOAP service (e.g. Time_Tracking_Implementation_Service) without
+    #: forcing every caller to re-thread credentials through the engine.
+    _credentials: "Credentials | None" = field(default=None, repr=False)
 
     @property
     def label(self) -> str:
@@ -179,6 +191,41 @@ class Connection:
     def redact(self, text: str) -> str:
         """Strip this connection's credentials out of arbitrary text."""
         return redact(text, self._secrets)
+
+    def for_service(
+        self,
+        service_name: str,
+        *,
+        version: str | None = None,
+    ) -> "Connection":
+        """Open a sibling connection for a different SOAP service.
+
+        Same target, same role, same credentials, same rate limiter (so both
+        services share the tenant's per-second budget). Used when a kind of
+        object we need lives on a service other than
+        :data:`DEFAULT_SERVICE_NAME` — Time_Tracking_Implementation_Service is
+        the first such case.
+
+        If this connection has no credentials retained (e.g. built by a test
+        with a bare ``Connection(...)``), the call raises: opening a second
+        client without re-authenticating cannot work.
+        """
+        if self._credentials is None:
+            raise AuthError(
+                "Connection has no retained credentials; for_service() cannot "
+                "build a sibling client. Use make_client() directly."
+            )
+        sibling = make_client(
+            self.target,
+            self._credentials,
+            role=self.role,
+            service_name=service_name,
+            version=version or self.version,
+        )
+        # Share the limiter — Workday's ~10 calls/sec ceiling is per-tenant,
+        # not per-service, so a second client must draw from the same budget.
+        sibling.limiter = self.limiter
+        return sibling
 
 
 @dataclass(frozen=True)
@@ -264,6 +311,7 @@ def make_client(
         version=version,
         limiter=limiter,
         _secrets=(credentials.password,),
+        _credentials=credentials,
     )
 
 

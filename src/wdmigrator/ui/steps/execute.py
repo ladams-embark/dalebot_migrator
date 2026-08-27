@@ -21,6 +21,8 @@ from wdmigrator.api import (
     ReferenceDecision,
     build_plan,
     find_reference_sites,
+    TIME_TRACKING_KINDS,
+    TIME_TRACKING_SERVICE_NAME,
     iter_check_existence,
     iter_execute,
 )
@@ -160,15 +162,35 @@ def _apply_decisions(state: WizardState, rows: list, edited) -> None:
         )
 
 
+def _plan_needs_tt(state: WizardState) -> bool:
+    return any(
+        n.kind in TIME_TRACKING_KINDS
+        for n in (state.plan.ordered_nodes if state.plan else ())
+    )
+
+
+def _closure_needs_tt(state: WizardState) -> bool:
+    return any(
+        n.kind in TIME_TRACKING_KINDS
+        for n in (state.closure.nodes.values() if state.closure else ())
+    )
+
+
 def _start_reprobe(state: WizardState) -> None:
     # Same match indexes as the Conflicts probe, and not optional here either:
     # a re-probe without them would revert every cross-tenant match back to
     # CREATE, so answering one reference question would silently arm a run that
     # duplicates every shared object.
+    tt_connection = (
+        state.dest.connection.for_service(TIME_TRACKING_SERVICE_NAME)
+        if _closure_needs_tt(state)
+        else None
+    )
     state.reprobe_job = start_job(
         iter_check_existence(
             state.dest.connection,
             state.closure,
+            tt_connection=tt_connection,
             **destination_match_indexes(state),
         )
     )
@@ -289,10 +311,16 @@ def _render_reference_resolution(state: WizardState) -> None:
 
 def _start(state: WizardState) -> None:
     guard = build_guard(state, dry_run=False)
+    tt_connection = (
+        state.dest.connection.for_service(TIME_TRACKING_SERVICE_NAME)
+        if _plan_needs_tt(state)
+        else None
+    )
     try:
         generator = iter_execute(
             state.dest.connection, state.plan, guard,
             owner_reference=owner_reference(state), stop_on_failure=True,
+            tt_connection=tt_connection,
         )
     except GuardViolation as exc:
         theme.banner("danger", "Blocked by the write guard", str(exc))

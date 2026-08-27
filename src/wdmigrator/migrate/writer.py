@@ -54,6 +54,7 @@ from wdmigrator.migrate.planner import (
 )
 from wdmigrator.migrate.resolver import (
     DASHBOARD_TABBED_BY_KIND,
+    TIME_TRACKING_KINDS,
     WORKLET_BACKREF_FIELDS,
     Node,
     NodeKind,
@@ -1189,11 +1190,161 @@ _OPERATIONS = {
     NodeKind.ANALYTIC_INDICATOR: "Put_Analytic_Indicator",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["put"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["put"],
+    NodeKind.TIME_CALCULATION_TAG: "Put_Time_Calculation_Tag",
+    NodeKind.TIME_CALCULATION_GROUP: "Put_Time_Calculation_Group",
+    NodeKind.TIME_CALCULATION: "Put_Time_Calculation",
 }
 
 
 def operation_for(node: Node) -> str:
     return _OPERATIONS[node.kind]
+
+
+def build_time_calculation_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+) -> dict:
+    """Arguments for ``Put_Time_Calculation``.
+
+    Deliberately a light-touch build: deep-copy the source payload's
+    ``Time_Calculation_Data`` and substitute WIDs against ``wid_map``, so
+    tags and groups written earlier in the run are already reachable by
+    their destination WIDs. The ~15 sibling ``*_Calculation_Data`` sub-shapes
+    (Standard_Overtime, Consecutive_Day, Shift_Differential, Flextime, etc.)
+    are all traversed by the same generic ``substitute_wids`` — no per-shape
+    handling.
+
+    **Two things this v1 does not do yet, and how to spot them:**
+
+    1. ``Time_Calculation_Group_Snapshot_ID`` values are tenant-local. If the
+       destination rejects a snapshot ID it does not recognise, the write
+       fault will name it; the remedy is to swap the snapshot reference for a
+       ``Time_Calculation_Group_Reference`` using the parent's Group business
+       ID (already in the ``ID`` list as ``parent_id``).
+    2. ``Time_Calculation_Snapshot_ID`` on the calc's own timeline is also
+       tenant-local; a create should probably strip these before writing.
+
+    Both are deferred until a live dry-run surfaces one of the faults —
+    guessing at the exact shape without evidence risks introducing edits
+    that break the far more common WIDs-match case.
+    """
+    data = node.payload.get("Time_Calculation_Data")
+    if not data:
+        raise WriteError(
+            f"{node.name!r} has no Time_Calculation_Data to write."
+        )
+
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+
+    payload: dict = {"Time_Calculation_Data": remapped}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE {node.name!r} without the destination's WID."
+            )
+        payload["Time_Calculation_Reference"] = {
+            "ID": [{"type": "WID", "_value_1": dest_wid}]
+        }
+
+    return payload
+
+
+def build_time_calculation_group_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+) -> dict:
+    """Arguments for ``Put_Time_Calculation_Group``.
+
+    Groups carry ``Time_Tracking_Eligibility_Rule_Reference`` entries pointing
+    at rules that this tool does NOT migrate — they are treated as
+    destination prerequisites. If a referenced rule exists in the destination
+    under the same WID, ``substitute_wids`` leaves it in place; otherwise the
+    write fails with a blocking reference identifying the rule, so the user
+    can create it in Workday and re-run.
+
+    The business ``Time_Calculation_Group_ID`` is a stable cross-tenant
+    identity (confirmed live 2026-08-27), so a created group keeps its source
+    ID and stays findable by it.
+    """
+    data = node.payload.get("Time_Calculation_Group_Data")
+    if not data:
+        raise WriteError(
+            f"{node.name!r} has no Time_Calculation_Group_Data to write."
+        )
+
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+
+    payload: dict = {"Time_Calculation_Group_Data": remapped}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE {node.name!r} without the destination's WID."
+            )
+        payload["Time_Calculation_Group_Reference"] = {
+            "ID": [{"type": "WID", "_value_1": dest_wid}]
+        }
+
+    return payload
+
+
+def build_time_calculation_tag_payload(
+    node: Node,
+    wid_map: Mapping[str, str],
+    *,
+    action: Action,
+    dest_wid: str | None = None,
+    reference_decisions: Mapping[str, ReferenceDecision] | None = None,
+) -> dict:
+    """Arguments for ``Put_Time_Calculation_Tag``.
+
+    Tag payloads are small — ``Time_Calculation_Tag_Data`` carries a business
+    ``ID`` (e.g. ``Overtime``, ``Regular``) plus a ``Name``. The business ID is
+    a stable cross-tenant identity, so a created tag keeps the source ID and
+    stays findable by it. No custom references inside the data block are
+    known to require rewriting, but ``substitute_wids`` is applied for
+    consistency with every other kind — a WID that has no mapping passes
+    through untouched.
+
+    ``Put_Time_Calculation_Tag`` lives on
+    ``Time_Tracking_Implementation_Service``; the writer routes the connection
+    on that basis before this function is called.
+    """
+    data = node.payload.get("Time_Calculation_Tag_Data")
+    if not data:
+        raise WriteError(
+            f"{node.name!r} has no Time_Calculation_Tag_Data to write."
+        )
+
+    remapped = substitute_wids(data, wid_map)
+    if reference_decisions:
+        _apply_reference_decisions(remapped, reference_decisions)
+
+    payload: dict = {"Time_Calculation_Tag_Data": remapped}
+
+    if action is Action.UPDATE:
+        if not dest_wid:
+            raise WriteError(
+                f"Cannot UPDATE {node.name!r} without the destination's WID."
+            )
+        payload["Time_Calculation_Tag_Reference"] = {
+            "ID": [{"type": "WID", "_value_1": dest_wid}]
+        }
+
+    return payload
 
 
 def build_calculated_measure_payload(
@@ -1306,6 +1457,9 @@ _RESPONSE_REFERENCE_KEY = {
     NodeKind.ANALYTIC_INDICATOR: "Analytic_Indicator_Reference",
     NodeKind.DASHBOARD: DASHBOARD_FLAVOURS[False]["reference"],
     NodeKind.DASHBOARD_TABBED: DASHBOARD_FLAVOURS[True]["reference"],
+    NodeKind.TIME_CALCULATION_TAG: "Time_Calculation_Tag_Reference",
+    NodeKind.TIME_CALCULATION_GROUP: "Time_Calculation_Group_Reference",
+    NodeKind.TIME_CALCULATION: "Time_Calculation_Reference",
 }
 
 
@@ -1677,6 +1831,21 @@ def write_node(
                 node, plan.wid_map, action=action, dest_wid=dest_wid,
                 reference_decisions=plan.reference_decisions,
             )
+        elif node.kind is NodeKind.TIME_CALCULATION_TAG:
+            payload = build_time_calculation_tag_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
+            )
+        elif node.kind is NodeKind.TIME_CALCULATION_GROUP:
+            payload = build_time_calculation_group_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
+            )
+        elif node.kind is NodeKind.TIME_CALCULATION:
+            payload = build_time_calculation_payload(
+                node, plan.wid_map, action=action, dest_wid=dest_wid,
+                reference_decisions=plan.reference_decisions,
+            )
         elif node.kind is NodeKind.REPORT:
             payload = build_report_payload(
                 node,
@@ -1859,6 +2028,7 @@ def iter_execute(
     *,
     owner_reference: dict | None = None,
     stop_on_failure: bool = True,
+    tt_connection: Connection | None = None,
 ) -> Iterator[WriteProgress]:
     """Execute the plan in dependency order, yielding one event per object.
 
@@ -1871,10 +2041,22 @@ def iter_execute(
     worse end state than stopping with a partial, well-understood migration.
     Remaining objects are reported ``NOT_ATTEMPTED`` rather than silently
     dropped.
+
+    ``tt_connection`` is required whenever the plan contains any node whose
+    kind is in :data:`TIME_TRACKING_KINDS`. Without one, those writes fail
+    with an explicit fault rather than silently going to the wrong service.
     """
     if not guard.dry_run and connection.role is not Role.DESTINATION:
         raise WriteError(
             "Live execution requires a Role.DESTINATION connection."
+        )
+    if (
+        not guard.dry_run
+        and tt_connection is not None
+        and tt_connection.role is not Role.DESTINATION
+    ):
+        raise WriteError(
+            "Live execution requires a Role.DESTINATION tt_connection."
         )
 
     nodes = plan.ordered_nodes
@@ -1900,8 +2082,33 @@ def iter_execute(
             )
             continue
 
+        if node.kind in TIME_TRACKING_KINDS and tt_connection is None:
+            record = WriteRecord(
+                node_id=node.node_id,
+                kind=node.kind.value,
+                name=node.name,
+                reference_id=node.reference_id,
+                action=plan.action_for(node),
+                status=WriteStatus.FAILED,
+                fault=(
+                    f"{node.kind.value} lives on "
+                    "Time_Tracking_Implementation_Service, but no "
+                    "time-tracking connection was provided. Open one with "
+                    "Connection.for_service(TIME_TRACKING_SERVICE_NAME) and "
+                    "pass it as `tt_connection`."
+                ),
+                dry_run=guard.dry_run,
+            )
+            yield WriteProgress(
+                position=position, total=total, node=node, record=record
+            )
+            if stop_on_failure:
+                halted = True
+            continue
+
+        routed = tt_connection if node.kind in TIME_TRACKING_KINDS else connection
         record = write_node(
-            connection, node, plan, guard, owner_reference=owner_reference
+            routed, node, plan, guard, owner_reference=owner_reference
         )
 
         # Register the new WID immediately so the next payload can use it.

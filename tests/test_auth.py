@@ -9,7 +9,15 @@ The `live` tests at the bottom read from the source tenant only and never write.
 
 import pytest
 
-from wdmigrator.auth import AuthError, Credentials, Role, make_client, verify_connection
+from wdmigrator.auth import (
+    AuthError,
+    Connection,
+    Credentials,
+    Role,
+    TIME_TRACKING_SERVICE_NAME,
+    make_client,
+    verify_connection,
+)
 from wdmigrator.config.targets import target_from_parts
 from wdmigrator.secrets import Secret
 
@@ -201,6 +209,60 @@ class TestWSDLResolution:
         assert "some_other_tenant" in resolved
 
 
+class TestServiceSwitching:
+    """`Connection.for_service()` opens a sibling client on another SOAP service.
+
+    Time Calculations, Groups, and Tags live on
+    Time_Tracking_Implementation_Service — not on Core — so the engine has to
+    hold two connections against the same tenant. These tests cover the wiring
+    without needing the TT WSDL bundled.
+    """
+
+    def test_time_tracking_constant_is_exported_from_auth(self):
+        assert TIME_TRACKING_SERVICE_NAME == "Time_Tracking_Implementation_Service"
+
+    def test_time_tracking_constant_is_reexported_from_api(self):
+        from wdmigrator import api
+
+        assert api.TIME_TRACKING_SERVICE_NAME == TIME_TRACKING_SERVICE_NAME
+
+    def test_for_service_without_retained_credentials_raises(self):
+        # A bare Connection (e.g. one hand-built by a test) has no credentials
+        # and cannot open a sibling — the error must say why.
+        conn = Connection(
+            target=SOURCE,
+            role=Role.SOURCE,
+            service=object(),
+            client=object(),
+            username="whatever@commitconsulting_dpt1",
+            endpoint="https://example/",
+            service_name="Core_Implementation_Service",
+            version="v46.0",
+        )
+        with pytest.raises(AuthError, match="retained credentials"):
+            conn.for_service("Time_Tracking_Implementation_Service")
+
+    def test_for_service_reuses_credentials_and_shares_the_limiter(self, wsdl_path):
+        # Offline coverage: use the bundled Core WSDL for both the parent and
+        # the "sibling" build. The point of this test is the wiring — same
+        # credentials → same ws-username, same limiter object — not that a
+        # different WSDL loaded.
+        conn = make_client(SOURCE, creds(), wsdl_source=wsdl_path)
+        # for_service resolves the WSDL from the tenant unless WD_WSDL_PATH is
+        # set. Point it at the bundled one so this stays offline.
+        import os as _os
+        _os.environ["WD_WSDL_PATH"] = wsdl_path
+        try:
+            sibling = conn.for_service("Core_Implementation_Service")
+        finally:
+            del _os.environ["WD_WSDL_PATH"]
+        assert sibling is not conn
+        assert sibling.target is conn.target
+        assert sibling.role is conn.role
+        assert sibling.username == conn.username
+        assert sibling.limiter is conn.limiter, "TT and Core share the tenant's rate budget"
+
+
 @pytest.mark.live
 class TestLiveSourceConnection:
     """Read-only checks against the real source tenant. Never writes.
@@ -221,6 +283,24 @@ class TestLiveSourceConnection:
         status = verify_connection(live_source_connection)
         assert status.endpoint == live_source_connection.endpoint
         assert "Core_Implementation_Service" in status.endpoint
+
+    def test_for_service_opens_time_tracking_implementation_service(
+        self, live_source_connection
+    ):
+        """The plumbing that Time Calculation migration relies on."""
+        tt = live_source_connection.for_service(TIME_TRACKING_SERVICE_NAME)
+        assert tt.service_name == TIME_TRACKING_SERVICE_NAME
+        assert TIME_TRACKING_SERVICE_NAME in tt.endpoint
+        # Ops we need for Time Calculation migration must be exposed.
+        for op in (
+            "Get_Time_Calculations",
+            "Put_Time_Calculation",
+            "Get_Time_Calculation_Groups",
+            "Put_Time_Calculation_Group",
+            "Get_Time_Calculation_Tags",
+            "Put_Time_Calculation_Tag",
+        ):
+            assert hasattr(tt.service, op), f"{op} missing from TT service"
 
 
 class TestFailureExplanation:

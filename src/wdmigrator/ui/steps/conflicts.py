@@ -34,6 +34,7 @@ from wdmigrator.api import (
     iter_check_existence,
     validate_plan,
 )
+from wdmigrator.api import TIME_TRACKING_KINDS, TIME_TRACKING_SERVICE_NAME
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_blockers, render_job_progress
 from wdmigrator.ui.indexes import (
@@ -48,11 +49,23 @@ from wdmigrator.ui.state import WizardState, reset_downstream
 STEP_ID = "conflicts"
 
 
+def _needs_tt(state: WizardState) -> bool:
+    return any(
+        n.kind in TIME_TRACKING_KINDS for n in (state.closure.nodes.values() if state.closure else ())
+    )
+
+
 def _start_probe(state: WizardState) -> None:
+    tt_connection = (
+        state.dest.connection.for_service(TIME_TRACKING_SERVICE_NAME)
+        if _needs_tt(state)
+        else None
+    )
     state.existence_job = start_job(
         iter_check_existence(
             state.dest.connection,
             state.closure,
+            tt_connection=tt_connection,
             **destination_match_indexes(state),
         )
     )
