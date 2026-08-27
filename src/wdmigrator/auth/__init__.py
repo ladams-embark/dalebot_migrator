@@ -7,6 +7,7 @@ the address embedded in the WSDL — see `client.py` for why that matters.
 from wdmigrator.auth.client import (
     DEFAULT_SERVICE_NAME,
     DEFAULT_VERSION,
+    TIME_TRACKING_SERVICE_NAME,
     AuthError,
     Connection,
     ConnectionStatus,
@@ -28,6 +29,7 @@ from wdmigrator.auth.endpoint_discovery import (
 __all__ = [
     "DEFAULT_SERVICE_NAME",
     "DEFAULT_VERSION",
+    "TIME_TRACKING_SERVICE_NAME",
     "AuthError",
     "Connection",
     "ConnectionStatus",

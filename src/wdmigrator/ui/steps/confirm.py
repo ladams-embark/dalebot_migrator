@@ -32,6 +32,8 @@ from wdmigrator.api import (
     Blocker,
     Level,
     NodeKind,
+    TIME_TRACKING_KINDS,
+    TIME_TRACKING_SERVICE_NAME,
     evaluate_guards,
     iter_execute,
 )
@@ -65,9 +67,17 @@ def _render_owner_remap(state: WizardState) -> None:
 
 def _run_dry_run(state: WizardState) -> None:
     guard = build_guard(state, dry_run=True)
+    tt_connection = (
+        state.dest.connection.for_service(TIME_TRACKING_SERVICE_NAME)
+        if any(
+            n.kind in TIME_TRACKING_KINDS for n in state.plan.ordered_nodes
+        )
+        else None
+    )
     generator = iter_execute(
         state.dest.connection, state.plan, guard,
         owner_reference=owner_reference(state), stop_on_failure=False,
+        tt_connection=tt_connection,
     )
     state.dry_run_job = start_job(generator)
     state.dry_run_records = []

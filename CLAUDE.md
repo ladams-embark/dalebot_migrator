@@ -55,6 +55,13 @@ Calculated fields → calculated measures → reports → prompt fields → prom
 sets → custom dashboards (tabbed and untabbed). The order falls out of the DAG,
 not hardcoded phases.
 
+Also, on the Time Tracking Implementation Service:
+time calculation tags → time calculation groups → time calculations. These
+form their own mini-DAG driven by the same closure/planner/writer, routed to
+the sibling connection via `TIME_TRACKING_KINDS`. Business IDs
+(`Time_Calculation_ID`, `Time_Calculation_Group_ID`, `Time_Calculation_Tag_ID`)
+are all stable cross-tenant lookup keys — unlike `Custom_Report_ID`.
+
 ### Structural rules
 - **Nothing under `src/wdmigrator/` except `ui/` may import streamlit or
   pandas.** The engine stays importable and testable without them.
@@ -101,9 +108,12 @@ SOAP endpoint pattern:
 https://{services_host}/ccx/service/{tenant}/{service}/{version}
 ```
 
-### Service and version
-- **Service**: `Core_Implementation_Service` — not `Report_Metadata` (rejected on every tenant tested).
-- **Version**: `v46.0` hardcoded in `auth/client.py`. Highest version that works on all tenants seen. Must be in the URL path.
+### Services and version
+Two services are in use, both at `v46.0`:
+- **`Core_Implementation_Service`** — calculated fields, reports, dashboards, prompt sets/fields, gauge ranges, analytic indicators. Default. `Report_Metadata` is rejected on every tenant tested.
+- **`Time_Tracking_Implementation_Service`** — Time Calculations, Groups, Tags. Implementer-only. Ops do NOT accept `Response_Group` in their WSDL signature (`Request_References` + `Response_Filter` + `version` only). Opened via `Connection.for_service(TIME_TRACKING_SERVICE_NAME)`, which shares the target, credentials, and rate limiter with the Core connection.
+
+**Version**: `v46.0` hardcoded in `auth/client.py`. Highest version that works on all tenants seen. Must be in the URL path.
 
 ### Authentication
 SOAP WS-Security with ISU credentials. Username format: `{isu_username}@{tenant}`.
@@ -122,6 +132,9 @@ Policy Changes" — changes are not immediate.
 | `Put_Custom_Dashboard_with_Tabs` / `_without_Tabs` | Write | **Implementer account required**. Has `Add_Only` attribute |
 | `Get_Prompt_Sets` / `Put_Prompt_Set` | Both | Readable by plain ISU; Put is fault-only |
 | `Get_Prompt_Fields` / `Put_Prompt_Field` | Both | **Implementer account required** |
+| `Get_Time_Calculations` / `Put_Time_Calculation` | Both | On **Time_Tracking_Implementation_Service**. Implementer-only. No `Response_Group` |
+| `Get_Time_Calculation_Groups` / `Put_Time_Calculation_Group` | Both | Same service. Groups reference `Time_Tracking_Eligibility_Rule_Reference` — treated as destination prerequisites |
+| `Get_Time_Calculation_Tags` / `Put_Time_Calculation_Tag` | Both | Same service. Leaf kind |
 
 Dashboard operations require an implementer account — no amount of domain
 granting fixes it. `discovery/inventory.py:requires_implementer` detects this.
@@ -193,6 +206,23 @@ A dashboard references its reports as worklets; a report must carry
 Solved by writing the dashboard as a shell (no worklet configs), writing the
 reports with the real dashboard reference, then re-writing the dashboard
 complete (without `Add_Only`). Reports used as worklets must be `Shared=True`.
+
+### Time Calculation snapshot IDs
+A Time Calculation references its groups through
+`Time_Calculation_Group_Snapshot_Reference`, whose ID list carries a
+tenant-local `Time_Calculation_Group_Snapshot_ID` **plus** a `parent_id` naming
+the stable `Time_Calculation_Group_ID`. The writer (v1, `build_time_calculation_payload`)
+passes the source's snapshot IDs through unchanged; that works when tenants
+share content (dpt1 ↔ dest) but is expected to fail on a fresh destination —
+the fix is to swap the snapshot reference for a `Time_Calculation_Group_Reference`
+using the parent's Group business ID. Deferred until a live dry-run surfaces
+the fault. The calc's own `Time_Calculation_Snapshot_ID` on `Time_Calculation_Snapshot_Data`
+is also tenant-local; a create should probably strip it.
+
+### Time Tracking Eligibility Rules
+Groups reference these but the tool does NOT migrate them. Treated as
+destination prerequisites — if a referenced rule isn't in the destination,
+the Group write fails with a blocking reference the user acts on manually.
 
 ### Prompt field gap
 Prompt sets can depend on prompt fields (`Get_Prompt_Fields`/`Put_Prompt_Field`

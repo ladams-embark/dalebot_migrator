@@ -233,6 +233,58 @@ class PromptFieldSummary:
 
 
 @dataclass(frozen=True)
+class TimeCalculationSummary:
+    """The main object of the Time Tracking calc migration.
+
+    A Time Calculation names input tags, produces output tags, and belongs to
+    one or more groups (through snapshots). Business ``Time_Calculation_ID``
+    (e.g. ``Weekly Overtime > 40 Hrs``) is a stable cross-tenant identity —
+    confirmed live 2026-08-27, both by-WID and by-business-ID lookups
+    succeed on both dpt1 and destination.
+    """
+
+    wid: str
+    reference_id: str | None
+    name: str | None
+    priority: str | None = None
+    inactive: bool = False
+
+
+@dataclass(frozen=True)
+class TimeCalculationGroupSummary:
+    """A container that scopes Time Calculations to a set of workers.
+
+    Groups are how a Time Calculation reaches workers — a calculation joins
+    N groups, and each group binds to one or more
+    ``Time_Tracking_Eligibility_Rule_Reference`` entries. The eligibility
+    rules themselves are treated as **prerequisites** — this tool does not
+    migrate them — and a Group write will fail with a blocking reference if
+    a named rule does not exist in the destination.
+    """
+
+    wid: str
+    reference_id: str | None
+    name: str | None
+    #: How many eligibility rules this group binds to. Useful for a picker
+    #: hint and for diagnosing empty groups.
+    rule_count: int = 0
+
+
+@dataclass(frozen=True)
+class TimeCalculationTagSummary:
+    """A tag that a Time Calculation reads, adds, or removes.
+
+    Business ID (``Time_Calculation_Tag_ID`` — e.g. ``Regular``, ``Overtime``)
+    IS a usable lookup key on Time_Tracking_Implementation_Service, unlike
+    ``Custom_Report_ID``. Confirmed live 2026-08-27 against dpt1.
+    """
+
+    wid: str
+    reference_id: str | None
+    name: str | None
+
+
+@dataclass(frozen=True)
 class PromptSetSummary:
     wid: str
     reference_id: str | None
@@ -782,6 +834,178 @@ def lookup_gauge_range(
     )
 
 
+def lookup_time_calculation(
+    connection: Connection,
+    *,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one Time Calculation by ``Time_Calculation_ID`` or WID.
+
+    Business ID works as a cross-tenant identity — confirmed live 2026-08-27,
+    "Weekly Overtime > 40 Hrs" resolves by ID on both dpt1 and destination.
+
+    ``connection`` must be bound to ``Time_Tracking_Implementation_Service``.
+
+    Requires an implementer account.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    ref = (
+        _reference("Time_Calculation_ID", reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        response = connection.service.Get_Time_Calculations(
+            Request_References={"Time_Calculation_Reference": [ref]},
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get("Time_Calculation") or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get("Time_Calculation_Reference"))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get("Time_Calculation_ID") or reference_id,
+    )
+
+
+def lookup_time_calculation_group(
+    connection: Connection,
+    *,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one Time Calculation Group by ``Time_Calculation_Group_ID`` or WID.
+
+    Business ID works as a cross-tenant identity — confirmed live 2026-08-27,
+    ``USA_Overtime_Calculations`` resolves by ID on both source and destination.
+
+    ``connection`` must be bound to ``Time_Tracking_Implementation_Service``.
+
+    Requires an implementer account.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    ref = (
+        _reference("Time_Calculation_Group_ID", reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        response = connection.service.Get_Time_Calculation_Groups(
+            Request_References={"Time_Calculation_Group_Reference": [ref]},
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get("Time_Calculation_Group") or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get("Time_Calculation_Group_Reference"))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get("Time_Calculation_Group_ID") or reference_id,
+    )
+
+
+def lookup_time_calculation_tag(
+    connection: Connection,
+    *,
+    reference_id: str | None = None,
+    wid: str | None = None,
+) -> LookupResult:
+    """Fetch one Time Calculation Tag by ``Time_Calculation_Tag_ID`` or WID.
+
+    The business ID (e.g. ``Overtime``, ``Regular``) works as a cross-tenant
+    identity — confirmed live 2026-08-27 against dpt1: both by-WID and
+    by-business-ID lookups succeed. Unlike ``Custom_Report_ID`` this is a real
+    lookup key, so probing the destination for existence is a single call.
+
+    ``connection`` must be bound to ``Time_Tracking_Implementation_Service``;
+    ``Get_Time_Calculation_Tags`` is not exposed on Core. See
+    :data:`~wdmigrator.auth.TIME_TRACKING_SERVICE_NAME` and
+    ``Connection.for_service``.
+
+    Requires an implementer account.
+    """
+    if bool(reference_id) == bool(wid):
+        raise ValueError("Pass exactly one of reference_id or wid.")
+
+    ref = (
+        _reference("Time_Calculation_Tag_ID", reference_id)
+        if reference_id
+        else _reference("WID", wid)
+    )
+
+    try:
+        connection.limiter.wait()
+        # This operation, like the other Time_Tracking_Implementation_Service
+        # ops, does not accept Response_Group in its WSDL signature.
+        response = connection.service.Get_Time_Calculation_Tags(
+            Request_References={"Time_Calculation_Tag_Reference": [ref]},
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = connection.redact(str(exc))
+        return LookupResult(
+            outcome=classify_fault(message),
+            reference_id=reference_id,
+            wid=wid,
+            fault=message,
+        )
+
+    data = serialize_object(response)
+    items = (data.get("Response_Data") or {}).get("Time_Calculation_Tag") or []
+    if not items:
+        return LookupResult(
+            outcome=LookupOutcome.NOT_FOUND, reference_id=reference_id, wid=wid
+        )
+
+    item = items[0]
+    ids = ids_of(item.get("Time_Calculation_Tag_Reference"))
+    return LookupResult(
+        outcome=LookupOutcome.FOUND,
+        data=item,
+        wid=ids.get("WID"),
+        reference_id=ids.get("Time_Calculation_Tag_ID") or reference_id,
+    )
+
+
 def lookup_prompt_field(
     connection: Connection,
     *,
@@ -1237,6 +1461,61 @@ def _prompt_field_summary(item: dict) -> PromptFieldSummary | None:
     )
 
 
+def _time_calculation_summary(item: dict) -> TimeCalculationSummary | None:
+    ids = ids_of(item.get("Time_Calculation_Reference"))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = item.get("Time_Calculation_Data") or {}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return TimeCalculationSummary(
+        wid=wid,
+        reference_id=ids.get("Time_Calculation_ID"),
+        name=(data or {}).get("Name"),
+        priority=(data or {}).get("Priority"),
+        inactive=bool((data or {}).get("Inactive")),
+    )
+
+
+def _time_calculation_group_summary(item: dict) -> TimeCalculationGroupSummary | None:
+    ids = ids_of(item.get("Time_Calculation_Group_Reference"))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = item.get("Time_Calculation_Group_Data") or {}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    rules = (data or {}).get("Time_Tracking_Eligibility_Rule_Reference") or []
+    if isinstance(rules, dict):
+        rules = [rules]
+    return TimeCalculationGroupSummary(
+        wid=wid,
+        reference_id=ids.get("Time_Calculation_Group_ID"),
+        name=(data or {}).get("Name"),
+        rule_count=len(rules),
+    )
+
+
+def _time_calculation_tag_summary(item: dict) -> TimeCalculationTagSummary | None:
+    ids = ids_of(item.get("Time_Calculation_Tag_Reference"))
+    wid = ids.get("WID")
+    if not wid:
+        return None
+    data = item.get("Time_Calculation_Tag_Data") or {}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    # The name field is Time_Calculation_Tag_Name on this service — confirmed
+    # live 2026-08-27 against dpt1 (100/100 tags): the more common ``Name``
+    # slot is not present at all. ``Name`` is checked as a fallback so a
+    # future variant does not silently drop the picker label.
+    return TimeCalculationTagSummary(
+        wid=wid,
+        reference_id=ids.get("Time_Calculation_Tag_ID"),
+        name=(data or {}).get("Time_Calculation_Tag_Name") or (data or {}).get("Name"),
+    )
+
+
 def _prompt_set_summary(item: dict) -> PromptSetSummary | None:
     ids = ids_of(item.get("Prompt_Set_Reference"))
     wid = ids.get("WID")
@@ -1399,6 +1678,91 @@ def iter_gauge_range_index(
     )
 
 
+def iter_time_calculation_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every Time Calculation. One page: 162 on dpt1.
+
+    This is the main object migration targets. Each Calculation carries a
+    heavy payload (input tags, output tags, one of ~15
+    ``*_Calculation_Data`` sub-shapes) that the writer copies through
+    largely intact, applying only WID substitution — the sub-shape
+    handling is generic, not per-type.
+
+    ``Get_Time_Calculations`` does not accept ``Response_Group`` in its WSDL
+    signature.
+
+    Requires an implementer account.
+    """
+    return _iter_index(
+        connection,
+        kind="time_calculation",
+        operation_name="Get_Time_Calculations",
+        collection_key="Time_Calculation",
+        summarise=_time_calculation_summary,
+        page_size=page_size,
+    )
+
+
+def iter_time_calculation_group_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every Time Calculation Group. One page: 56 on dpt1.
+
+    Time Calculations reference groups through
+    ``Time_Calculation_Group_Snapshot_Reference`` (whose ``parent_id`` carries
+    the stable ``Time_Calculation_Group_ID``), so a calculation cannot be
+    written until every group it names exists in the destination.
+
+    Groups themselves reference ``Time_Tracking_Eligibility_Rule_Reference``.
+    Eligibility rules are treated as prerequisites — this tool does not
+    migrate them — and a Group write pointing at a rule the destination lacks
+    will fail with a blocking reference the user can act on.
+
+    ``Get_Time_Calculation_Groups`` does not accept ``Response_Group`` in its
+    WSDL signature.
+
+    Requires an implementer account.
+    """
+    return _iter_index(
+        connection,
+        kind="time_calculation_group",
+        operation_name="Get_Time_Calculation_Groups",
+        collection_key="Time_Calculation_Group",
+        summarise=_time_calculation_group_summary,
+        page_size=page_size,
+    )
+
+
+def iter_time_calculation_tag_index(
+    connection: Connection, *, page_size: int = PAGE_SIZE
+) -> Iterator[IndexProgress]:
+    """Sweep every Time Calculation Tag. One page: 100 on dpt1.
+
+    Time Calculations reference these through ``Include_Tags_Data``,
+    ``Add_Tags_Reference``, and ``Remove_Tags_Reference``, and a calculation
+    cannot be written until every tag it names exists in the destination.
+
+    ``Get_Time_Calculation_Tags`` does not accept ``Response_Group`` in its
+    WSDL signature — same as ``Get_Gauge_Ranges``. The ``Time_Calculation_Tag_Data``
+    block comes back regardless.
+
+    ``connection`` must be bound to ``Time_Tracking_Implementation_Service``.
+    Use ``Connection.for_service(TIME_TRACKING_SERVICE_NAME)`` to obtain one
+    that shares the source connection's target, role, and rate limiter.
+
+    Requires an implementer account; see :data:`IMPLEMENTER_REQUIRED_REMEDY`.
+    """
+    return _iter_index(
+        connection,
+        kind="time_calculation_tag",
+        operation_name="Get_Time_Calculation_Tags",
+        collection_key="Time_Calculation_Tag",
+        summarise=_time_calculation_tag_summary,
+        page_size=page_size,
+    )
+
+
 def iter_prompt_field_index(
     connection: Connection, *, page_size: int = PAGE_SIZE
 ) -> Iterator[IndexProgress]:
@@ -1524,6 +1888,9 @@ _SUMMARY_TYPES = {
     "report": ReportSummary,
     "dashboard": DashboardSummary,
     "prompt_set": PromptSetSummary,
+    "time_calculation_tag": TimeCalculationTagSummary,
+    "time_calculation_group": TimeCalculationGroupSummary,
+    "time_calculation": TimeCalculationSummary,
 }
 
 

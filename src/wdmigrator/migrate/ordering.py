@@ -496,6 +496,86 @@ def extract_prompt_set_refs(obj: Any) -> dict[str, str]:
     return {wid: business for wid, (_, business) in collected.items()}
 
 
+#: The business ID a Time Calculation Tag reference carries. Stable across
+#: tenants — confirmed live 2026-08-27, dpt1 ⇄ dest lookups by
+#: ``Time_Calculation_Tag_ID`` both succeed.
+_TIME_CALCULATION_TAG_ID_TYPE = "Time_Calculation_Tag_ID"
+
+
+def extract_time_calculation_tag_refs(obj: Any) -> dict[str, str]:
+    """Time Calculation Tag references inside ``obj``, as ``{wid: id}``.
+
+    A Time Calculation names its input tags through ``Include_Tags_Data``, and
+    its output through ``Add_Tags_Reference`` / ``Remove_Tags_Reference`` (all
+    three shapes appear on the same sampled payload). A calculation cannot be
+    written until every tag it names exists in the destination, so this is a
+    real dependency — but tags themselves reach no further, so they are DAG
+    leaves.
+    """
+    collected: dict[str, tuple[str, str]] = {}
+    _collect_by_id_type(obj, (_TIME_CALCULATION_TAG_ID_TYPE,), collected)
+    return {wid: business for wid, (_, business) in collected.items()}
+
+
+#: A Time Calculation reaches its groups through
+#: ``Time_Calculation_Group_Snapshot_Reference``, whose ``ID`` list carries a
+#: ``Time_Calculation_Group_Snapshot_ID`` (tenant-local, not usable as a
+#: cross-tenant identity) alongside a ``parent_id`` naming the stable
+#: ``Time_Calculation_Group_ID``. See :func:`extract_time_calculation_group_refs`.
+_TIME_CALCULATION_GROUP_ID_TYPE = "Time_Calculation_Group_ID"
+
+
+def extract_time_calculation_group_refs(obj: Any) -> dict[str, str]:
+    """Time Calculation Group references inside ``obj``, as ``{business_id: wid}``.
+
+    A Time Calculation names its groups through
+    ``Time_Calculation_Group_Snapshot_Reference`` (each pointing at a
+    *snapshot* of a group). The snapshot ID is tenant-local; the stable
+    identity is the ``parent_id`` naming the underlying
+    ``Time_Calculation_Group_ID``. Because two snapshots of the same group
+    would collide on the ``{wid: id}`` shape used elsewhere, this returns
+    the inverted mapping — one entry per referenced Group, keyed by its
+    business ID.
+
+    The stable identity is what Phase 4's writer uses to look up the
+    destination's *current* snapshot before writing the calculation. The
+    snapshot ID itself never survives a cross-tenant migration.
+    """
+    collected: dict[str, str] = {}
+
+    def _walk(node):
+        if isinstance(node, dict):
+            entries = node.get("ID")
+            if isinstance(entries, list):
+                snapshot = None
+                parent_group_id = None
+                parent_wid = None
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    id_type = entry.get("type")
+                    if id_type == "Time_Calculation_Group_Snapshot_ID":
+                        snapshot = entry.get("_value_1")
+                        if entry.get("parent_type") == _TIME_CALCULATION_GROUP_ID_TYPE:
+                            parent_group_id = entry.get("parent_id")
+                    elif id_type == "WID":
+                        parent_wid = entry.get("_value_1")
+                if snapshot and parent_group_id and parent_group_id not in collected:
+                    # WID is the snapshot's WID, not the group's — Phase 4 will
+                    # resolve to the group's real WID via destination lookup.
+                    # Stored anyway so callers can differentiate first-seen vs.
+                    # duplicate references.
+                    collected[parent_group_id] = parent_wid or ""
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(obj)
+    return collected
+
+
 #: The two dashboard ID spaces. Disjoint, and which one appears tells you the
 #: flavour — and therefore which Get/Put operation addresses the dashboard.
 _DASHBOARD_ID_TYPES = {

@@ -59,6 +59,10 @@ def _compute(state: WizardState) -> None:
             gauge_range_index=state.gauge_range_index,
             analytic_indicator_index=state.analytic_indicator_index,
             dashboard_index=state.dashboard_index,
+            selected_time_calculation_wids=state.selected_time_calculation_wids,
+            time_calculation_index=state.time_calculation_index,
+            time_calculation_tag_index=state.time_calculation_tag_index,
+            time_calculation_group_index=state.time_calculation_group_index,
         )
     except PartialIndexError as exc:
         state.closure = None
@@ -216,6 +220,16 @@ def gate(state: WizardState) -> list[Blocker]:
             "nested dashboard",
             "Rebuild the dashboard index in Select. A dashboard shown inside "
             "another has to exist in the destination first.",
+        ),
+        (
+            sorted(state.closure.unresolved_time_calculation_tag_ids),
+            "time calculation tag",
+            "Rebuild the time calculation tag index in Select (one page).",
+        ),
+        (
+            sorted(state.closure.unresolved_time_calculation_group_ids),
+            "time calculation group",
+            "Rebuild the time calculation group index in Select (one page).",
         ),
     ):
         if missing:

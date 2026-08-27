@@ -14,6 +14,7 @@ import streamlit as st
 
 from wdmigrator.api import (
     IMPLEMENTER_REQUIRED_REMEDY,
+    TIME_TRACKING_SERVICE_NAME,
     Blocker,
     LookupOutcome,
     iter_analytic_indicator_index,
@@ -24,6 +25,9 @@ from wdmigrator.api import (
     iter_prompt_field_index,
     iter_prompt_set_index,
     iter_report_index,
+    iter_time_calculation_group_index,
+    iter_time_calculation_index,
+    iter_time_calculation_tag_index,
     lookup_report,
     lookup_report_by_name,
 )
@@ -47,6 +51,7 @@ _OBJECT_KINDS = {
     "reports": "Reports",
     "calculated_fields": "Calculated fields",
     "dashboards": "Custom dashboards",
+    "time_calculations": "Time calculations",
 }
 
 
@@ -125,6 +130,39 @@ def _source_specs(chosen: list[str], connection) -> list[IndexSpec]:
                     iterator_fn=iter_prompt_field_index,
                     connection=connection,
                     index_attr="prompt_field_index",
+                    implementer_gated=True,
+                ),
+            ]
+        )
+    if "time_calculations" in chosen:
+        # Time Tracking indexes live on Time_Tracking_Implementation_Service,
+        # not Core. Open a sibling connection sharing the same target and
+        # rate limiter — see Connection.for_service.
+        tt_connection = connection.for_service(TIME_TRACKING_SERVICE_NAME)
+        specs.extend(
+            [
+                IndexSpec(
+                    kind="time_calculation_tag",
+                    label="Time calculation tag",
+                    iterator_fn=iter_time_calculation_tag_index,
+                    connection=tt_connection,
+                    index_attr="time_calculation_tag_index",
+                    implementer_gated=True,
+                ),
+                IndexSpec(
+                    kind="time_calculation_group",
+                    label="Time calculation group",
+                    iterator_fn=iter_time_calculation_group_index,
+                    connection=tt_connection,
+                    index_attr="time_calculation_group_index",
+                    implementer_gated=True,
+                ),
+                IndexSpec(
+                    kind="time_calculation",
+                    label="Time calculation",
+                    iterator_fn=iter_time_calculation_index,
+                    connection=tt_connection,
+                    index_attr="time_calculation_index",
                     implementer_gated=True,
                 ),
             ]
@@ -420,6 +458,76 @@ def _render_dashboards(state: WizardState) -> None:
             st.rerun()
 
 
+def _render_time_calculations(state: WizardState) -> None:
+    theme.section(
+        "Time calculations",
+        "Pick the Time Calculations you want to migrate. Every tag they read or "
+        "write, and every group they belong to, will be pulled in automatically "
+        "in the next step — you do not need to select those separately.",
+        eyebrow="Time Tracking Implementation Service",
+    )
+    if state.time_calculation_index is None:
+        theme.banner(
+            "neutral",
+            "Time calculation index not built",
+            "Enable Time calculations above and click Build indexes.",
+        )
+        return
+
+    query = st.text_input(
+        "Search Time Calculations by name (substring)", key="tc_search"
+    )
+    summaries = list(state.time_calculation_index.summaries.items())
+    if query:
+        needle = query.lower()
+        summaries = [
+            (wid, s)
+            for wid, s in summaries
+            if (s.name and needle in s.name.lower())
+            or (s.reference_id and needle in s.reference_id.lower())
+        ]
+    if not summaries:
+        st.caption("No matches.")
+        return
+    df = pd.DataFrame(
+        [
+            {
+                "wid": wid,
+                "name": s.name or s.reference_id or "(unnamed)",
+                "id": s.reference_id or "",
+                "priority": s.priority or "",
+                "inactive": s.inactive,
+            }
+            for wid, s in summaries[:1000]
+        ]
+    )
+    picked = st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="multi-row",
+        key="tc_table",
+    )
+    rows = picked.get("selection", {}).get("rows", []) if isinstance(picked, dict) else []
+    if st.button("Add selected", key="tc_add", disabled=not rows):
+        for i in rows:
+            state.selected_time_calculation_wids.add(df.iloc[i]["wid"])
+
+    if state.selected_time_calculation_wids:
+        theme.figures(
+            [("Time calculations selected", len(state.selected_time_calculation_wids))]
+        )
+        with st.expander(
+            f"Selected time calculations ({len(state.selected_time_calculation_wids)})"
+        ):
+            for wid in sorted(state.selected_time_calculation_wids):
+                s = state.time_calculation_index.summaries.get(wid)
+                st.write(f"• {s.name if s else wid} — {s.reference_id if s else ''}")
+        if st.button("Clear selections", key="tc_clear"):
+            state.selected_time_calculation_wids = set()
+
+
 def render(state: WizardState) -> None:
     st.header("Select")
     connection = state.source.connection
@@ -477,24 +585,65 @@ def render(state: WizardState) -> None:
         state.selected_reports = {}
     if "dashboards" not in chosen:
         state.selected_dashboards = {}
+    if "time_calculations" in chosen:
+        st.divider()
+        _render_time_calculations(state)
+    else:
+        state.selected_time_calculation_wids = set()
 
 
 def gate(state: WizardState) -> list[Blocker]:
     blockers = []
     if not (
-        state.selected_field_wids or state.selected_reports or state.selected_dashboards
+        state.selected_field_wids
+        or state.selected_reports
+        or state.selected_dashboards
+        or state.selected_time_calculation_wids
     ):
         blockers.append(
             Blocker(
                 node_id=None,
                 title="Nothing selected",
                 detail=(
-                    "Select at least one dashboard, report or calculated field to "
-                    "migrate."
+                    "Select at least one dashboard, report, calculated field or "
+                    "time calculation to migrate."
                 ),
                 remedy="Pick from the tables above.",
             )
         )
+    # A Time Calculation names input tags, output tags, and one or more group
+    # snapshots. Without the tag and group indexes those references never
+    # enter the closure and the write fails against the live tenant.
+    if state.selected_time_calculation_wids:
+        for index, title, detail in (
+            (
+                state.time_calculation_tag_index,
+                "Time calculation tag index not built",
+                "A Time Calculation reads and writes tags (Regular, Overtime, "
+                "etc.) which must exist in the destination first.",
+            ),
+            (
+                state.time_calculation_group_index,
+                "Time calculation group index not built",
+                "A Time Calculation belongs to one or more groups (USA, CAN_BC, "
+                "…) through snapshot references, and each named group has to "
+                "exist in the destination first.",
+            ),
+        ):
+            if index is None:
+                blockers.append(
+                    Blocker(
+                        node_id=None,
+                        title=title,
+                        detail=(
+                            detail
+                            + " Resolution skips this reference kind when the "
+                            "index is absent, so the gap surfaces as a live "
+                            "write failure rather than a blocker here."
+                        ),
+                        remedy="Enable Time calculations above and click Build indexes.",
+                    )
+                )
     if state.selected_dashboards and state.prompt_set_index is None:
         blockers.append(
             Blocker(
