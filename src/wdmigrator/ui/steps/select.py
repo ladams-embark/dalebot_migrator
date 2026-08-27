@@ -18,6 +18,7 @@ from wdmigrator.api import (
     LookupOutcome,
     iter_analytic_indicator_index,
     iter_calculated_field_index,
+    iter_calculated_measure_index,
     iter_dashboard_index,
     iter_gauge_range_index,
     iter_prompt_field_index,
@@ -129,6 +130,41 @@ def _source_specs(chosen: list[str], connection) -> list[IndexSpec]:
             ]
         )
     return specs
+
+
+def _destination_specs(connection) -> list[IndexSpec]:
+    """The two DESTINATION sweeps Conflicts needs for cross-tenant matching.
+
+    Built here too, alongside the source sweeps, rather than only when the
+    user reaches Conflicts. Both sides are already connected and verified by
+    the time Select renders (Connect's gate requires it), so there is no
+    dependency reason to defer these — only asking again later added a second
+    "click Build" round trip for a sweep the run needs unconditionally before
+    Conflicts can probe anything. See ``wdmigrator.ui.steps.conflicts`` for
+    why the sweep itself is not optional: ``Calculated_Field_ID`` is not a
+    stable identity between independently-built tenants.
+
+    Kept as a *separate* list from :func:`_source_specs`, rather than folded
+    into one undifferentiated sweep, so a caller can still tell "source" from
+    "destination" apart if it ever needs to (e.g. resetting one side's cache
+    without touching the other).
+    """
+    return [
+        IndexSpec(
+            kind="calculated_field",
+            label="Destination calculated field",
+            iterator_fn=iter_calculated_field_index,
+            connection=connection,
+            index_attr="dest_cf_index",
+        ),
+        IndexSpec(
+            kind="calculated_measure",
+            label="Destination calculated measure",
+            iterator_fn=iter_calculated_measure_index,
+            connection=connection,
+            index_attr="dest_measure_index",
+        ),
+    ]
 
 
 def _render_calculated_fields(state: WizardState) -> None:
@@ -407,11 +443,23 @@ def render(state: WizardState) -> None:
     )
 
     specs = _source_specs(chosen, connection)
+    # The destination sweeps Conflicts needs for cross-tenant matching are
+    # built in the same pass as the source ones — both sides are already
+    # connected by this point (Connect's gate requires it), and Conflicts
+    # cannot probe anything without them anyway, so deferring them just
+    # turned into a second, separate "click Build" round trip later.
+    if state.dest.connection is not None:
+        specs = specs + _destination_specs(state.dest.connection)
+        st.caption(
+            "Includes the destination calculated-field and calculated-measure sweeps "
+            "Conflicts needs for cross-tenant matching — one Build step covers both "
+            "sides instead of two."
+        )
     bulk_build_indexes(
         state,
         specs,
         job_attr="source_index_job",
-        button_label="Build source indexes",
+        button_label="Build indexes",
     )
 
     st.divider()
