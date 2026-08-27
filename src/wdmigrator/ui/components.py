@@ -55,7 +55,16 @@ def render_blockers(blockers: list[Blocker], *, empty_message: str = "No blocker
         theme.banner("danger", b.title, b.detail, remedy=b.remedy or None, where=b.node_id or None)
 
 
-def render_job_progress(job: JobState | None, *, label: str, fraction: float = 0.0) -> None:
+def render_job_progress(
+    job: JobState | None, *, label: str, fraction: float = 0.0, detail: str | None = None
+) -> None:
+    """Render one job's progress bar, or its terminal state once it stops.
+
+    ``detail`` is an optional caption under the bar — a live sweep passes
+    something like "3,204 / 9,650 fetched · about 20s remaining" so a user
+    can tell the run is actually moving, not just that a bar exists. Callers
+    with nothing more specific than a fraction (most jobs) simply omit it.
+    """
     if job is None:
         return
     if job.error is not None:
@@ -68,3 +77,5 @@ def render_job_progress(job: JobState | None, *, label: str, fraction: float = 0
         theme.banner("success", f"{label} complete")
         return
     st.progress(min(max(fraction, 0.0), 1.0), text=f"{label}…")
+    if detail:
+        st.caption(detail)

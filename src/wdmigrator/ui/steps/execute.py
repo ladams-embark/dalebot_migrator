@@ -46,6 +46,28 @@ def _blocked_record(state: WizardState):
     return None
 
 
+def _other_objects_referencing(state: WizardState, value: str, exclude_node_id: str) -> list[str]:
+    """Every OTHER object in the plan whose payload also names ``value``.
+
+    A read-only, in-memory scan of what is already loaded — no tenant call.
+    It exists purely to SHOW the reach of a decision before it is made, not to
+    create that reach: ``_apply_reference_decisions`` in the writer already
+    substitutes a decided WID everywhere it appears in any node's payload,
+    because every payload is built with the full, accumulating
+    ``plan.reference_decisions`` map, not just the entry for whatever failed
+    first. So a decision here already answers every occurrence of this exact
+    value once — this listing is what lets the user see that up front instead
+    of taking it on faith.
+    """
+    names = []
+    for node in state.plan.ordered_nodes:
+        if node.node_id == exclude_node_id:
+            continue
+        if find_reference_sites(node, value):
+            names.append(node.name or node.node_id)
+    return names
+
+
 def _collect_blockers(state: WizardState) -> None:
     """Fold any newly-discovered unresolvable reference into the running table.
 
@@ -72,6 +94,12 @@ def _collect_blockers(state: WizardState) -> None:
             "node_name": record.name or record.node_id,
             "elements": sorted({s.element for s in sites}),
             "business": business,
+            # Computed once, at discovery time, against the plan as it stood
+            # then — see _other_objects_referencing. Not re-derived later, so
+            # the table doesn't shift under the user while they're deciding.
+            "other_objects": _other_objects_referencing(
+                state, blocking.value, record.node_id
+            ),
         }
 
 
@@ -80,12 +108,20 @@ def _decision_rows(state: WizardState) -> list:
     for value, info in state.blocking_references.items():
         existing = state.reference_decisions.get(value)
         business_type = next(iter(info["business"]), "")
+        other = info.get("other_objects") or []
+        if other:
+            shown = ", ".join(other[:2])
+            more = f" (+{len(other) - 2} more)" if len(other) > 2 else ""
+            also_affects = f"{shown}{more}"
+        else:
+            also_affects = "—"
         rows.append({
             "Object": info["node_name"],
             "Where": ", ".join(info["elements"]) or "(not located)",
             "Identified as": ", ".join(
                 f"{k} = {v}" for k, v in info["business"].items()
             ) or info["reference"].id_type,
+            "Also affects": also_affects,
             "Decision": (
                 existing.action.value if existing else ReferenceAction.BLANK.value
             ),
@@ -195,7 +231,11 @@ def _render_reference_resolution(state: WizardState) -> None:
         "References the destination cannot resolve",
         "These point at tenant data rather than configuration — a prompt default, "
         "a filter value, a matrix pointer. They cannot be migrated, so each needs "
-        "a decision. Blanking drops the value; the object still migrates.",
+        "a decision. Blanking drops the value; the object still migrates. A "
+        "decision here is applied automatically to every occurrence of this exact "
+        "reference for the rest of the migration — including any objects listed "
+        "under 'Also affects' — so you only decide once per distinct reference, "
+        "even when the same value blocks several objects.",
         eyebrow="Needs a decision",
     )
 
@@ -204,7 +244,7 @@ def _render_reference_resolution(state: WizardState) -> None:
         pd.DataFrame(rows).drop(columns=["_wid"]),
         hide_index=True,
         use_container_width=True,
-        disabled=["Object", "Where", "Identified as"],
+        disabled=["Object", "Where", "Identified as", "Also affects"],
         column_config={
             "Decision": st.column_config.SelectboxColumn(
                 options=[a.value for a in ReferenceAction], required=True,

@@ -63,9 +63,12 @@ def _start_probe(state: WizardState) -> None:
 def _render_destination_indexes(state: WizardState) -> None:
     """The two destination sweeps that make cross-tenant matching possible.
 
-    Both are destination reads, not writes. The calculated-field sweep is the
-    expensive one (~25s, ~9,700 fields) and is cached to disk per tenant like
-    the source sweeps; the measure sweep is a single page.
+    Both are destination reads, not writes. Normally already built from the
+    Select step — it builds these alongside the source sweeps so there is one
+    Build click instead of two — so most of the time this renders as a status
+    confirmation rather than an outstanding "Build" button. Kept here as a
+    fallback (and for the Rebuild option) in case a session skipped Select's
+    combined build.
     """
     theme.section(
         "Destination matching",
@@ -73,7 +76,8 @@ def _render_destination_indexes(state: WizardState) -> None:
         "matching an object by ID alone reports fields the destination already "
         "has as missing. These two sweeps let the probe recognise them by name, "
         "class and business object instead, and reuse them rather than creating "
-        "duplicates that cannot be deleted.",
+        "duplicates that cannot be deleted. Normally already built from Select — "
+        "this is just confirmation, with a Rebuild option if either has gone stale.",
         eyebrow="Required before probing",
     )
     # A measure's BI_Calculated_Measure_ID is Workday-generated with a

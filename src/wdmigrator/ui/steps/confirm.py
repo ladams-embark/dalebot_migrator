@@ -1,4 +1,4 @@
-"""Step 5: Confirm — owner remap, mandatory dry run, then the live gate.
+"""Step 5: Confirm — owner remap, an automatic dry run, then the live gate.
 
 This is where the plan's own hard rule lives: **live execution requires a
 dry run that has already been run and reviewed for this exact plan hash.**
@@ -6,11 +6,21 @@ Any override made in Conflicts changes the plan hash, which invalidates a
 prior dry run automatically — there is no way to review a dry run for one
 plan and then execute a different one.
 
-The dry run itself is never blocked by the safety guard — the engine's
-dry-run write path doesn't call ``assert_write_allowed`` at all, only the
-live path does. ``evaluate_guards()`` is still called here in dry-run mode
-purely for display (it always reports the same-tenant finding, even in dry
-run) so the user sees ahead of time what will block a live run later.
+The dry run now runs automatically as soon as a plan is ready, and again
+whenever the plan hash changes — there is no "Run dry run" button to click.
+That is safe to do without asking: the engine's dry-run write path doesn't
+call ``assert_write_allowed`` at all, and never contacts the destination (see
+``writer.py`` — it builds and serializes the real SOAP envelope through
+zeep's binding without sending it). Automating *that* click removes pure
+mechanical friction; it does not relax the gate one step down, which still
+requires the dry run's output to have been reviewed, the destination tenant
+name retyped, and irreversibility acknowledged before Execute will start a
+live run — this service has no delete operation, so those three stay manual
+on purpose.
+
+``evaluate_guards()`` is still called here in dry-run mode purely for display
+(it always reports the same-tenant finding, even in dry run) so the user sees
+ahead of time what will block a live run later.
 """
 
 from __future__ import annotations
@@ -143,26 +153,23 @@ def render(state: WizardState) -> None:
     st.divider()
     theme.section(
         "Dry run",
-        "Required before a live run, and pinned to this exact plan — any override back "
-        "in Conflicts invalidates it and it has to be run again.",
-        eyebrow="Step 1 of 2",
+        "Required before a live run, and pinned to this exact plan. Runs "
+        "automatically below — and re-runs itself if you go back and change the "
+        "plan — so there's nothing to click here. It never contacts the "
+        "destination tenant.",
+        eyebrow="Automatic",
     )
 
-    if st.button("Run dry run", key="confirm_dry_run_start"):
+    plan_hash = state.plan.plan_hash()
+    dry_run_stale = bool(state.dry_run_records) and state.dry_run_plan_hash != plan_hash
+    if state.dry_run_job is None and (not state.dry_run_records or dry_run_stale):
         _run_dry_run(state)
         st.rerun()
 
     if state.dry_run_job is not None:
         _pump_dry_run(state)
-    elif state.dry_run_records and state.dry_run_plan_hash == state.plan.plan_hash():
+    elif state.dry_run_records and state.dry_run_plan_hash == plan_hash:
         _render_dry_run_results(state)
-    elif state.dry_run_records:
-        theme.banner(
-            "warning",
-            "The plan changed since this dry run",
-            "It no longer applies to what would be written.",
-            remedy="Run the dry run again.",
-        )
 
     dry_guard = build_guard(state, dry_run=True)
     dry_findings = evaluate_guards(dry_guard)
