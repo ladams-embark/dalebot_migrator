@@ -32,6 +32,7 @@ from wdmigrator.api import (
     Blocker,
     Level,
     NodeKind,
+    ReportSharing,
     TIME_TRACKING_KINDS,
     TIME_TRACKING_SERVICE_NAME,
     evaluate_guards,
@@ -41,6 +42,29 @@ from wdmigrator.ui import safety_ui, theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import DEFAULT_REPORT_OWNER_USERNAME, WizardState, build_guard, owner_reference
+
+
+_SHARING_LABELS = {
+    ReportSharing.UNSHARED: (
+        "Not shared (owner only) — the historical default"
+    ),
+    ReportSharing.SHARED_WITH_ALL_AUTHORIZED_USERS: (
+        "Share with all authorized users"
+    ),
+}
+_SHARING_HELP = {
+    ReportSharing.UNSHARED: (
+        "Only the report owner will see the report on the destination. Whoever "
+        "adopts the report decides who else sees it later. The source's "
+        "restricted-to security groups do not migrate — they are tenant-scoped."
+    ),
+    ReportSharing.SHARED_WITH_ALL_AUTHORIZED_USERS: (
+        "Anyone with the domain access to see custom reports of this data "
+        "source's class will see the report. Equivalent to 'Shared = True' "
+        "with no restricted-to groups. Still cannot copy the source's specific "
+        "security groups — those are tenant-scoped and stripped either way."
+    ),
+}
 
 STEP_ID = "confirm"
 
@@ -65,6 +89,51 @@ def _render_owner_remap(state: WizardState) -> None:
     )
 
 
+def _render_report_sharing(state: WizardState) -> None:
+    """Radio for the run-level report sharing choice.
+
+    Changing this changes the payload sent to the destination (``Shared`` and
+    ``Enable_As_Worklet`` values), so the choice is captured here and the dry
+    run is re-run afterwards — the ``dry_run_plan_hash`` reset below is what
+    triggers that automatically on the next render.
+    """
+    theme.section(
+        "Report sharing",
+        "How every migrated report should land on the destination. Applies to "
+        "every non-worklet report in the run; dashboard worklet reports are "
+        "kept shared regardless — a worklet with Shared=False is rejected by "
+        "the dashboard write.",
+        eyebrow="Choose one",
+    )
+    options = list(_SHARING_LABELS)
+    current = state.report_sharing if state.report_sharing in options else ReportSharing.UNSHARED
+    chosen = st.radio(
+        "Report sharing",
+        options,
+        index=options.index(current),
+        format_func=lambda v: _SHARING_LABELS[v],
+        help=(
+            "Not shared: only the report's owner sees it on the destination. "
+            "Share with all authorized users: anyone with domain access to "
+            "the report's data source class sees it. Specific-groups sharing "
+            "is not offered — those references are tenant-scoped and stripped "
+            "for that reason."
+        ),
+        key="confirm_report_sharing",
+        label_visibility="collapsed",
+    )
+    st.caption(_SHARING_HELP[chosen])
+    if chosen is not state.report_sharing:
+        state.report_sharing = chosen
+        # A new sharing choice changes what gets written, so any prior dry run
+        # is stale. Clearing the hash re-runs it on the next render, at which
+        # point the reviewed-checkbox is un-ticked (it is bound to the fresh
+        # results block).
+        state.dry_run_plan_hash = ""
+        state.dry_run_reviewed = False
+        st.rerun()
+
+
 def _run_dry_run(state: WizardState) -> None:
     guard = build_guard(state, dry_run=True)
     tt_connection = (
@@ -78,6 +147,7 @@ def _run_dry_run(state: WizardState) -> None:
         state.dest.connection, state.plan, guard,
         owner_reference=owner_reference(state), stop_on_failure=False,
         tt_connection=tt_connection,
+        report_sharing=state.report_sharing,
     )
     state.dry_run_job = start_job(generator)
     state.dry_run_records = []
@@ -159,6 +229,7 @@ def render(state: WizardState) -> None:
 
     if _plan_has_report_creates(state):
         _render_owner_remap(state)
+        _render_report_sharing(state)
 
     st.divider()
     theme.section(

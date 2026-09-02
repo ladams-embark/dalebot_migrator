@@ -29,6 +29,7 @@ from wdmigrator.api import (
     Index,
     MigrationPlan,
     Package,
+    ReportSharing,
     TenantTarget,
     WriteGuard,
 )
@@ -217,6 +218,11 @@ class WizardState:
     #: it every rerun, while still forcing a fresh pass whenever the plan
     #: changes shape (an override, a new decision, an added node).
     preflight_populated_for_hash: str = ""
+    #: How reports should land on the destination — see :class:`ReportSharing`.
+    #: Defaults to UNSHARED, the historical behaviour and the safest option:
+    #: only the report's owner can see it until someone chooses otherwise. The
+    #: Confirm step exposes a radio to switch to SHARED_WITH_ALL_AUTHORIZED_USERS.
+    report_sharing: ReportSharing = ReportSharing.UNSHARED
     # Re-probe kicked off by submitting the mapping table, so a decision does
     # not cost a trip back through Conflicts and Confirm.
     reprobe_job: Optional[JobState] = None

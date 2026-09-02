@@ -35,6 +35,7 @@ from wdmigrator.migrate.writer import (
     find_reference_sites,
     parse_blocking_reference,
     ExceptionDetail,
+    ReportSharing,
     WriteError,
     WriteStatus,
     build_calculated_field_payload,
@@ -818,6 +819,91 @@ class TestSharingAndPlacementAreStripped:
 
     def test_report_content_survives(self):
         assert self.payload()["Name"] == "Shared report"
+
+
+class TestReportSharingModes:
+    """Reports can land unshared (owner-only, the default) or shared with all
+    authorized users. The restricted-to-specific-groups mode is deliberately
+    not offered — those references are tenant-scoped and stripped either way."""
+
+    def _report(self):
+        return Node(
+            node_id="report:R1", kind=NodeKind.REPORT, source_wid="R1",
+            reference_id="RPT", name="R",
+            payload={"Tenanted_Report_Definition_Data": {
+                "Name": "R",
+                "Shared": True,
+                "Restricted_to_Tenanted_Security_Groups_Reference": [
+                    {"ID": [{"type": "Tenant_Security_Group_ID",
+                             "_value_1": "HR_Administrator"}]}
+                ],
+            }},
+        )
+
+    def test_unshared_default_matches_historical_behaviour(self):
+        data = build_report_payload(
+            self._report(), {}, action=Action.CREATE,
+        )["Tenanted_Report_Definition_Data"]
+        assert data["Shared"] is False
+        # Restricted-to references are always stripped, both modes.
+        assert "Restricted_to_Tenanted_Security_Groups_Reference" not in data
+
+    def test_shared_with_all_authorized_users_sets_shared_true(self):
+        data = build_report_payload(
+            self._report(), {}, action=Action.CREATE,
+            sharing=ReportSharing.SHARED_WITH_ALL_AUTHORIZED_USERS,
+        )["Tenanted_Report_Definition_Data"]
+        assert data["Shared"] is True
+        # But NEVER carries the source's restriction references across —
+        # "share with all authorized users" means Shared=True + no restrictions.
+        assert "Restricted_to_Tenanted_Security_Groups_Reference" not in data
+        assert "Restricted_to_Metadata_Security_Groups_Reference" not in data
+        assert "Restricted_to_System_User_Reference" not in data
+
+    def test_explicit_unshared_matches_default(self):
+        default = build_report_payload(
+            self._report(), {}, action=Action.CREATE,
+        )["Tenanted_Report_Definition_Data"]
+        explicit = build_report_payload(
+            self._report(), {}, action=Action.CREATE,
+            sharing=ReportSharing.UNSHARED,
+        )["Tenanted_Report_Definition_Data"]
+        assert default["Shared"] == explicit["Shared"] is False
+
+
+class TestReportSharingWorkletOverride:
+    """A dashboard worklet report must be ``Shared=True`` regardless of the
+    run-level sharing choice — a worklet with Shared=False is rejected by the
+    dashboard write. Verified live 2026-08-07."""
+
+    def _worklet_report(self):
+        return Node(
+            node_id="report:W", kind=NodeKind.REPORT, source_wid="W",
+            reference_id="RPT", name="Worklet report",
+            payload={"Tenanted_Report_Definition_Data": {
+                "Name": "Worklet report",
+                "Shared": True,
+                "Enable_As_Worklet": True,
+            }},
+        )
+
+    def test_worklet_stays_shared_when_run_is_unshared(self):
+        data = build_report_payload(
+            self._worklet_report(), {}, action=Action.CREATE,
+            keep_worklet=True,
+            sharing=ReportSharing.UNSHARED,
+        )["Tenanted_Report_Definition_Data"]
+        assert data["Shared"] is True
+        assert data["Enable_As_Worklet"] is True
+
+    def test_worklet_stays_shared_when_run_is_all_authorized_users(self):
+        data = build_report_payload(
+            self._worklet_report(), {}, action=Action.CREATE,
+            keep_worklet=True,
+            sharing=ReportSharing.SHARED_WITH_ALL_AUTHORIZED_USERS,
+        )["Tenanted_Report_Definition_Data"]
+        assert data["Shared"] is True
+        assert data["Enable_As_Worklet"] is True
 
 
 class TestSelfReferencesAreStrippedOnCreate:
