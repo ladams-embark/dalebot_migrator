@@ -118,6 +118,16 @@ def main(argv: list[str] | None = None) -> None:
         "--continue-on-failure", action="store_true",
         help="Do not stop at the first write failure — keep going and report all",
     )
+    ap.add_argument(
+        "--sharing",
+        choices=["unshared", "all"],
+        default="unshared",
+        help="Report sharing on the destination. 'unshared' (default): "
+             "Shared=False, only the owner sees each report. 'all': "
+             "Shared=True with no restrictions — all authorized users. "
+             "Specific-group sharing is not offered: those references are "
+             "tenant-scoped and stripped either way.",
+    )
     args = ap.parse_args(argv)
 
     if args.list:
@@ -232,12 +242,18 @@ def main(argv: list[str] | None = None) -> None:
         dest_username=dst.username,
     )
 
-    print(f"\n--- {'LIVE' if args.live else 'DRY RUN'} ---")
+    sharing = (
+        api.ReportSharing.SHARED_WITH_ALL_AUTHORIZED_USERS
+        if args.sharing == "all"
+        else api.ReportSharing.UNSHARED
+    )
+    print(f"\n--- {'LIVE' if args.live else 'DRY RUN'} --- sharing={sharing.value}")
     records = []
     for prog in api.iter_execute(
         dst, plan, guard,
         owner_reference=api.build_owner_reference(workday_username=args.owner),
         stop_on_failure=not args.continue_on_failure,
+        report_sharing=sharing,
     ):
         r = prog.record
         records.append(r)

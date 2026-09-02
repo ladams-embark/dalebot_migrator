@@ -272,6 +272,39 @@ _SHARING_FIELDS = (
     "Restricted_to_Tenanted_Security_Groups_Reference",
     "Restricted_to_System_User_Reference",
 )
+
+
+class ReportSharing(str, Enum):
+    """Who can see a migrated report.
+
+    The Workday UI offers three shapes — unshared, shared with specific groups,
+    or shared with all authorized users. All three map to the same two schema
+    fields: ``Shared`` (bool) and the ``Restricted_to_*`` group/user references.
+
+    Two of them survive a tenant hop cleanly:
+
+    * ``UNSHARED``: ``Shared=False`` with all restrictions dropped. Only the
+      report's owner can see it on the destination. Safe default — whoever
+      adopts the report decides who else sees it.
+
+    * ``SHARED_WITH_ALL_AUTHORIZED_USERS``: ``Shared=True`` with all
+      restrictions dropped. Anyone with the domain access to see custom
+      reports of this data source's class can see it. No tenant-specific
+      security group needs to exist for the write to succeed.
+
+    "Share with specific groups/users" is deliberately NOT offered here: those
+    are tenant-scoped references (source's ``HR_Administrator`` is not the
+    destination's) that get stripped for a reason. Copying them across would
+    either fail live or silently grant a different population than the source
+    intended.
+
+    Dashboard worklet reports are still forced ``Shared=True`` regardless of
+    this setting — a worklet with ``Shared=False`` is rejected by the
+    dashboard write, verified live 2026-08-07.
+    """
+
+    UNSHARED = "unshared"
+    SHARED_WITH_ALL_AUTHORIZED_USERS = "shared_with_all_authorized_users"
 #: Every field on ``Tenanted_Report_Definition_DataType`` that only means
 #: something on a worklet. Enumerated from the WSDL rather than discovered one
 #: failure at a time — several of these are not merely ignorable when
@@ -948,7 +981,11 @@ def _rewrite_worklet_landing_pages(data: dict, wid_map: Mapping[str, str]) -> No
 
 
 def _strip_sharing_and_placement(
-    data: dict, *, keep_worklet: bool = False, wid_map: Mapping[str, str] = {}
+    data: dict,
+    *,
+    keep_worklet: bool = False,
+    wid_map: Mapping[str, str] = {},
+    sharing: ReportSharing = ReportSharing.UNSHARED,
 ) -> None:
     """Migrate a report unshared, and normally unplaced, in place.
 
@@ -1011,7 +1048,12 @@ def _strip_sharing_and_placement(
         _rewrite_worklet_landing_pages(data, wid_map)
         return
 
-    data["Shared"] = False
+    # Non-worklet reports pick up the caller's sharing choice. "Share with all
+    # authorized users" is the ``Shared=True`` + no restrictions shape — the
+    # restrictions are already gone from the ``_SHARING_FIELDS`` pass above.
+    data["Shared"] = (
+        sharing is ReportSharing.SHARED_WITH_ALL_AUTHORIZED_USERS
+    )
 
     data["Enable_As_Worklet"] = False
     for key in _PLACEMENT_FIELDS:
@@ -1027,6 +1069,7 @@ def build_report_payload(
     dest_wid: str | None = None,
     reference_decisions: Mapping[str, ReferenceDecision] | None = None,
     keep_worklet: bool = False,
+    sharing: ReportSharing = ReportSharing.UNSHARED,
 ) -> dict:
     """Arguments for ``Put_Tenanted_Report_Definition``.
 
@@ -1049,7 +1092,9 @@ def build_report_payload(
     if reference_decisions:
         _apply_reference_decisions(remapped, reference_decisions)
     _strip_filter_instance_references(remapped)
-    _strip_sharing_and_placement(remapped, keep_worklet=keep_worklet, wid_map=wid_map)
+    _strip_sharing_and_placement(
+        remapped, keep_worklet=keep_worklet, wid_map=wid_map, sharing=sharing,
+    )
     # Unconditional, on every report — not just dashboard ones. A tag is
     # tenant-specific by construction, so it fails on any destination that has
     # not been tagged identically by hand first.
@@ -1997,6 +2042,7 @@ def write_node(
     guard: WriteGuard,
     *,
     owner_reference: dict | None = None,
+    report_sharing: ReportSharing = ReportSharing.UNSHARED,
 ) -> WriteRecord:
     """Write one object, or describe what would be written in dry run.
 
@@ -2074,6 +2120,7 @@ def write_node(
                 dest_wid=dest_wid,
                 reference_decisions=plan.reference_decisions,
                 keep_worklet=is_dashboard_worklet(node),
+                sharing=report_sharing,
             )
         elif node.kind is NodeKind.CALCULATED_MEASURE:
             payload = build_calculated_measure_payload(
@@ -2248,6 +2295,7 @@ def iter_execute(
     owner_reference: dict | None = None,
     stop_on_failure: bool = True,
     tt_connection: Connection | None = None,
+    report_sharing: ReportSharing = ReportSharing.UNSHARED,
 ) -> Iterator[WriteProgress]:
     """Execute the plan in dependency order, yielding one event per object.
 
@@ -2327,7 +2375,9 @@ def iter_execute(
 
         routed = tt_connection if node.kind in TIME_TRACKING_KINDS else connection
         record = write_node(
-            routed, node, plan, guard, owner_reference=owner_reference
+            routed, node, plan, guard,
+            owner_reference=owner_reference,
+            report_sharing=report_sharing,
         )
 
         # Register the new WID immediately so the next payload can use it.

@@ -583,6 +583,7 @@ def _start(state: WizardState) -> None:
             state.dest.connection, state.plan, guard,
             owner_reference=owner_reference(state), stop_on_failure=True,
             tt_connection=tt_connection,
+            report_sharing=state.report_sharing,
         )
     except GuardViolation as exc:
         theme.banner("danger", "Blocked by the write guard", str(exc))
