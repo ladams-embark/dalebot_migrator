@@ -102,10 +102,19 @@ class Existence:
 
 
 class ReferenceAction(str, Enum):
-    """What to do with a reference the destination cannot resolve."""
+    """What to do with a reference the destination cannot resolve.
+
+    ``KEEP`` is the "leave the source WID in the payload" option. It's the same
+    thing that happens when no decision is recorded, but expressed explicitly
+    so the preflight table can offer it as a chosen answer alongside BLANK /
+    REPLACE — the case for that is delivered content (event classifications,
+    business process types, currencies) whose WID is stable across every
+    tenant, and where blanking a valid default would degrade the report.
+    """
 
     BLANK = "blank"
     REPLACE = "replace"
+    KEEP = "keep"
 
 
 @dataclass(frozen=True)

@@ -55,20 +55,24 @@ class DataCenter:
 #: Two naming families confirmed live so far, and they do NOT reduce to one
 #: formula — a data center's real host has to be confirmed independently,
 #: not derived:
-#:   - "impl-services1.wdNN.myworkday.com" (wd12, wd501, and wd504 — 3/3 of
-#:     the data centers with an explicit "wdNN" in their production URL.
-#:     wd12/wd501 confirmed 2026-08-03 via commitconsulting's REST API
-#:     Endpoint page; wd504 confirmed 2026-08-26 by probing the "walmart"
-#:     tenant.)
+#:   - "impl-services1.wdNN.myworkday.com" (wd12, wd108, wd501, wd503 and
+#:     wd504 — 5/5 of the data centers with an explicit "wdNN" in their
+#:     production URL. wd12/wd501 confirmed 2026-08-03 via commitconsulting's
+#:     REST API Endpoint page; wd504 confirmed 2026-08-26 by probing the
+#:     "walmart" tenant; wd503 confirmed 2026-09-02 by probing "sageai"; wd108
+#:     confirmed 2026-09-02 by probing "aesseal".)
 #:   - "wdN-impl-services1.workday.com" (dc1 only — the one data center with
 #:     NO "wdNN" in its production URL at all, e.g. plain workday.com)
-#: Since the wdNN-numbered data centers are now 3/3 on the myworkday.com
+#: Since the wdNN-numbered data centers are now 5/5 on the myworkday.com
 #: pattern, the still-unverified wd3/5/10/102/103/105 entries below try that
 #: pattern first, then fall back to the workday.com-style guess.
 KNOWN_IMPL_DATA_CENTERS: tuple[DataCenter, ...] = (
     DataCenter("dc1", "wd2-impl-services1.workday.com", verified=True),
     DataCenter("wd12", "impl-services1.wd12.myworkday.com", verified=True),
+    DataCenter("wd108", "impl-services1.wd108.myworkday.com", verified=True),
     DataCenter("wd501", "impl-services1.wd501.myworkday.com", verified=True),
+    DataCenter("wd503", "impl-services1.wd503.myworkday.com", verified=True),
+    DataCenter("wd504", "impl-services1.wd504.myworkday.com", verified=True),
     DataCenter("wd3 (myworkday guess)", "impl-services1.wd3.myworkday.com", verified=False),
     DataCenter("wd3 (workday guess)", "wd3-impl-services1.workday.com", verified=False),
     DataCenter("wd5 (myworkday guess)", "impl-services1.wd5.myworkday.com", verified=False),
@@ -81,7 +85,6 @@ KNOWN_IMPL_DATA_CENTERS: tuple[DataCenter, ...] = (
     DataCenter("wd103 (workday guess)", "wd103-impl-services1.workday.com", verified=False),
     DataCenter("wd105 (myworkday guess)", "impl-services1.wd105.myworkday.com", verified=False),
     DataCenter("wd105 (workday guess)", "wd105-impl-services1.workday.com", verified=False),
-    DataCenter("wd504", "impl-services1.wd504.myworkday.com", verified=True),
 )
 
 

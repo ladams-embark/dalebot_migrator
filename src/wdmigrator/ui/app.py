@@ -64,9 +64,20 @@ def main() -> None:
 
     state = get_state()
 
+    # Package-loaded runs advertise the package name in the source badge
+    # rather than a tenant that isn't connected to anything.
+    if state.package is not None:
+        source_tenant_display = f"package: {state.package.name}"
+        source_env_display = None
+    elif state.source.target is not None:
+        source_tenant_display = state.source.target.tenant
+        source_env_display = state.source.target.environment
+    else:
+        source_tenant_display = None
+        source_env_display = None
     theme.page_header(
-        source_tenant=state.source.target.tenant if state.source.target else None,
-        source_env=state.source.target.environment if state.source.target else None,
+        source_tenant=source_tenant_display,
+        source_env=source_env_display,
         dest_tenant=state.dest.target.tenant if state.dest.target else None,
         dest_env=state.dest.target.environment if state.dest.target else None,
     )
