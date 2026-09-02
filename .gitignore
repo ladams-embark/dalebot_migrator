@@ -22,3 +22,7 @@ dist/
 # Local scratch output (SOAP dumps, discovery snapshots, etc.)
 out/
 *.log
+
+# Session scratchpad — one-off scripts and dumps produced during Claude Code
+# sessions. Content is per-session and machine-local, not something to ship.
+scratchpad/

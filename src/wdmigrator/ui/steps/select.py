@@ -528,8 +528,45 @@ def _render_time_calculations(state: WizardState) -> None:
             state.selected_time_calculation_wids = set()
 
 
+def _render_package_summary(state: WizardState) -> None:
+    """Read-only view of what a loaded package contains.
+
+    Substitutes for the normal picker UI: with a package loaded there is no
+    source connection and therefore no live indexes to browse. The picker
+    would render an empty shell; this section shows what will actually be
+    written instead.
+    """
+    pkg = state.package
+    counts = pkg.counts_by_kind()
+    theme.section(
+        f"Loaded package: {pkg.name}",
+        "Source-side selection is skipped when a package is loaded — every "
+        "object here was captured at build time. Change what is written by "
+        "loading a different package on the Connect step.",
+        eyebrow="Read-only",
+    )
+    theme.figures(
+        [("Total objects", pkg.node_count)]
+        + [(k.capitalize(), v) for k, v in counts.items()]
+    )
+    st.caption(
+        f"Source tenant: `{pkg.source_tenant}` — captured {pkg.captured_at}"
+    )
+    st.caption(pkg.description or "(no description)")
+    with st.expander("Objects in the package"):
+        rows = [
+            {"kind": n.kind.value, "name": n.name or "(unnamed)",
+             "selected": n.selected, "wid": n.source_wid}
+            for n in pkg.closure.nodes.values()
+        ]
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
 def render(state: WizardState) -> None:
     st.header("Select")
+    if state.package is not None:
+        _render_package_summary(state)
+        return
     connection = state.source.connection
     if connection is None:
         theme.banner("danger", "Source is not connected", remedy="Go back to Connect.")
@@ -594,6 +631,9 @@ def render(state: WizardState) -> None:
 
 def gate(state: WizardState) -> list[Blocker]:
     blockers = []
+    # Package is the source: selection is baked in, indexes are irrelevant.
+    if state.package is not None:
+        return blockers
     if not (
         state.selected_field_wids
         or state.selected_reports

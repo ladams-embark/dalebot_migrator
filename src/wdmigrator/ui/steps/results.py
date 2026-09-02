@@ -15,11 +15,29 @@ import json
 
 import streamlit as st
 
-from wdmigrator.api import Blocker, VerifyStatus, iter_verify, summarise, summarise_verify
+import pandas as pd
+
+from wdmigrator.api import (
+    Action,
+    Blocker,
+    ReferenceAction,
+    ReferenceDecision,
+    TIME_TRACKING_KINDS,
+    TIME_TRACKING_SERVICE_NAME,
+    VerifyStatus,
+    build_plan,
+    find_nodes_using_reference_values,
+    iter_check_existence,
+    iter_execute,
+    iter_verify,
+    summarise,
+    summarise_verify,
+)
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
+from wdmigrator.ui.indexes import destination_match_indexes
 from wdmigrator.ui.runner import pump, start_job
-from wdmigrator.ui.state import WizardState, reset_downstream
+from wdmigrator.ui.state import WizardState, build_guard, owner_reference, reset_downstream
 
 STEP_ID = "results"
 
@@ -123,6 +141,8 @@ def render(state: WizardState) -> None:
 
     if is_live:
         st.divider()
+        _render_restore(state)
+        st.divider()
         _render_verify(state)
 
     st.divider()
@@ -130,6 +150,308 @@ def render(state: WizardState) -> None:
         reset_downstream(state, from_step="select")
         state.step = "select"
         st.rerun()
+
+
+def _preflight_rows_for_restore(state: WizardState) -> list[dict]:
+    """One row per preflight-discovered reference. Existing REPLACE decisions
+    come back with their values pre-filled, so an in-progress restore session
+    is not lost across reruns."""
+    rows = []
+    for value, info in state.blocking_references.items():
+        if not info.get("preflight"):
+            continue
+        existing = state.reference_decisions.get(value)
+        biz = info.get("business") or {}
+        default_type = next(iter(biz), "")
+        rows.append({
+            "Object": info["node_name"],
+            "Element": ", ".join(info.get("elements") or []) or "(unknown)",
+            "Source value": ", ".join(f"{k}={v}" for k, v in biz.items()) or value,
+            "Also on": ", ".join(info.get("other_objects") or []) or "—",
+            "Restore as (ID type)": (
+                (existing.replacement_type if existing else None) or default_type
+            ),
+            "Restore as (value on dest)": (
+                (existing.replacement_value if existing else None) or ""
+            ),
+            "_wid": value,
+        })
+    return rows
+
+
+def _apply_restore_edits(state: WizardState, rows, edited) -> set[str]:
+    """Fold edited rows back into ``state.reference_decisions``.
+
+    Positional match to ``rows`` — same rule as the pre-execution table on
+    Execute: never trust that a hidden column round-trips through the editor.
+
+    Returns the source WIDs that ended up as REPLACE. Rows left blank stay
+    BLANK (unchanged from the initial run's preflight default), so nothing
+    the user did not touch changes.
+    """
+    replaced: set[str] = set()
+    for row, source in zip(edited.to_dict("records"), rows):
+        wid = source["_wid"]
+        rtype = row["Restore as (ID type)"]
+        rvalue = row["Restore as (value on dest)"]
+        if rtype and rvalue:
+            state.reference_decisions[wid] = ReferenceDecision(
+                source_wid=wid,
+                action=ReferenceAction.REPLACE,
+                replacement_type=rtype,
+                replacement_value=rvalue,
+                note="Restored on destination via post-run Results step.",
+            )
+            replaced.add(wid)
+        else:
+            # Empty row: fall back to the preflight default (BLANK for tenant
+            # data, KEEP for delivered content). Reading the original default
+            # off ``blocking_references`` — writing a hard-coded BLANK here
+            # would silently strip prompt defaults on delivered references
+            # (event classifications etc.) that the initial pass correctly
+            # KEPT.
+            info = state.blocking_references.get(wid) or {}
+            default = info.get("default_action") or ReferenceAction.BLANK.value
+            try:
+                action = ReferenceAction(default)
+            except ValueError:
+                action = ReferenceAction.BLANK
+            if action is ReferenceAction.REPLACE:
+                # REPLACE-required rows are never restored to REPLACE without
+                # a value here — that would break the invariant. Fall back to
+                # BLANK; the row will fail its own required-field check.
+                action = ReferenceAction.BLANK
+            state.reference_decisions[wid] = ReferenceDecision(
+                source_wid=wid,
+                action=action,
+                note=(
+                    "Preflight default kept (delivered content passes through)."
+                    if action is ReferenceAction.KEEP
+                    else "Preflight default: always-tenant-data (kept blank)."
+                ),
+            )
+    return replaced
+
+
+def _start_restore_reprobe(state: WizardState, replaced: set[str]) -> None:
+    """Kick off a scoped destination re-probe for the restore pass.
+
+    Only the nodes that name any newly-replaced WID need to become UPDATEs —
+    everything else stays SKIP because it was written correctly the first
+    time. The re-probe still runs across the whole closure so we pick up the
+    fresh ``dest_wid`` for every FOUND object; the ``restore_update_node_ids``
+    set narrows which ones flip to UPDATE afterward.
+    """
+    state.restore_update_node_ids = find_nodes_using_reference_values(
+        state.plan.ordered_nodes, replaced
+    )
+    tt_connection = (
+        state.dest.connection.for_service(TIME_TRACKING_SERVICE_NAME)
+        if any(n.kind in TIME_TRACKING_KINDS for n in state.plan.ordered_nodes)
+        else None
+    )
+    state.restore_reprobe_job = start_job(
+        iter_check_existence(
+            state.dest.connection,
+            state.closure,
+            tt_connection=tt_connection,
+            **destination_match_indexes(state),
+        )
+    )
+    state.restore_records = []
+
+
+def _pump_restore_reprobe(state: WizardState) -> None:
+    job = state.restore_reprobe_job
+    pump(job, time_budget=0.8)
+    last = job.last_event
+    render_job_progress(
+        job,
+        label="Restore — re-probing destination",
+        fraction=last.fraction if last is not None else 0.0,
+    )
+    if job.error is not None:
+        state.restore_reprobe_job = None
+        return
+    if not job.done:
+        st.rerun()
+        return
+
+    existence = {p.node.node_id: p.existence for p in job.events}
+    # Overrides: only the nodes that name a restored reference become UPDATE.
+    # Existing overrides (e.g. shell-dashboard UPDATE from the initial run)
+    # are preserved so the restore does not silently downgrade them.
+    overrides = dict(state.action_overrides)
+    for node_id in state.restore_update_node_ids:
+        overrides[node_id] = Action.UPDATE
+    state.plan = build_plan(
+        state.closure,
+        existence,
+        overrides=overrides,
+        reference_decisions=state.reference_decisions,
+    )
+    # Re-stamp the dry-run hash so the guard on the second pass still holds —
+    # same rationale as the mid-run reference-decision table on Execute: the
+    # visible mapping IS the review.
+    state.dry_run_plan_hash = state.plan.plan_hash()
+    state.restore_reprobe_job = None
+    # Start the restore execute pass immediately — the mapping table already
+    # was the review, so we don't drop the user back at a "Start" click.
+    guard = build_guard(state, dry_run=False)
+    tt_connection = (
+        state.dest.connection.for_service(TIME_TRACKING_SERVICE_NAME)
+        if any(n.kind in TIME_TRACKING_KINDS for n in state.plan.ordered_nodes)
+        else None
+    )
+    state.restore_execute_job = start_job(
+        iter_execute(
+            state.dest.connection, state.plan, guard,
+            owner_reference=owner_reference(state), stop_on_failure=True,
+            tt_connection=tt_connection,
+        )
+    )
+    st.rerun()
+
+
+def _pump_restore_execute(state: WizardState) -> None:
+    job = state.restore_execute_job
+    pump(job, time_budget=0.8, batch_size=1)
+    last = job.last_event
+    render_job_progress(
+        job,
+        label="Restore — writing UPDATEs",
+        fraction=last.fraction if last is not None else 0.0,
+    )
+    if job.error is not None:
+        state.restore_records = [p.record for p in job.events]
+        state.restore_execute_job = None
+        st.rerun()
+    elif job.done:
+        state.restore_records = [p.record for p in job.events]
+        state.restore_execute_job = None
+        st.rerun()
+    else:
+        st.rerun()
+
+
+def _render_restore(state: WizardState) -> None:
+    """Optional post-run pass: restore Instance_Reference defaults with real
+    destination business ids.
+
+    The initial run blanked every always-tenant-data reference (Preflight's
+    safe default). Some of those genuinely SHOULD have a destination value —
+    a report whose company-picker default should point at *this* tenant's
+    top-level company, for example. This section lets the user fill in that
+    value, and the writer does an UPDATE on only the objects that carry it.
+
+    Skipped entirely when Preflight found nothing (no rows), or when the
+    initial run wrote nothing that could still be updated.
+    """
+    rows = _preflight_rows_for_restore(state)
+    if not rows:
+        return
+
+    theme.section(
+        "Restore prompt defaults on the destination",
+        "Preflight blanked every reference below because it names data from "
+        "the source tenant. If a destination value exists for one — say a "
+        "top-level company, or a Workday Release — enter its business id and "
+        "the corresponding object will be UPDATE-written to carry it. Rows "
+        "left blank stay blank; the initial write is untouched.",
+        eyebrow="Optional",
+    )
+
+    if state.restore_reprobe_job is not None:
+        _pump_restore_reprobe(state)
+        return
+    if state.restore_execute_job is not None:
+        _pump_restore_execute(state)
+        return
+
+    if state.restore_records:
+        counts = summarise(state.restore_records)
+        shown = {k: v for k, v in counts.items() if v}
+        theme.figures(
+            list(shown.items()),
+            tones={k: "danger" for k in shown if k in ("failed", "indeterminate")},
+        )
+        touched = [
+            {
+                "name": r.name,
+                "kind": r.kind,
+                "action": r.action.value,
+                "status": r.status.value,
+                "fault": r.fault,
+            }
+            for r in state.restore_records
+            if r.action is Action.UPDATE or r.fault
+        ]
+        if touched:
+            st.dataframe(touched, use_container_width=True, hide_index=True)
+        else:
+            st.caption(
+                "No objects needed an UPDATE — either every row was left "
+                "blank, or the affected objects had already picked up the "
+                "restored values."
+            )
+        st.caption(
+            "Restoration finished. You can edit values below and click "
+            "Restore again to apply additional changes."
+        )
+
+    edited = st.data_editor(
+        pd.DataFrame(rows).drop(columns=["_wid"]),
+        hide_index=True,
+        use_container_width=True,
+        disabled=["Object", "Element", "Source value", "Also on"],
+        column_config={
+            "Restore as (ID type)": st.column_config.TextColumn(
+                help="Business-id type on the destination — e.g. "
+                     "Organization_Reference_ID, Workday_Release_ID. Usually "
+                     "the same type as the Source value column shows."
+            ),
+            "Restore as (value on dest)": st.column_config.TextColumn(
+                help="The business id in the DESTINATION tenant. Look it up "
+                     "in Workday; there is no generic 'list candidates' API."
+            ),
+        },
+        key="restore_table_editor",
+    )
+
+    incomplete = [
+        r["Object"] for r in edited.to_dict("records")
+        if bool(r["Restore as (ID type)"]) != bool(r["Restore as (value on dest)"])
+    ]
+    if incomplete:
+        theme.banner(
+            "warning",
+            f"{len(incomplete)} row(s) partially filled",
+            "Fill in both the ID type and the value, or clear both to leave "
+            "the row blank.",
+        )
+
+    if st.button(
+        "Restore selected values on destination",
+        key="restore_apply",
+        type="primary",
+        disabled=bool(incomplete),
+    ):
+        replaced = _apply_restore_edits(state, rows, edited)
+        if not replaced:
+            theme.banner(
+                "info",
+                "Nothing to restore",
+                "Every row was left blank. No UPDATE run started.",
+            )
+            return
+        _start_restore_reprobe(state, replaced)
+        st.rerun()
+
+    st.caption(
+        "Re-probes the destination first so already-existing objects come "
+        "back with their destination WIDs, then UPDATEs only the ones "
+        "carrying your restored values. Everything else stays SKIP."
+    )
 
 
 def _render_verify(state: WizardState) -> None:

@@ -16,10 +16,12 @@ import pandas as pd
 
 from wdmigrator.api import (
     Blocker,
+    BlockingReference,
     GuardViolation,
     ReferenceAction,
     ReferenceDecision,
     build_plan,
+    find_preflight_reference_candidates,
     find_reference_sites,
     TIME_TRACKING_KINDS,
     TIME_TRACKING_SERVICE_NAME,
@@ -70,6 +72,121 @@ def _other_objects_referencing(state: WizardState, value: str, exclude_node_id: 
     return names
 
 
+def _required_replacements_missing(state: WizardState) -> list[str]:
+    """Names of preflight entries flagged replace-required with no valid decision.
+
+    "Valid" means a REPLACE decision carrying both a replacement type and
+    a value. A BLANK decision on a required row is refused because the
+    schema rejects it — surfacing it here is what lets the wizard block
+    Start instead of letting Workday reject the whole batch.
+    """
+    missing: list[str] = []
+    for value, info in state.blocking_references.items():
+        if not info.get("replace_required"):
+            continue
+        decision = state.reference_decisions.get(value)
+        if (
+            decision is None
+            or decision.action is not ReferenceAction.REPLACE
+            or not decision.replacement_type
+            or not decision.replacement_value
+        ):
+            missing.append(info.get("node_name") or value)
+    return missing
+
+
+def _populate_preflight_references(state: WizardState) -> None:
+    """Enumerate always-tenant-data references before the first write attempt.
+
+    The old fault-driven loop learned about one bad reference at a time — write,
+    fail, decide, restart, write, fail on the next, restart. A report with 31
+    default Companies took 31 round trips just to get past parameter defaults.
+    This walks every payload in the plan once and pre-fills the same table the
+    fault loop uses, keyed by source WID, so the user can bulk-blank the whole
+    set in one pass before the run starts.
+
+    Blank is a safe default and gets applied immediately, not on an "Apply"
+    click — a user who takes no action still gets a working migration. The
+    plan is rebuilt with those decisions so ``Start live execution`` uses the
+    blanked payload rather than the source-WID-carrying one that would fail
+    on the first Instance_Reference.
+
+    Guarded by ``plan_hash`` so it re-runs only when the plan changes shape —
+    an override, a new decision, an added node. Never removes an entry: a
+    reference the fault loop discovered later stays in the table alongside the
+    pre-flight ones (both share the same schema).
+    """
+    plan = state.plan
+    if plan is None:
+        return
+    plan_hash = plan.plan_hash()
+    if state.preflight_populated_for_hash == plan_hash:
+        return
+
+    seeded_a_default = False
+    for candidate in find_preflight_reference_candidates(plan.ordered_nodes):
+        if candidate.value in state.blocking_references:
+            continue
+        business = {
+            id_type: id_value
+            for id_type, id_value in candidate.ids.items()
+            if id_type != "WID"
+        }
+        replace_required = candidate.default_action is ReferenceAction.REPLACE
+        # ``default_from_preflight`` also carries KEEP for delivered id types
+        # (Event_Classification_Value_ID etc.) — the writer treats KEEP as a
+        # no-op, so the source WID passes through unchanged.
+        state.blocking_references[candidate.value] = {
+            "reference": BlockingReference(
+                value=candidate.value, id_type=candidate.id_type
+            ),
+            "node_name": candidate.node_name or candidate.node_id,
+            "elements": [candidate.element],
+            "business": business,
+            "other_objects": list(candidate.other_node_names),
+            "preflight": True,
+            #: True when the field is required on the schema, so BLANK produces
+            #: an invalid payload. The UI shows a warning, does not auto-seed
+            #: a decision, and blocks Start until the user provides a
+            #: destination replacement.
+            "replace_required": replace_required,
+            "default_action": candidate.default_action.value,
+        }
+        # Seed a decision only when the default is a safe automatic choice:
+        # BLANK for tenant-local prompt defaults, KEEP for delivered content
+        # whose WID is shared across tenants. REPLACE-required rows are left
+        # undecided on purpose — a schema-required field cannot be blanked,
+        # and there is no automatic replacement.
+        if (
+            not replace_required
+            and candidate.value not in state.reference_decisions
+        ):
+            note = (
+                f"Preflight default: delivered {candidate.element} "
+                f"({', '.join(k for k in candidate.ids if k != 'WID')})"
+                if candidate.default_action is ReferenceAction.KEEP
+                else f"Preflight default: always-tenant-data {candidate.element}"
+            )
+            state.reference_decisions[candidate.value] = ReferenceDecision(
+                source_wid=candidate.value,
+                action=candidate.default_action,
+                note=note,
+            )
+            seeded_a_default = True
+
+    if seeded_a_default:
+        state.plan = build_plan(
+            state.closure,
+            plan.existence,
+            overrides=state.action_overrides,
+            reference_decisions=state.reference_decisions,
+        )
+        state.dry_run_plan_hash = state.plan.plan_hash()
+        plan_hash = state.plan.plan_hash()
+
+    state.preflight_populated_for_hash = plan_hash
+
+
 def _collect_blockers(state: WizardState) -> None:
     """Fold any newly-discovered unresolvable reference into the running table.
 
@@ -117,15 +234,31 @@ def _decision_rows(state: WizardState) -> list:
             also_affects = f"{shown}{more}"
         else:
             also_affects = "—"
+        replace_required = bool(info.get("replace_required"))
+        # Default decision reflects the element policy captured at preflight:
+        # required rows default to REPLACE (user has to fill in a value),
+        # delivered id types default to KEEP (source WID passes through),
+        # everything else defaults to BLANK (safe drop).
+        default_from_preflight = info.get("default_action")
+        if replace_required:
+            default_action = ReferenceAction.REPLACE
+        elif default_from_preflight:
+            try:
+                default_action = ReferenceAction(default_from_preflight)
+            except ValueError:
+                default_action = ReferenceAction.BLANK
+        else:
+            default_action = ReferenceAction.BLANK
         rows.append({
             "Object": info["node_name"],
             "Where": ", ".join(info["elements"]) or "(not located)",
             "Identified as": ", ".join(
                 f"{k} = {v}" for k, v in info["business"].items()
             ) or info["reference"].id_type,
+            "Required": "REPLACE required" if replace_required else "",
             "Also affects": also_affects,
             "Decision": (
-                existing.action.value if existing else ReferenceAction.BLANK.value
+                existing.action.value if existing else default_action.value
             ),
             "Replacement ID type": (
                 (existing.replacement_type if existing else None) or business_type
@@ -134,6 +267,7 @@ def _decision_rows(state: WizardState) -> list:
                 (existing.replacement_value if existing else None) or ""
             ),
             "_wid": value,
+            "_replace_required": replace_required,
         })
     return rows
 
@@ -242,32 +376,115 @@ def _pump_reprobe(state: WizardState) -> None:
 
 
 def _render_reference_resolution(state: WizardState) -> None:
-    """One table for every unresolvable reference found so far.
+    """One table for every unresolvable reference the run will hit.
 
-    Fault-driven rather than pre-flight: a real report carries ~90 references
-    the tool does not migrate and almost all are delivered objects that pass
-    through fine, so triaging all of them would bury the handful that break.
-    Workday names the offending identifier, so only those appear here.
+    Two sources feed this table:
+      * **Pre-flight** — a walk of every plan payload for reference elements
+        that are *always* pointers to tenant data (parameter defaults, filter
+        instances). No tenant round trip; surfaced before the first write so
+        the user resolves the batch in one pass instead of one-per-restart.
+      * **Fault-driven** — the classic path: a live write fails, Workday names
+        one bad reference, and the row lands here. Kept alongside the
+        pre-flight rows because Workday emits one at a time and the pre-flight
+        set does not cover every case that can break (a dangling matrix
+        pointer, a deleted delivered object).
     """
-    theme.section(
-        "References the destination cannot resolve",
-        "These point at tenant data rather than configuration — a prompt default, "
-        "a filter value, a matrix pointer. They cannot be migrated, so each needs "
-        "a decision. Blanking drops the value; the object still migrates. A "
-        "decision here is applied automatically to every occurrence of this exact "
-        "reference for the rest of the migration — including any objects listed "
-        "under 'Also affects' — so you only decide once per distinct reference, "
-        "even when the same value blocks several objects.",
-        eyebrow="Needs a decision",
+    preflight_count = sum(
+        1 for info in state.blocking_references.values() if info.get("preflight")
     )
+    fault_count = len(state.blocking_references) - preflight_count
+    if preflight_count and not fault_count:
+        title = f"{preflight_count} tenant-data reference(s) to decide before starting"
+        detail = (
+            "Found by pre-flight: these payloads name specific companies, "
+            "workers, or orgs from the source tenant that almost certainly "
+            "do not exist on the destination. Left as-is, the first live "
+            "write would fail on one of them; the whole run would then have "
+            "to restart per reference. Deciding them here does it once."
+        )
+        eyebrow = "Resolve before starting"
+    elif preflight_count and fault_count:
+        title = "References the destination cannot resolve"
+        detail = (
+            f"{preflight_count} found by pre-flight (tenant data — parameter "
+            f"defaults, filter instances) and {fault_count} surfaced by "
+            "earlier live-write failures. All share the same schema and are "
+            "resolved together."
+        )
+        eyebrow = "Needs a decision"
+    else:
+        title = "References the destination cannot resolve"
+        detail = (
+            "These point at tenant data rather than configuration — a prompt "
+            "default, a filter value, a matrix pointer. Blanking drops the "
+            "value; the object still migrates. A decision here is applied "
+            "automatically to every occurrence of this exact reference for "
+            "the rest of the migration — including any objects listed under "
+            "'Also affects' — so you only decide once per distinct reference, "
+            "even when the same value blocks several objects."
+        )
+        eyebrow = "Needs a decision"
+    theme.section(title, detail, eyebrow=eyebrow)
 
     rows = _decision_rows(state)
+
+    # Bulk actions before the table, so a 31-row list is one click instead of
+    # 31 dropdown changes. Both write back to state and re-render — the table
+    # then shows the new default. Cheap because ``reference_decisions`` is what
+    # ``_decision_rows`` already reads to pre-populate the Decision column.
+    bulk_cols = st.columns([1, 1, 1, 3])
+    with bulk_cols[0]:
+        if st.button(
+            f"Blank all ({len(rows)})",
+            key="refdec_blank_all",
+            help="Set every row's decision to blank. Blanking a reference "
+                 "drops it from the payload; the object still migrates.",
+            disabled=not rows,
+        ):
+            for source in rows:
+                state.reference_decisions[source["_wid"]] = ReferenceDecision(
+                    source_wid=source["_wid"],
+                    action=ReferenceAction.BLANK,
+                )
+            st.rerun()
+    with bulk_cols[1]:
+        if st.button(
+            "Keep all",
+            key="refdec_keep_all",
+            help="Leave every source WID exactly as it is. Use when the "
+                 "references point at delivered content — event "
+                 "classifications, business process types, currencies — "
+                 "whose WID is the same on the destination tenant.",
+            disabled=not rows,
+        ):
+            for source in rows:
+                state.reference_decisions[source["_wid"]] = ReferenceDecision(
+                    source_wid=source["_wid"],
+                    action=ReferenceAction.KEEP,
+                )
+            st.rerun()
+    with bulk_cols[2]:
+        if st.button(
+            "Clear decisions",
+            key="refdec_clear",
+            help="Reset every row's decision, so nothing is applied yet.",
+            disabled=not rows,
+        ):
+            for source in rows:
+                state.reference_decisions.pop(source["_wid"], None)
+            st.rerun()
+
     edited = st.data_editor(
-        pd.DataFrame(rows).drop(columns=["_wid"]),
+        pd.DataFrame(rows).drop(columns=["_wid", "_replace_required"]),
         hide_index=True,
         use_container_width=True,
-        disabled=["Object", "Where", "Identified as", "Also affects"],
+        disabled=["Object", "Where", "Identified as", "Required", "Also affects"],
         column_config={
+            "Required": st.column_config.TextColumn(
+                help="Rows marked 'REPLACE required' point at a schema-required "
+                     "field. Blank is not a legal move for these — Workday "
+                     "refuses the write. Fill in a destination value."
+            ),
             "Decision": st.column_config.SelectboxColumn(
                 options=[a.value for a in ReferenceAction], required=True,
             ),
@@ -295,18 +512,63 @@ def _render_reference_resolution(state: WizardState) -> None:
             f"{len(incomplete)} row(s) set to replace with no value",
             "Fill in both the ID type and the value, or set those rows back to blank.",
         )
+    # Guard the required rows regardless of the decision the user picked in
+    # the table — a required row set to BLANK is still not shippable.
+    still_required = [
+        source["Object"]
+        for source, row in zip(rows, edited.to_dict("records"))
+        if source["_replace_required"]
+        and (
+            row["Decision"] != ReferenceAction.REPLACE.value
+            or not (row["Replacement ID type"] and row["Replacement value"])
+        )
+    ]
+    if still_required and not incomplete:
+        theme.banner(
+            "warning",
+            f"{len(still_required)} required reference(s) still need replacement",
+            "These reference elements are required by the schema — blanking "
+            "them produces a payload Workday rejects. Provide a destination "
+            "value for each.",
+        )
 
-    if st.button("Apply and re-check destination", key="refdec_apply",
+    # Pre-flight is the "before the first attempt" case. Skipping the re-probe
+    # here is correct: nothing has been written yet, so the destination state
+    # is unchanged, and starting the run is what should happen next.
+    if state.execute_records:
+        apply_label = "Apply and re-check destination"
+        apply_caption = (
+            "Re-checking picks up anything already written so it is skipped "
+            "rather than written twice. Your other approvals stay in place — "
+            "you can start execution again straight afterwards."
+        )
+    else:
+        apply_label = "Apply decisions"
+        apply_caption = (
+            "Decisions take effect on the payload sent to the destination — "
+            "nothing has been written yet, so no re-check is needed. Start "
+            "the run below when the table looks right."
+        )
+    if st.button(apply_label, key="refdec_apply",
                  type="primary", disabled=bool(incomplete)):
         _apply_decisions(state, rows, edited)
-        _start_reprobe(state)
+        if state.execute_records:
+            _start_reprobe(state)
+        else:
+            # Fold the new decisions into the plan so plan_hash reflects them
+            # and the guard's dry-run-reviewed stamp still matches. Same
+            # rationale as the reprobe branch's re-hash — the mapping table is
+            # the review of the payload change.
+            state.plan = build_plan(
+                state.closure,
+                state.plan.existence,
+                overrides=state.action_overrides,
+                reference_decisions=state.reference_decisions,
+            )
+            state.dry_run_plan_hash = state.plan.plan_hash()
         st.rerun()
 
-    st.caption(
-        "Re-checking picks up anything already written so it is skipped rather than "
-        "written twice. Your other approvals stay in place — you can start execution "
-        "again straight afterwards."
-    )
+    st.caption(apply_caption)
 
 
 def _start(state: WizardState) -> None:
@@ -343,6 +605,9 @@ def render(state: WizardState) -> None:
         return
 
     _collect_blockers(state)
+    # Runs once per plan hash: enumerates always-tenant-data references so the
+    # table appears before the first write attempt, not only after a failure.
+    _populate_preflight_references(state)
     job = state.execute_job
 
     if job is None and not state.execute_records:
@@ -351,6 +616,12 @@ def render(state: WizardState) -> None:
         if state.blocking_references:
             _render_reference_resolution(state)
             st.divider()
+
+        # Required-replacement rows must be answered before Start. Blank is
+        # not a legal move for these (Workday rejects the payload with
+        # "Required Mutex error"), so pre-flight refuses to advance until
+        # every one carries a REPLACE decision with both fields set.
+        missing_required = _required_replacements_missing(state)
 
         theme.figures(
             [("Objects to write", state.plan.writes_planned)], tones={"Objects to write": "write"}
@@ -363,7 +634,23 @@ def render(state: WizardState) -> None:
             "objects, never mid-write.",
             remedy="Nothing written here can be undone by this tool.",
         )
-        if st.button("Start live execution", key="execute_start", type="primary"):
+        if missing_required:
+            theme.banner(
+                "danger",
+                f"{len(missing_required)} required reference(s) not answered",
+                "These reference elements are marked required on the schema, "
+                "and blanking them would fail the write with 'Required Mutex "
+                "error.' Set each to 'replace' with the destination-tenant "
+                "value in the table above before starting.",
+                remedy="Fill in the replacement type and value for every "
+                       "row flagged as required.",
+            )
+        if st.button(
+            "Start live execution",
+            key="execute_start",
+            type="primary",
+            disabled=bool(missing_required),
+        ):
             _start(state)
             st.rerun()
         return

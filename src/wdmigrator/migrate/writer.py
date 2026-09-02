@@ -36,9 +36,9 @@ from __future__ import annotations
 import copy
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Iterator, Mapping
+from typing import Iterable, Iterator, Mapping
 
 from zeep.exceptions import Fault
 from zeep.helpers import serialize_object
@@ -196,6 +196,14 @@ def build_calculated_field_payload(
     remapped = substitute_wids(data, wid_map)
     if reference_decisions:
         _apply_reference_decisions(remapped, reference_decisions)
+    # Same reasoning as build_report_payload: an entry in
+    # _INLINE_CHILD_REFERENCES carries a stale WID beside a stable business
+    # id, and Workday validates the WID first. On a calculated field the
+    # concrete case is Hierarchy_Type_Reference on a Lookup Hierarchy CF —
+    # tenant-scoped WID for a delivered Organization_Type_ID like
+    # Location_Hierarchy. Runs AFTER substitute_wids, so "unmapped" is
+    # literal.
+    _drop_stale_inline_wids(remapped, wid_map)
     payload: dict = {"Calculated_Field_Data": remapped}
 
     if action is Action.UPDATE:
@@ -380,6 +388,16 @@ _INLINE_CHILD_REFERENCES = {
     "Matrix_Measure__All__Reference": "Matrix_Measure_Reference_ID",
     "Matrix_Dimension_Reference": "Matrix_Dimension_Reference_ID",
     "Prompt_Set_Member__All__Reference": "Prompt_Set_Member_ID",
+    # A Lookup Hierarchy calculated field names its hierarchy type via
+    # Hierarchy_Type_Reference. The business id
+    # (``Organization_Type_ID=Location_Hierarchy`` and friends) is a delivered
+    # global that resolves on any tenant; the sibling WID is tenant-scoped and
+    # rejects on the destination with ``Invalid ID value``. Confirmed live
+    # 2026-09-02 against ``CF LH Location Hierarchy Region (Trended Worker)`` —
+    # dropping the stale WID and keeping ``Location_Hierarchy`` let the write
+    # advance to the next fault (see PREFLIGHT_REPLACE_REQUIRED_ELEMENTS for
+    # that half).
+    "Hierarchy_Type_Reference": "Organization_Type_ID",
 }
 
 
@@ -541,6 +559,200 @@ def find_reference_sites(node: Node, value: str) -> list[ReferenceSite]:
     return sites
 
 
+#: Reference elements that are *always* pointers to specific tenant data — a
+#: worker, an org, a company, whatever the field is on — rather than to
+#: configuration this tool would ever migrate. Pre-flight discovery uses this
+#: to surface every occurrence of them in one table before the first write,
+#: instead of the fault-driven loop (fail → decide one → restart → repeat)
+#: that a report with, say, 31 default companies grinds through one at a time.
+#: Blanking is a safe default here — the field is optional, and dropping the
+#: value leaves the object valid.
+#: Filter_Instances_Reference is deliberately absent — the writer strips those
+#: unconditionally in ``_strip_filter_instance_references``.
+PREFLIGHT_BLANK_SAFE_ELEMENTS = frozenset({"Instance_Reference"})
+
+#: Reference elements the destination cannot resolve by the source's identity
+#: AND that the schema marks REQUIRED — blanking them produces a payload
+#: Workday rejects with "Element Content ... Required Mutex error." The user
+#: MUST supply a destination-side replacement; there is no automatic fix.
+#: Confirmed live 2026-09-02 against a ``Lookup Hierarchy Calculated Field``:
+#: ``Top_Level_Node_Reference`` names sageai's ``LOCATION_HIERARCHY-6-1``,
+#: aesseal has neither that WID nor that business id, and a BLANK decision was
+#: refused by the schema. Surfacing it in Preflight is what lets the user
+#: enter the destination's own top-level node before the first write.
+PREFLIGHT_REPLACE_REQUIRED_ELEMENTS = frozenset({"Top_Level_Node_Reference"})
+
+#: Union of every element the pre-flight scanner should catch. Callers that
+#: only need the classification pull from the specific frozensets above.
+PREFLIGHT_TENANT_DATA_ELEMENTS = (
+    PREFLIGHT_BLANK_SAFE_ELEMENTS | PREFLIGHT_REPLACE_REQUIRED_ELEMENTS
+)
+
+#: Business ID types on an ``Instance_Reference`` that indicate delivered /
+#: tenant-stable content — the WID is the same on every tenant, so the safe
+#: default is to leave the reference alone rather than blank it. A report
+#: whose parameter defaults to a set of Event Classifications (delivered enum
+#: values) should keep those defaults intact after migration; blanking would
+#: hand the destination a report with empty defaults for content the user
+#: actually wants pre-selected.
+#:
+#: Membership is deliberately conservative: an id type is only in here when
+#: the underlying object is delivered by Workday (not tenant-configurable),
+#: so the source and destination genuinely share the WID. Anything a customer
+#: creates (Organization, Cost Center, Company, Worker, Location, Position)
+#: stays out and keeps its BLANK default — a tenant-local WID that survives
+#: to a write becomes an ``Invalid ID value`` fault.
+#:
+#: This is only a *default* — every row still appears in the pre-flight table
+#: and any KEEP guess can be flipped to BLANK or REPLACE in place.
+DELIVERED_INSTANCE_REFERENCE_ID_TYPES = frozenset({
+    "Event_Classification_Value_ID",
+    "Business_Process_Type_ID",
+    "Country_ID",
+    "Country_Region_ID",
+    "Currency_ID",
+    "Time_Zone_ID",
+})
+
+
+@dataclass(frozen=True)
+class PreflightReference:
+    """A reference the destination almost certainly cannot resolve.
+
+    ``default_action`` is the safest thing to do with the reference:
+    :attr:`ReferenceAction.BLANK` when the schema tolerates dropping the
+    field (parameter defaults), :attr:`ReferenceAction.REPLACE` when the
+    field is required and the user must provide a destination value. The
+    wizard uses this to decide whether to seed a decision automatically or
+    to block Start until the user has filled the row in.
+    """
+
+    value: str
+    id_type: str
+    element: str
+    node_id: str
+    node_name: str | None
+    ids: dict
+    default_action: ReferenceAction = ReferenceAction.BLANK
+    other_node_ids: tuple[str, ...] = ()
+    other_node_names: tuple[str, ...] = ()
+
+
+def find_preflight_reference_candidates(
+    nodes: Iterable[Node],
+    *,
+    elements: frozenset[str] = PREFLIGHT_TENANT_DATA_ELEMENTS,
+) -> list[PreflightReference]:
+    """Enumerate every tenant-data reference across all plan nodes, up front.
+
+    The dead simple version of the guided-resolution loop: instead of waiting
+    for a live write to fail, walk every payload once and collect the WIDs the
+    destination will predictably choke on. A report that defaults 31 parameter
+    Companies produces 31 rows here, all discoverable before the first Put.
+
+    Keyed by source WID so a value that appears in several nodes surfaces once.
+    ``other_node_ids`` / ``other_node_names`` name the additional carriers so a
+    single decision — blank or replace — is visibly applied everywhere the
+    writer already substitutes it.
+    """
+    by_value: dict[str, PreflightReference] = {}
+
+    def walk(node: Node, obj: object, path: str = "") -> None:
+        if isinstance(obj, dict):
+            entries = obj.get("ID")
+            if isinstance(entries, list):
+                ids = {
+                    e.get("type"): e.get("_value_1")
+                    for e in entries
+                    if isinstance(e, dict) and e.get("type")
+                }
+                element = path.split(".")[-1].split("[")[0] if path else ""
+                wid = ids.get("WID")
+                if element in elements and wid:
+                    existing = by_value.get(wid)
+                    # A required-required element trumps everything (the schema
+                    # rejects a blank there, KEEP would fail if the WID is a
+                    # source-only value). Otherwise, if any accompanying
+                    # business id names a delivered / tenant-stable kind,
+                    # default to KEEP so the source WID passes through — event
+                    # classifications, delivered process types, and the like
+                    # exist on every tenant under the same WID, so blanking
+                    # them would strip valid prompt defaults. Everything else
+                    # keeps the safe BLANK default.
+                    if element in PREFLIGHT_REPLACE_REQUIRED_ELEMENTS:
+                        default = ReferenceAction.REPLACE
+                    elif any(
+                        id_type in DELIVERED_INSTANCE_REFERENCE_ID_TYPES
+                        for id_type in ids
+                    ):
+                        default = ReferenceAction.KEEP
+                    else:
+                        default = ReferenceAction.BLANK
+                    if existing is None:
+                        by_value[wid] = PreflightReference(
+                            value=wid,
+                            id_type="WID",
+                            element=element,
+                            node_id=node.node_id,
+                            node_name=node.name,
+                            ids=ids,
+                            default_action=default,
+                        )
+                    elif node.node_id != existing.node_id and \
+                            node.node_id not in existing.other_node_ids:
+                        by_value[wid] = replace(
+                            existing,
+                            other_node_ids=existing.other_node_ids + (node.node_id,),
+                            other_node_names=existing.other_node_names + (node.name or node.node_id,),
+                        )
+            for key, item in obj.items():
+                walk(node, item, f"{path}.{key}" if path else key)
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                walk(node, item, f"{path}[{i}]")
+
+    for node in nodes:
+        walk(node, node.payload)
+    return list(by_value.values())
+
+
+def find_nodes_using_reference_values(
+    nodes: Iterable[Node], values: Iterable[str]
+) -> set[str]:
+    """Every node whose payload mentions any of ``values`` as a WID or business id.
+
+    The counterpart to :func:`find_preflight_reference_candidates`: pre-flight
+    tells us what to blank; this tells us which objects have to be re-written
+    to get a restored value onto the destination. Callers use it to auto-flip
+    the affected nodes to UPDATE for the restore pass so unrelated objects
+    stay SKIP.
+    """
+    wanted = set(values)
+    if not wanted:
+        return set()
+    hit: set[str] = set()
+
+    def walk(node_id: str, obj: object) -> None:
+        if node_id in hit:
+            return
+        if isinstance(obj, dict):
+            entries = obj.get("ID")
+            if isinstance(entries, list):
+                for e in entries:
+                    if isinstance(e, dict) and e.get("_value_1") in wanted:
+                        hit.add(node_id)
+                        return
+            for value in obj.values():
+                walk(node_id, value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(node_id, item)
+
+    for node in nodes:
+        walk(node.node_id, node.payload)
+    return hit
+
+
 def _decision_for(reference: object, decisions: Mapping[str, ReferenceDecision]):
     """The decision covering this reference dict, if any."""
     if not isinstance(reference, dict):
@@ -586,11 +798,14 @@ def _apply_reference_decisions(
             if decision is not None:
                 if decision.action is ReferenceAction.BLANK:
                     obj.pop(key, None)
-                else:
+                elif decision.action is ReferenceAction.REPLACE:
                     value["ID"] = [{
                         "type": decision.replacement_type,
                         "_value_1": decision.replacement_value,
                     }]
+                # KEEP is an explicit "leave the source WID in place" answer.
+                # No mutation, but still counts as applied so the caller can
+                # tell an intentional passthrough from an un-decided reference.
                 applied += 1
                 continue
 
@@ -609,6 +824,10 @@ def _apply_reference_decisions(
                             "type": hit.replacement_type,
                             "_value_1": hit.replacement_value,
                         }]
+                        kept.append(item)
+                    elif hit.action is ReferenceAction.KEEP:
+                        # Same as no-decision for the payload, but a chosen
+                        # passthrough — leave the entry exactly as it is.
                         kept.append(item)
                 if kept:
                     obj[key] = kept

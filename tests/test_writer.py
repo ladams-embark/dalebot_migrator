@@ -30,6 +30,8 @@ from wdmigrator.migrate.resolver import Node, NodeKind, node_id_for, resolve_clo
 from wdmigrator.migrate.writer import (
     build_calculated_measure_payload,
     _defer_summary_calculations,
+    find_nodes_using_reference_values,
+    find_preflight_reference_candidates,
     find_reference_sites,
     parse_blocking_reference,
     ExceptionDetail,
@@ -1182,6 +1184,289 @@ class TestDecisionsApplyToEveryObjectKind:
         )["Calculated_Field_Data"]
         refs = data["Condition_Item_Data"][0]["Instance_Reference"]
         assert refs[0]["ID"][0]["_value_1"] == "ORG_WID"
+
+
+class TestPreflightReferenceCandidates:
+    """Pre-flight enumeration of always-tenant-data reference types, so the user
+    resolves the whole batch in one pass instead of one-per-restart. The
+    fault-driven loop still catches everything else — this covers only the
+    common case (Instance_Reference parameter defaults, filter instances)."""
+
+    def _report(self, wid_list, extra_element=None):
+        instance_entries = [
+            {"ID": [
+                {"type": "WID", "_value_1": w},
+                {"type": "Organization_Reference_ID", "_value_1": f"ORG-{w}"},
+            ]}
+            for w in wid_list
+        ]
+        payload = {"Tenanted_Report_Definition_Data": {
+            "Name": "R",
+            "Abstract_Value_Data": [{"Instance_Reference": instance_entries}],
+        }}
+        if extra_element:
+            payload["Tenanted_Report_Definition_Data"][extra_element] = {
+                "ID": [{"type": "WID", "_value_1": "OTHER_WID"}]
+            }
+        return Node(
+            node_id="report:R1", kind=NodeKind.REPORT, source_wid="R1",
+            reference_id="RPT", name="Report One", payload=payload,
+        )
+
+    def test_every_instance_reference_is_found_once(self):
+        node = self._report(["ORG_A", "ORG_B", "ORG_C"])
+        found = find_preflight_reference_candidates([node])
+        assert {c.value for c in found} == {"ORG_A", "ORG_B", "ORG_C"}
+        assert {c.element for c in found} == {"Instance_Reference"}
+
+    def test_duplicate_wid_across_nodes_collapses_to_one_row(self):
+        node_a = self._report(["SHARED"])
+        node_b = Node(
+            node_id="report:R2", kind=NodeKind.REPORT, source_wid="R2",
+            reference_id="RPT2", name="Report Two",
+            payload={"Tenanted_Report_Definition_Data": {
+                "Abstract_Value_Data": [{"Instance_Reference": [
+                    {"ID": [{"type": "WID", "_value_1": "SHARED"}]}
+                ]}]
+            }},
+        )
+        found = find_preflight_reference_candidates([node_a, node_b])
+        assert len(found) == 1
+        assert "Report Two" in found[0].other_node_names
+
+    def test_non_tenant_data_elements_are_ignored(self):
+        # OTHER_WID sits under an element that is NOT in the preflight set
+        # (Data_Source_Reference is normally a delivered object that resolves
+        # cross-tenant). It must not be surfaced.
+        node = self._report(["ORG_A"], extra_element="Data_Source_Reference")
+        found = find_preflight_reference_candidates([node])
+        assert {c.value for c in found} == {"ORG_A"}
+
+    def test_business_ids_are_carried_alongside_the_wid(self):
+        node = self._report(["ORG_A"])
+        [candidate] = find_preflight_reference_candidates([node])
+        assert candidate.ids["Organization_Reference_ID"] == "ORG-ORG_A"
+
+
+class TestPreflightReplaceRequired:
+    """Reference elements the schema marks required cannot be blanked — the
+    write would fail with 'Required Mutex error.' Preflight has to tag them
+    as REPLACE-required so the UI asks for a destination value up front."""
+
+    def _node(self, wid, element_name="Top_Level_Node_Reference"):
+        return Node(
+            node_id="cf:LH", kind=NodeKind.CALCULATED_FIELD, source_wid="LH",
+            reference_id=None, name="Lookup Hierarchy CF",
+            payload={"Calculated_Field_Data": {
+                "Lookup_Hierarchy_Calculated_Field_Data": {
+                    element_name: {"ID": [
+                        {"type": "WID", "_value_1": wid},
+                        {"type": "Organization_Reference_ID",
+                         "_value_1": "LOCATION_HIERARCHY-6-1"},
+                    ]}
+                }
+            }},
+        )
+
+    def test_top_level_node_defaults_to_REPLACE(self):
+        from wdmigrator.api import ReferenceAction
+        node = self._node("TLN_WID")
+        [c] = find_preflight_reference_candidates([node])
+        assert c.element == "Top_Level_Node_Reference"
+        assert c.default_action is ReferenceAction.REPLACE
+
+    def test_instance_reference_still_defaults_to_BLANK(self):
+        from wdmigrator.api import ReferenceAction
+        node = self._node("IR_WID", element_name="Instance_Reference")
+        # Fix payload shape so the element sits under a plausible parent
+        node = Node(
+            node_id="r:R", kind=NodeKind.REPORT, source_wid="R",
+            reference_id=None, name="R",
+            payload={"Tenanted_Report_Definition_Data": {
+                "Abstract_Value_Data": [{"Instance_Reference": [
+                    {"ID": [{"type": "WID", "_value_1": "IR_WID"}]}
+                ]}]
+            }},
+        )
+        [c] = find_preflight_reference_candidates([node])
+        assert c.element == "Instance_Reference"
+        assert c.default_action is ReferenceAction.BLANK
+
+
+class TestDeliveredInstanceReferenceDefaultsToKeep:
+    """An Instance_Reference whose accompanying business id is a delivered /
+    tenant-stable id type (Event_Classification_Value_ID, Currency_ID, and so
+    on) shares its WID across tenants. Blanking such a reference would strip
+    a valid prompt default, so preflight defaults to KEEP for those rows —
+    the source WID passes through unchanged.
+
+    The safe-default rule (BLANK) still applies to every other Instance_Reference,
+    which is the vast majority (Organization, Cost Center, Worker, etc.)."""
+
+    def _report(self, id_pairs):
+        entries = [
+            {"ID": [{"type": t, "_value_1": v} for t, v in pairs]}
+            for pairs in id_pairs
+        ]
+        return Node(
+            node_id="report:R1", kind=NodeKind.REPORT, source_wid="R1",
+            reference_id="RPT", name="Report One",
+            payload={"Tenanted_Report_Definition_Data": {
+                "Abstract_Value_Data": [{"Instance_Reference": entries}],
+            }},
+        )
+
+    def test_event_classification_defaults_to_KEEP(self):
+        node = self._report([
+            [("WID", "EVT_A"),
+             ("Event_Classification_Value_ID", "PAID_TIME_OFF")],
+        ])
+        [c] = find_preflight_reference_candidates([node])
+        assert c.default_action is ReferenceAction.KEEP
+
+    def test_tenant_local_organization_still_defaults_to_BLANK(self):
+        node = self._report([
+            [("WID", "ORG_A"),
+             ("Organization_Reference_ID", "ORG-ORG_A")],
+        ])
+        [c] = find_preflight_reference_candidates([node])
+        assert c.default_action is ReferenceAction.BLANK
+
+    def test_mixed_batch_gets_different_defaults_per_reference(self):
+        node = self._report([
+            [("WID", "EVT_A"),
+             ("Event_Classification_Value_ID", "PAID_TIME_OFF")],
+            [("WID", "ORG_A"),
+             ("Organization_Reference_ID", "ORG-ORG_A")],
+            [("WID", "CUR_A"), ("Currency_ID", "USD")],
+        ])
+        candidates = {c.value: c.default_action for c in
+                      find_preflight_reference_candidates([node])}
+        assert candidates == {
+            "EVT_A": ReferenceAction.KEEP,
+            "ORG_A": ReferenceAction.BLANK,
+            "CUR_A": ReferenceAction.KEEP,
+        }
+
+
+class TestApplyReferenceDecisionKeep:
+    """KEEP is the 'leave the source WID exactly as it is' answer. The writer
+    must not mutate the payload for a KEEP decision — that is the whole point
+    of exposing KEEP alongside BLANK/REPLACE."""
+
+    def _payload(self, wid):
+        # An Instance_Reference list — the shape KEEP actually has to survive
+        # cleanly, since the same shape is what BLANK removes entries from.
+        return {"Instance_Reference": [
+            {"ID": [{"type": "WID", "_value_1": wid},
+                    {"type": "Event_Classification_Value_ID", "_value_1": "X"}]},
+            {"ID": [{"type": "WID", "_value_1": "OTHER"},
+                    {"type": "Organization_Reference_ID", "_value_1": "ORG"}]},
+        ]}
+
+    def test_keep_leaves_the_entry_in_place(self):
+        from wdmigrator.migrate.writer import _apply_reference_decisions
+        payload = self._payload("EVT_A")
+        applied = _apply_reference_decisions(
+            payload,
+            {"EVT_A": ReferenceDecision("EVT_A", ReferenceAction.KEEP)},
+        )
+        assert applied == 1
+        # The KEEP-decided entry is still there, WID and business id intact.
+        entries = payload["Instance_Reference"]
+        assert any(
+            any(e["_value_1"] == "EVT_A" for e in item["ID"])
+            for item in entries
+        )
+        # The OTHER entry (no decision) is untouched.
+        assert any(
+            any(e["_value_1"] == "OTHER" for e in item["ID"])
+            for item in entries
+        )
+
+    def test_keep_alongside_blank_only_removes_the_blank(self):
+        from wdmigrator.migrate.writer import _apply_reference_decisions
+        payload = self._payload("EVT_A")
+        applied = _apply_reference_decisions(
+            payload,
+            {
+                "EVT_A": ReferenceDecision("EVT_A", ReferenceAction.KEEP),
+                "OTHER": ReferenceDecision("OTHER", ReferenceAction.BLANK),
+            },
+        )
+        assert applied == 2
+        entries = payload["Instance_Reference"]
+        assert len(entries) == 1
+        assert any(
+            e["_value_1"] == "EVT_A" for e in entries[0]["ID"]
+        )
+
+
+class TestHierarchyTypeReferenceStrip:
+    """Hierarchy_Type_Reference on a Lookup Hierarchy CF carries a
+    tenant-scoped WID plus a stable Organization_Type_ID business id. Dropping
+    the WID lets the business id resolve on any destination. Confirmed live
+    2026-09-02 against ``CF LH Location Hierarchy Region (Trended Worker)``."""
+
+    def test_hierarchy_type_reference_wid_is_dropped_on_write(self):
+        node = Node(
+            node_id="cf:LH", kind=NodeKind.CALCULATED_FIELD, source_wid="LH",
+            reference_id=None, name="LH CF",
+            payload={"Calculated_Field_Data": {
+                "Name": "LH CF",
+                "Lookup_Hierarchy_Calculated_Field_Data": {
+                    "Hierarchy_Type_Reference": {"ID": [
+                        {"type": "WID", "_value_1": "TENANT_WID"},
+                        {"type": "Organization_Type_ID",
+                         "_value_1": "Location_Hierarchy"},
+                    ]},
+                }
+            }},
+        )
+        payload = build_calculated_field_payload(node, {}, action=Action.CREATE)
+        ht = payload["Calculated_Field_Data"][
+            "Lookup_Hierarchy_Calculated_Field_Data"]["Hierarchy_Type_Reference"]
+        types = [e.get("type") for e in ht["ID"]]
+        assert "WID" not in types
+        assert "Organization_Type_ID" in types
+
+
+class TestFindNodesUsingReferenceValues:
+    """The restore pass narrows UPDATEs to only the objects that carry a
+    restored value, so unrelated objects stay SKIP on the second run."""
+
+    def _report(self, node_id, name, wids):
+        return Node(
+            node_id=node_id, kind=NodeKind.REPORT, source_wid=node_id,
+            reference_id=None, name=name,
+            payload={"Tenanted_Report_Definition_Data": {
+                "Abstract_Value_Data": [{"Instance_Reference": [
+                    {"ID": [{"type": "WID", "_value_1": w}]} for w in wids
+                ]}]
+            }},
+        )
+
+    def test_finds_the_one_node_that_names_the_value(self):
+        a = self._report("R1", "One", ["ORG_A"])
+        b = self._report("R2", "Two", ["ORG_B"])
+        c = self._report("R3", "Three", ["ORG_C"])
+        assert find_nodes_using_reference_values([a, b, c], {"ORG_B"}) == {"R2"}
+
+    def test_finds_every_node_that_names_any_value(self):
+        a = self._report("R1", "One", ["ORG_A"])
+        b = self._report("R2", "Two", ["ORG_B"])
+        c = self._report("R3", "Three", ["ORG_A"])
+        assert find_nodes_using_reference_values(
+            [a, b, c], {"ORG_A"}
+        ) == {"R1", "R3"}
+
+    def test_empty_value_set_matches_nothing(self):
+        a = self._report("R1", "One", ["ORG_A"])
+        assert find_nodes_using_reference_values([a], set()) == set()
+
+    def test_no_match_yields_empty(self):
+        a = self._report("R1", "One", ["ORG_A"])
+        assert find_nodes_using_reference_values([a], {"ORG_Z"}) == set()
 
 
 class TestBlockingReferenceFromExceptionsBlock:

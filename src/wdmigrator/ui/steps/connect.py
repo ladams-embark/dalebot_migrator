@@ -19,11 +19,15 @@ from wdmigrator.api import (
     DEFAULT_VERSION,
     AuthError,
     Blocker,
+    PackageError,
     Role,
     TenantURLError,
     connect,
+    default_packages_dir,
     install_redacting_log_filter,
     iter_discover_services_host,
+    list_packages,
+    load_package,
     parse_tenant_url,
     verify_connection,
 )
@@ -75,6 +79,13 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
         # tenant/user. Everything built from it (indexes, closure, plan,
         # dry run, guard) may no longer be valid.
         reset_downstream(state, from_step="select")
+        # A source-side change also invalidates any stored package that was
+        # loaded — the user is switching to a live source. A destination
+        # change leaves the package alone, because the package is what the
+        # source is.
+        if role is Role.SOURCE:
+            state.package = None
+            state.closure = None
         theme.banner(
             "info",
             f"{label} credentials changed",
@@ -247,6 +258,79 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
     render_connection_status(side.status)
 
 
+def _render_package_loader(state: WizardState) -> None:
+    """Load a stored source package in place of a live source tenant.
+
+    A package is a pre-resolved closure captured from a source tenant and
+    serialised to disk. Loading one replaces the "connect to source" half of
+    the wizard entirely: the destination side still needs credentials, but
+    Select / Resolve become read-only summaries of what the package holds.
+    Useful when the same bundle of reports gets shipped to many destinations,
+    or when the source tenant is no longer reachable.
+    """
+    metas = list_packages(default_packages_dir())
+    if not metas and state.package is None:
+        return  # Nothing to load, and nothing loaded — skip the section entirely.
+
+    theme.section(
+        "Or load a stored package",
+        "A stored package is a pre-resolved bundle of reports from a source "
+        "tenant, saved to disk. Loading one replaces the source-side of this "
+        "wizard: Select and Resolve become read-only, and you only need a "
+        "destination connection below.",
+        eyebrow="Alternative to a live source",
+    )
+
+    if state.package is not None:
+        theme.banner(
+            "success",
+            f"Package loaded: {state.package.name}",
+            f"{state.package.node_count} objects from "
+            f"{state.package.source_tenant} — captured {state.package.captured_at}.",
+        )
+        st.caption(state.package.description or "(no description)")
+        if st.button("Clear loaded package", key="pkg_clear"):
+            # Explicit — reset_downstream no longer touches state.package
+            # (see its docstring for why).
+            state.package = None
+            state.closure = None
+            state.closure_error = None
+            reset_downstream(state, from_step="select")
+            st.rerun()
+        return
+
+    options = {m.path.name: m for m in metas}
+    choice = st.selectbox(
+        "Pick a stored package",
+        options=list(options),
+        format_func=lambda n: (
+            f"{options[n].name}  —  {options[n].node_count} objects "
+            f"from {options[n].source_tenant}"
+        ),
+        key="pkg_choice",
+    )
+    picked = options[choice]
+    st.caption(picked.description or "(no description)")
+    if st.button(f"Load {picked.name!r}", key="pkg_load", type="secondary"):
+        try:
+            package = load_package(picked.path)
+        except PackageError as exc:
+            theme.banner("danger", "Could not load package", str(exc))
+            return
+        # Wipe every downstream artefact (selections, indexes, closure, plan,
+        # dry run, blocking refs) so a package load starts from a clean slate.
+        # reset_downstream no longer touches ``state.package`` (it's source-
+        # side state that a destination change shouldn't wipe), so the order
+        # of these two lines is no longer load-bearing.
+        reset_downstream(state, from_step="select")
+        state.package = package
+        # The package IS the closure. Wire it straight into state so Resolve
+        # is a no-op summary rather than a live resolve_closure call.
+        state.closure = package.closure
+        state.closure_error = None
+        st.rerun()
+
+
 def render(state: WizardState) -> None:
     st.header("Connect")
     theme.checklist(
@@ -258,7 +342,6 @@ def render(state: WizardState) -> None:
             "Changes — until you do, the ISU returns empty data rather than an error.",
         ]
     )
-
     col1, col2 = st.columns(2)
     with col1:
         _render_side(state, state.source, Role.SOURCE, "Source", "src")
@@ -275,16 +358,24 @@ def render(state: WizardState) -> None:
                 remedy="A live migration will be blocked here with no override available.",
             )
 
+    # Placed below the two connection panes so the primary path (source +
+    # destination) reads first; the package loader is the alternative for
+    # someone who does not need or have a live source.
+    st.divider()
+    _render_package_loader(state)
+
 
 def gate(state: WizardState) -> list[Blocker]:
     blockers = []
-    if not state.source.verified:
+    # A loaded package IS the source — no live source connection is needed.
+    if state.package is None and not state.source.verified:
         blockers.append(
             Blocker(
                 node_id=None,
                 title="Source not connected",
                 detail="The source tenant connection has not been tested successfully.",
-                remedy="Enter source credentials and click Test source connection.",
+                remedy="Enter source credentials and click Test source connection, "
+                       "or load a stored package above.",
             )
         )
     if not state.dest.verified:

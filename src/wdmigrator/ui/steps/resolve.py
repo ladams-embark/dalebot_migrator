@@ -87,13 +87,25 @@ def _compute(state: WizardState) -> None:
 
 def render(state: WizardState) -> None:
     st.header("Resolve")
-    st.caption(
-        "Expands your selection into everything that must migrate with it, in "
-        "child-most-first order. Makes no tenant calls — the source index already "
-        "holds every calculated field, so this is an in-memory walk."
-    )
+    if state.package is not None:
+        st.caption(
+            "Nothing to resolve — a stored package was loaded on Connect, so "
+            "the closure it captured is used as-is. The counts and order below "
+            "come straight from the package."
+        )
+    else:
+        st.caption(
+            "Expands your selection into everything that must migrate with it, in "
+            "child-most-first order. Makes no tenant calls — the source index already "
+            "holds every calculated field, so this is an in-memory walk."
+        )
 
-    if state.closure is None or st.button("Recompute closure", key="resolve_recompute"):
+    # A package-loaded run has state.closure set at load time; Recompute is
+    # hidden because there is nothing to recompute against.
+    if state.package is None and (
+        state.closure is None
+        or st.button("Recompute closure", key="resolve_recompute")
+    ):
         _compute(state)
 
     if state.closure_error:

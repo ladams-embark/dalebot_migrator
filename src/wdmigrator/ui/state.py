@@ -28,6 +28,7 @@ from wdmigrator.api import (
     ConnectionStatus,
     Index,
     MigrationPlan,
+    Package,
     TenantTarget,
     WriteGuard,
 )
@@ -81,6 +82,17 @@ class WizardState:
 
     source: ConnectionState = field(default_factory=ConnectionState)
     dest: ConnectionState = field(default_factory=ConnectionState)
+
+    #: A stored package loaded in place of a live source tenant. Populated by
+    #: the "Load stored package" affordance on the Connect step. When set:
+    #:   * the source connection is not required (the package IS the source);
+    #:   * Select renders a read-only summary of the loaded closure;
+    #:   * Resolve is a no-op — ``state.closure`` is set straight from the
+    #:     package on load, so nothing here calls ``resolve_closure`` again;
+    #:   * Conflicts / Confirm / Execute / Results run unchanged.
+    #: Cleared by ``reset_downstream("select")`` or when the user clicks the
+    #: "Clear loaded package" button on Connect.
+    package: Optional[Package] = None
 
     # SOURCE indexes. Everything Select needs to browse pickers and to resolve
     # dependencies. Dashboards, prompt sets, and prompt fields require an
@@ -184,12 +196,27 @@ class WizardState:
     #: empty-shell dashboards). Populated by :mod:`~wdmigrator.validation`.
     verify_job: Optional[JobState] = None
     verify_records: list = field(default_factory=list)
+    #: Post-run restoration pass — the user optionally re-populates
+    #: Instance_References that Preflight blanked, and the writer UPDATE-writes
+    #: only the objects that named any of those. Kept separate from the initial
+    #: run's records so both stay visible in Results.
+    restore_reprobe_job: Optional[JobState] = None
+    restore_execute_job: Optional[JobState] = None
+    restore_records: list = field(default_factory=list)
+    #: Node ids that the restoration pass should UPDATE. Populated when the
+    #: user clicks Restore and cleared after the pass completes. Only these
+    #: nodes flip to UPDATE; everything else stays SKIP for the second pass.
+    restore_update_node_ids: set = field(default_factory=set)
     # source WID -> {"reference", "node_id", "node_name", "sites"} for every
     # reference the destination could not resolve. Accumulates across attempts:
     # Workday reports one failure at a time, so the complete picture only
     # emerges over several, and losing the earlier ones would make the table
     # flicker between single rows instead of building up.
     blocking_references: dict = field(default_factory=dict)
+    #: Plan hash the pre-flight scan last ran against. Guards against re-running
+    #: it every rerun, while still forcing a fresh pass whenever the plan
+    #: changes shape (an override, a new decision, an added node).
+    preflight_populated_for_hash: str = ""
     # Re-probe kicked off by submitting the mapping table, so a decision does
     # not cost a trip back through Conflicts and Confirm.
     reprobe_job: Optional[JobState] = None
@@ -211,6 +238,12 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
     idx = STEP_ORDER.index(from_step)
 
     if idx <= STEP_ORDER.index("select"):
+        # NOTE: ``state.package`` is deliberately NOT cleared here. A stored
+        # package is *source-side* state, but ``reset_downstream("select")``
+        # fires on any credential change — including the destination's,
+        # where the package is still valid. Callers that need to clear the
+        # package do so explicitly (see the Load/Clear buttons on Connect,
+        # and the source-side branch of :func:`_attempt_connect`).
         state.cf_index = None
         state.report_index = None
         state.dashboard_index = None
@@ -259,9 +292,14 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.execute_job = None
         state.execute_records = []
         state.blocking_references = {}
+        state.preflight_populated_for_hash = ""
         state.reprobe_job = None
         state.verify_job = None
         state.verify_records = []
+        state.restore_reprobe_job = None
+        state.restore_execute_job = None
+        state.restore_records = []
+        state.restore_update_node_ids = set()
 
     # Never leave the user parked past the point their data just got wiped.
     if STEP_ORDER.index(state.step) > idx:
@@ -287,18 +325,45 @@ def owner_reference(state: WizardState):
 def build_guard(state: WizardState, *, dry_run: bool) -> WriteGuard:
     """Derive a `WriteGuard` from current state. Cheap and pure — rebuilt
     fresh wherever it's needed rather than cached, so it's always evaluated
-    against what the state actually says right now, not a stale snapshot."""
+    against what the state actually says right now, not a stale snapshot.
+
+    When a stored package is loaded there is no live source connection: the
+    guard's source identity comes from the package's captured tenant instead,
+    and ``source_verified`` is True because the package IS the source (its
+    fidelity was proved when it was captured, not at run time).
+    """
     plan_hash = state.plan.plan_hash() if state.plan is not None else ""
+    if state.package is not None:
+        # A package's captured tenant is the guard's "source" identity — same
+        # tenant/host it was resolved against. When the package predates the
+        # source_services_host field, fall back to a synthetic host that still
+        # yields a distinct identity() from any real destination.
+        from wdmigrator.api import Environment, TenantTarget
+        source_target = TenantTarget(
+            tenant=state.package.source_tenant,
+            services_host=(state.package.source_services_host
+                           or f"package:{state.package.name}"),
+            ui_host="",
+            environment=Environment.UNKNOWN,
+            services_host_derived=False,
+            raw_input=f"package:{state.package.name}",
+        )
+        source_username = f"package:{state.package.name}"
+        source_verified = True
+    else:
+        source_target = state.source.target
+        source_username = state.source.username
+        source_verified = state.source.verified
     return WriteGuard(
-        source=state.source.target,
+        source=source_target,
         dest=state.dest.target,
         dry_run=dry_run,
         plan_hash=plan_hash,
         confirmed_tenant_name=state.confirmed_tenant_name,
         dry_run_reviewed=bool(state.dry_run_reviewed and state.dry_run_plan_hash == plan_hash),
-        source_verified=state.source.verified,
+        source_verified=source_verified,
         dest_verified=state.dest.verified,
-        source_username=state.source.username,
+        source_username=source_username,
         dest_username=state.dest.username,
         warnings_acknowledged=frozenset(state.warnings_acknowledged),
     )

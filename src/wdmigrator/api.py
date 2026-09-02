@@ -139,12 +139,17 @@ from wdmigrator.migrate import (
     Blocker,
     Closure,
     CycleError,
+    DELIVERED_INSTANCE_REFERENCE_ID_TYPES,
     ExceptionDetail,
     Existence,
     MigrationPlan,
     Node,
     NodeKind,
     PartialIndexError,
+    PREFLIGHT_BLANK_SAFE_ELEMENTS,
+    PREFLIGHT_REPLACE_REQUIRED_ELEMENTS,
+    PREFLIGHT_TENANT_DATA_ELEMENTS,
+    PreflightReference,
     ProbeProgress,
     BlockingReference,
     ReferenceAction,
@@ -169,6 +174,8 @@ from wdmigrator.migrate import (
     build_time_calculation_tag_payload,
     default_action,
     extract_exceptions,
+    find_nodes_using_reference_values,
+    find_preflight_reference_candidates,
     find_reference_sites,
     parse_blocking_reference,
     extract_dashboard_refs,
@@ -225,6 +232,18 @@ from wdmigrator.safety import (
 
 # ── Secrets: keeping credentials out of logs, envelopes, and errors ─────────
 from wdmigrator.secrets import Secret, install_redacting_log_filter, redact, redact_envelope
+
+# ── Packages: stored source closures the destination can pull from ──────────
+from wdmigrator.packages import (
+    Package,
+    PackageError,
+    PackageMetadata,
+    default_packages_dir,
+    list_packages,
+    load_package,
+    package_from_closure,
+    save_package,
+)
 
 __all__ = [
     # targeting
@@ -322,12 +341,17 @@ __all__ = [
     "Blocker",
     "Closure",
     "CycleError",
+    "DELIVERED_INSTANCE_REFERENCE_ID_TYPES",
     "ExceptionDetail",
     "Existence",
     "MigrationPlan",
     "Node",
     "NodeKind",
     "PartialIndexError",
+    "PREFLIGHT_BLANK_SAFE_ELEMENTS",
+    "PREFLIGHT_REPLACE_REQUIRED_ELEMENTS",
+    "PREFLIGHT_TENANT_DATA_ELEMENTS",
+    "PreflightReference",
     "ProbeProgress",
     "BlockingReference",
     "ReferenceAction",
@@ -352,6 +376,8 @@ __all__ = [
     "build_time_calculation_tag_payload",
     "default_action",
     "extract_exceptions",
+    "find_nodes_using_reference_values",
+    "find_preflight_reference_candidates",
     "find_reference_sites",
     "parse_blocking_reference",
     "extract_dashboard_refs",
@@ -404,6 +430,15 @@ __all__ = [
     "iter_verify",
     "summarise_verify",
     "verify_record",
+    # packages
+    "Package",
+    "PackageError",
+    "PackageMetadata",
+    "default_packages_dir",
+    "list_packages",
+    "load_package",
+    "package_from_closure",
+    "save_package",
 ]
 
 
