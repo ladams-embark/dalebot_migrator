@@ -135,7 +135,7 @@ def _render_destination_indexes(state: WizardState) -> bool:
     return running
 
 
-def _pump_probe(state: WizardState) -> None:
+def _pump_probe(state: WizardState, *, auto_refresh: bool) -> None:
     job = state.existence_job
     pump(job, time_budget=READ_TIME_BUDGET)
     last = job.last_event
@@ -151,7 +151,7 @@ def _pump_probe(state: WizardState) -> None:
                                 reference_decisions=state.reference_decisions)
         state.existence_job = None
         st.rerun()
-    else:
+    elif auto_refresh:
         st.rerun()
 
 
@@ -251,7 +251,21 @@ def render(state: WizardState, *, heading: bool = True) -> None:
         return
 
     if state.existence_job is not None:
-        _pump_probe(state)
+        auto_refresh = st.toggle(
+            "Auto-refresh probe progress",
+            value=True,
+            key="conflicts_probe_autorefresh",
+            help="Turn this off if the page keeps jumping while you scroll.",
+        )
+        if not auto_refresh:
+            st.caption(
+                "Auto-refresh is paused so you can scroll this step. "
+                "Click Refresh progress to continue the probe."
+            )
+            if st.button("Refresh progress", key="conflicts_probe_refresh"):
+                _pump_probe(state, auto_refresh=False)
+            return
+        _pump_probe(state, auto_refresh=True)
         return
 
     counts = state.plan.counts()
