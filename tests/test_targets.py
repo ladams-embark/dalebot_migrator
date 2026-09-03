@@ -47,6 +47,34 @@ class TestParseTenantURL:
         # Given directly, so no confirmation prompt is needed.
         assert target.services_host_derived is False
 
+    def test_production_bare_services1_host_is_not_rewritten(self):
+        """aesseal's REST API Endpoint is ``services1.wd108.myworkday.com``.
+
+        The hyphenated ``{prefix}-servicesN`` detector does not match a bare
+        ``services1`` label, so older code rewrote this to
+        ``services1-services1.wd108.myworkday.com`` and Connect failed.
+        """
+        target = parse_tenant_url(
+            "https://services1.wd108.myworkday.com/ccx/service/aesseal/"
+            "Core_Implementation_Service/v46.0"
+        )
+        assert target.tenant == "aesseal"
+        assert target.services_host == "services1.wd108.myworkday.com"
+        assert target.services_host_derived is False
+        assert target.environment is Environment.PRODUCTION
+        assert target.ui_host == "wd108.myworkday.com"
+
+    def test_production_hyphenated_services_host_is_kept(self):
+        """avalonbay's REST API Endpoint is ``wd5-services1.myworkday.com``."""
+        target = parse_tenant_url(
+            "https://wd5-services1.myworkday.com/ccx/service/avalonbay/"
+            "Core_Implementation_Service/v46.0"
+        )
+        assert target.tenant == "avalonbay"
+        assert target.services_host == "wd5-services1.myworkday.com"
+        assert target.services_host_derived is False
+        assert target.environment is Environment.PRODUCTION
+
     def test_endpoint_puts_version_in_the_path(self):
         """A version only in the SOAP envelope 404s on this tenant."""
         target = parse_tenant_url(LOGIN_URL)
@@ -107,6 +135,8 @@ class TestEnvironmentClassification:
             ("sbx.wd5.myworkday.com", Environment.SANDBOX),
             ("wd12.myworkday.com", Environment.PRODUCTION),
             ("www.wd12.myworkday.com", Environment.PRODUCTION),
+            ("services1.wd108.myworkday.com", Environment.PRODUCTION),
+            ("wd5-services1.myworkday.com", Environment.PRODUCTION),
             ("something-unexpected.example.com", Environment.UNKNOWN),
         ],
     )
@@ -172,6 +202,10 @@ class TestDeriveServicesHost:
     def test_does_not_flag_a_host_that_was_already_correct(self):
         host, derived = derive_services_host("impl-services1.wd12.myworkday.com")
         assert (host, derived) == ("impl-services1.wd12.myworkday.com", False)
+
+    def test_does_not_rewrite_a_production_bare_services_host(self):
+        host, derived = derive_services_host("services1.wd108.myworkday.com")
+        assert (host, derived) == ("services1.wd108.myworkday.com", False)
 
     def test_rejects_empty_host(self):
         with pytest.raises(TenantURLError):
