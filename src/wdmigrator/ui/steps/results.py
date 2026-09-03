@@ -114,7 +114,7 @@ def render(state: WizardState) -> None:
     records = state.execute_records or state.dry_run_records
     if not records:
         theme.banner("neutral", "Nothing has been run yet",
-                     "Results appear here after a dry run or a live execution.")
+                     "A dry run or live execution shows up here.")
         return
 
     _write_run_log(state, records)
@@ -513,11 +513,7 @@ def _render_verify(state: WizardState) -> None:
     """
     theme.section(
         "Verification",
-        "Read every written object back from the destination and compare "
-        "structural signals to the source (tab count, worklet count, member "
-        "count, columns). The writer's own success bit has reported clean "
-        "runs where dashboards came back as empty shells — this is the "
-        "check that catches that.",
+        "Reads written objects back and compares structure to the source.",
         eyebrow="Post-run read-back",
     )
 

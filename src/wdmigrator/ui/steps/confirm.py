@@ -197,7 +197,7 @@ def _render_dry_run_results(state: WizardState) -> None:
     theme.banner(
         "info",
         f"{len(state.dry_run_records)} object(s) serialized",
-        "No calls were made to the destination tenant.",
+        "No destination writes.",
     )
     rows = [
         {
@@ -237,13 +237,8 @@ def render_plan_review(state: WizardState) -> None:
     if state.plan is None:
         return
 
-    counts = state.plan.counts()
-    theme.figures(
-        [("Writes planned", state.plan.writes_planned)]
-        + [(k.capitalize(), v) for k, v in counts.items()],
-        tones={"Writes planned": "write"},
-    )
-    st.caption(f"Destination: `{state.dest.target.tenant}`")
+    dest = state.dest.target.tenant if state.dest.target else "?"
+    st.caption(f"{state.plan.writes_planned} write(s) planned to `{dest}`")
     st.download_button(
         "Download plan (JSON)",
         data=_plan_export_bytes(state),
@@ -259,10 +254,8 @@ def render_plan_review(state: WizardState) -> None:
     st.divider()
     theme.section(
         "Dry run",
-        "Required before a live run, and pinned to this exact plan. Runs "
-        "automatically — and re-runs itself if the plan changes. It never "
-        "contacts the destination tenant.",
-        eyebrow="Automatic",
+        "Read the table, then tick the box. Required before Run. Never writes.",
+        eyebrow="Required",
     )
 
     plan_hash = state.plan.plan_hash()
@@ -287,11 +280,9 @@ def render_live_gate(state: WizardState) -> None:
         return
 
     theme.section(
-        "Live execution gate",
-        "Everything below has to pass before the destination tenant is touched. "
-        "This service has no delete operation — nothing written here can be undone by "
-        "this tool, only by hand in the Workday UI, object by object.",
-        eyebrow="Required before Start",
+        "Before Start",
+        "This service cannot delete what it writes. Confirm the destination, then Start.",
+        eyebrow="Writes to the destination",
     )
     state.confirmed_tenant_name = st.text_input(
         f"Type the destination tenant name to confirm (`{state.dest.target.tenant}`)",

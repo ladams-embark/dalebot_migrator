@@ -19,10 +19,6 @@ STEP_ID = "plan"
 
 def render(state: WizardState) -> None:
     st.header("Plan")
-    st.caption(
-        "Expands the selection, probes the destination, and serializes the "
-        "write payloads. None of that contacts the destination as a write."
-    )
     resolve.render(state, heading=False)
     if state.closure is None or state.closure_error:
         return

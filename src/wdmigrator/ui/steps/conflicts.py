@@ -84,12 +84,7 @@ def _render_destination_indexes(state: WizardState) -> None:
     """
     theme.section(
         "Destination matching",
-        "Business IDs are not identities across independently-built tenants, so "
-        "matching an object by ID alone reports fields the destination already "
-        "has as missing. These two sweeps let the probe recognise them by name, "
-        "class and business object instead, and reuse them rather than creating "
-        "duplicates that cannot be deleted. Normally already built from Select — "
-        "this is just confirmation, with a Rebuild option if either has gone stale.",
+        "Needed so shared fields are reused instead of duplicated. Rebuild if the destination was refreshed.",
         eyebrow="Required before probing",
     )
     # A measure's BI_Calculated_Measure_ID is Workday-generated with a
@@ -124,18 +119,11 @@ def _render_destination_indexes(state: WizardState) -> None:
         theme.banner(
             "warning",
             "Destination sweeps not built",
-            "The existence check stays disabled until both are present. Probing "
-            "without them plans a CREATE for every object whose business ID "
-            "happens to differ between the two tenants, and this service has no "
-            "delete operation to undo one.",
-            remedy="Build both indexes above.",
+            "Probing without these indexes can plan CREATE for fields the destination already has.",
+            remedy="Wait for both indexes above.",
         )
     else:
-        st.caption(
-            "Stale is worse than absent here: the destination refreshes without "
-            "warning, and an index swept before a refresh will vouch for objects "
-            "that are no longer there. Rebuild if either is more than a session old."
-        )
+        st.caption("Rebuild if the destination was refreshed this session.")
 
 
 def _pump_probe(state: WizardState) -> None:
@@ -187,11 +175,7 @@ def _render_overrides(state: WizardState) -> None:
             "would otherwise probe as FOUND and skip forever; UPDATE has been "
             "verified live for exactly this case.",
         )
-    st.caption(
-        "Create and skip are the default choices. Update is only set automatically "
-        "for shell dashboards where completing the prior run is safe; whether a "
-        "Put with a reference replaces or merges in the general case is unverified."
-    )
+    st.caption("Change create or skip in the table. Update is only auto-set for empty-shell dashboards.")
     edited = st.data_editor(
         df,
         hide_index=True,
@@ -225,11 +209,11 @@ def _render_overrides(state: WizardState) -> None:
 def render(state: WizardState, *, heading: bool = True) -> None:
     if heading:
         st.header("Conflicts")
-    st.caption(
-        "Probes the destination tenant for every object in the resolved closure to "
-        "decide CREATE vs SKIP. This is real, targeted destination traffic — one Get "
-        "per object, not a bulk pull. Starts itself once destination matching is ready."
-    )
+        st.caption(
+            "Probes the destination tenant for every object in the resolved closure to "
+            "decide CREATE vs SKIP. This is real, targeted destination traffic — one Get "
+            "per object, not a bulk pull. Starts itself once destination matching is ready."
+        )
 
     if state.closure is None:
         theme.banner("danger", "No resolved closure", remedy="Go back to Plan.")

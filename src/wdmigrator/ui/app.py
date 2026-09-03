@@ -38,6 +38,15 @@ _STEPS = {
 #: Plan, and Run stay manual — those are the human decisions.
 _AUTO_ADVANCE_FROM = frozenset({"connect"})
 
+#: One line under the step rail. The step body should not repeat this.
+_STEP_HINT = {
+    "connect": "Enter both tenants, then Test. Continue unlocks when both succeed.",
+    "select": "Highlight a row to add it, or add a report by exact name. Clear drops a pick.",
+    "plan": "Check CREATE vs SKIP, then tick that you read the dry run.",
+    "run": "Type the destination tenant name, tick the box, then Start. Writes cannot be undone.",
+    "results": "Download the log, or start a new migration.",
+}
+
 
 def _unlocked_through(state: WizardState) -> int:
     """Index of the furthest step whose gate is currently satisfied, walking
@@ -58,11 +67,8 @@ def main() -> None:
     )
     theme.inject()
 
-    allow_non_impl = os.environ.get("WDMIGRATOR_ALLOW_NON_IMPL")
-    if allow_non_impl == "1":
+    if os.environ.get("WDMIGRATOR_ALLOW_NON_IMPL") == "1":
         st.caption("ALLOW_NON_IMPL = 1")
-    else:
-        st.caption(f"ALLOW_NON_IMPL = {allow_non_impl!r}")
 
     state = get_state()
 
@@ -84,6 +90,7 @@ def main() -> None:
         dest_env=state.dest.target.environment if state.dest.target else None,
     )
     theme.stepper(state.step, STEP_ORDER, STEP_TITLES, _unlocked_through(state))
+    st.caption(_STEP_HINT[state.step])
     st.divider()
 
     module = _STEPS[state.step]
@@ -131,5 +138,8 @@ def main() -> None:
                 st.rerun()
 
     if blockers and current_index < len(STEP_ORDER) - 1:
-        with st.expander(f"{len(blockers)} thing(s) to resolve before continuing", expanded=False):
-            components.render_blockers(blockers)
+        first, *rest = blockers
+        theme.banner("warning", first.title, first.detail, remedy=first.remedy or None)
+        if rest:
+            with st.expander(f"{len(rest)} more before continuing", expanded=False):
+                components.render_blockers(rest)

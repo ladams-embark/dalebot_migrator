@@ -670,14 +670,6 @@ def render(state: WizardState, *, heading: bool = True) -> None:
         theme.figures(
             [("Objects to write", state.plan.writes_planned)], tones={"Objects to write": "write"}
         )
-        theme.banner(
-            "warning",
-            f"This writes to {state.dest.target.tenant}",
-            "Objects are written one at a time, in dependency order, and each one's "
-            "destination WID feeds the next. Pause and cancel take effect between "
-            "objects, never mid-write.",
-            remedy="Nothing written here can be undone by this tool.",
-        )
         if missing_required:
             theme.banner(
                 "danger",
@@ -691,11 +683,7 @@ def render(state: WizardState, *, heading: bool = True) -> None:
             )
         start_blocked = _start_disabled(state)
         if start_blocked and not missing_required:
-            st.caption(
-                "Complete the live execution gate above before starting — "
-                "destination tenant name, warning acknowledgements, and the "
-                "irreversibility checkbox. This never starts itself."
-            )
+            st.caption("Finish the gate above, then Start. This never starts itself.")
         if st.button(
             "Start live execution",
             key="execute_start",

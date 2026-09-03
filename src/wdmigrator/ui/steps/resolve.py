@@ -89,12 +89,8 @@ def render(state: WizardState, *, heading: bool = True) -> None:
     if heading:
         st.header("Resolve")
     if state.package is not None:
-        st.caption(
-            "Nothing to resolve — a stored package was loaded on Connect, so "
-            "the closure it captured is used as-is. The counts and order below "
-            "come straight from the package."
-        )
-    else:
+        st.caption("Using the closure from the loaded package.")
+    elif heading:
         st.caption(
             "Expands your selection into everything that must migrate with it, in "
             "child-most-first order. Makes no tenant calls — the source index already "
@@ -188,7 +184,7 @@ def render(state: WizardState, *, heading: bool = True) -> None:
             hide_index=True,
         )
 
-    st.caption("Changed your selection? Go back to Select — the closure recomputes when you return.")
+    st.caption("Changed the selection? Go back to Select.")
 
 
 def gate(state: WizardState) -> list[Blocker]:

@@ -236,8 +236,7 @@ def _destination_specs(connection) -> list[IndexSpec]:
 def _render_calculated_fields(state: WizardState) -> None:
     theme.section(
         "Calculated fields",
-        "Selecting nothing here is the normal case — resolving dependencies in the next "
-        "step automatically pulls in every calculated field a selected report references.",
+        "Optional — reports pull in the fields they use. Search, then highlight rows to add.",
         eyebrow="Optional",
     )
     if state.cf_index is None:
@@ -245,7 +244,7 @@ def _render_calculated_fields(state: WizardState) -> None:
                      "Build the calculated field index above to search it directly.")
         return
 
-    query = st.text_input("Search by name (substring)", key="cf_search")
+    query = st.text_input("Search fields by name", key="cf_search")
     if query:
         all_matches = [
             (wid, summary)
@@ -291,8 +290,7 @@ def _render_calculated_fields(state: WizardState) -> None:
 def _render_reports(state: WizardState) -> None:
     theme.section(
         "Reports",
-        "Pick from the index table, or add one by its exact name. Report names are not "
-        "guaranteed unique — a duplicated name is refused rather than guessed at.",
+        "Highlight rows in the catalog, or add one by exact name while the catalog loads.",
         eyebrow="Usually where you start",
     )
 
@@ -344,7 +342,7 @@ def _render_reports(state: WizardState) -> None:
             [{"wid": wid, "name": s.name, "owner": s.owner}
              for wid, s in state.report_index.summaries.items()]
         )
-        query = st.text_input("Filter by name (substring, local)", key="report_filter")
+        query = st.text_input("Filter catalog by name", key="report_filter")
         if query:
             df = df[df["name"].fillna("").str.contains(query, case=False)]
         matched = len(df)
@@ -405,10 +403,8 @@ def _render_reports(state: WizardState) -> None:
 def _render_dashboards(state: WizardState) -> None:
     theme.section(
         "Custom dashboards",
-        "A dashboard sits at the end of the chain: picking one pulls in the reports it "
-        "shows as worklets, the prompt sets those use, and every calculated field "
-        "underneath. Reading them requires an implementer account.",
-        eyebrow="Requires an implementer account",
+        "Picking one pulls in its worklet reports and prompt sets. Needs an implementer account.",
+        eyebrow="Implementer account",
     )
 
     # Set before the early returns below so every path agrees on what is
@@ -445,7 +441,7 @@ def _render_dashboards(state: WizardState) -> None:
             for wid, s in state.dashboard_index.summaries.items()
         ]
     )
-    query = st.text_input("Filter by name (substring, local)", key="dashboard_filter")
+    query = st.text_input("Filter dashboards by name", key="dashboard_filter")
     if query and not df.empty:
         df = df[df["name"].fillna("").str.contains(query, case=False)]
 
@@ -483,10 +479,8 @@ def _render_dashboards(state: WizardState) -> None:
 def _render_time_calculations(state: WizardState) -> None:
     theme.section(
         "Time calculations",
-        "Pick the Time Calculations you want to migrate. Every tag they read or "
-        "write, and every group they belong to, will be pulled in automatically "
-        "in the next step — you do not need to select those separately.",
-        eyebrow="Time Tracking Implementation Service",
+        "Pick the calculations. Tags and groups they use are pulled in on Plan.",
+        eyebrow="Time Tracking",
     )
     if state.time_calculation_index is None:
         theme.banner(
@@ -598,19 +592,14 @@ def render(state: WizardState) -> None:
         theme.banner("danger", "Source is not connected", remedy="Go back to Connect.")
         return
 
-    theme.section(
-        "What are you migrating?",
-        "Pick the object kinds you want to work with. Each one you enable needs its "
-        "source index built first — dependencies are resolved from those indexes, "
-        "not by querying the tenant object by object.",
-        eyebrow="Start here",
-    )
+    theme.section("Object kinds", eyebrow="Start here")
     chosen = st.multiselect(
         "Object kinds",
         options=list(_OBJECT_KINDS),
         default=["reports"],
         format_func=lambda key: _OBJECT_KINDS[key],
         key="object_kinds",
+        label_visibility="collapsed",
     )
 
     specs = _source_specs(chosen, connection)
@@ -620,13 +609,6 @@ def render(state: WizardState) -> None:
         if state.dest.connection is not None
         else []
     )
-    if dest_specs:
-        st.caption(
-            "Source and destination indexes build at the same time — destination "
-            "matching is what keeps shared calculated fields from being duplicated. "
-            "The report catalog is a separate sweep so you can add a report by "
-            "exact name without waiting on it."
-        )
     running = False
     theme.section("Source indexes", eyebrow="Starts automatically")
     running = bulk_build_indexes(
