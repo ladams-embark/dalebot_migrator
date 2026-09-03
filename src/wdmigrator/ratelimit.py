@@ -46,31 +46,3 @@ class RateLimiter:
 
         self._last_call = time.monotonic()
         return slept
-
-
-def call_with_retry(fn, *args, max_retries: int = 5, limiter: RateLimiter | None = None, **kwargs):
-    """Call ``fn`` with rate limiting and exponential backoff on throttling.
-
-    Only retries on signals that look like throttling. Everything else —
-    including a SOAP fault — is raised immediately: a validation or permission
-    fault will fail identically on every attempt, and retrying a *write* that
-    may have partially applied is worse than failing.
-    """
-    last_error: Exception | None = None
-
-    for attempt in range(max_retries):
-        if limiter is not None:
-            limiter.wait()
-        try:
-            return fn(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - re-raised below unless throttled
-            message = str(exc)
-            throttled = "429" in message or "Too Many Requests" in message
-            if not throttled:
-                raise
-            last_error = exc
-            time.sleep(2**attempt)
-
-    raise RuntimeError(
-        f"Rate limited after {max_retries} attempts; last error: {last_error}"
-    )

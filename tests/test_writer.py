@@ -92,8 +92,8 @@ def cf_payload(wid, ref_id, name="Field", refs=()):
 
 
 def report_payload_with_filter_instance(wid, name="Report", instance_wid="SRC_INSTANCE"):
-    """Shape matches what a live tenant actually returns — confirmed via
-    scripts/find_wid_in_report.py: Filter_Instances_Reference is a list."""
+    """Shape matches what a live tenant actually returns:
+    Filter_Instances_Reference is a list."""
     return {
         "Tenanted_Report_Definition_Reference": {
             "ID": [

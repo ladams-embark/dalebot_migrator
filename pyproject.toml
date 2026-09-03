@@ -21,7 +21,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2.2",
-    "pytest-dotenv>=0.5.2",
 ]
 ui = [
     "streamlit>=1.40",

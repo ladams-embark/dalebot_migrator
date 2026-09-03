@@ -3,8 +3,8 @@ diagnose_closure.py
 -------------------
 Walk the full dependency closure for a report (or a calculated field) and show
 *why* each reference resolved the way it did — specifically for nested,
-multi-level calculated fields, which `classify_report_columns.py` cannot see
-because it only inspects a report's own columns one level deep.
+multi-level calculated fields that inspecting a report's columns one level
+deep cannot explain.
 
 For every WID the closure walker treated as a pass-through (i.e. "not a
 calculated field, nothing to migrate"), this re-checks it with a targeted
