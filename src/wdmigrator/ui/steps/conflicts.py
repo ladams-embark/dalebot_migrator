@@ -103,7 +103,7 @@ def _render_destination_indexes(state: WizardState) -> bool:
         destination_index_specs(state.dest.connection),
         job_attr="dest_index_job",
         button_label="Build destination indexes",
-        auto_start=True,
+        auto_start=False,
     )
     if not destination_matching_ready(state):
         theme.banner(
@@ -203,7 +203,7 @@ def render(state: WizardState, *, heading: bool = True) -> None:
         st.caption(
             "Probes the destination tenant for every object in the resolved closure to "
             "decide CREATE vs SKIP. This is real, targeted destination traffic — one Get "
-            "per object, not a bulk pull. Starts itself once destination matching is ready."
+            "per object, not a bulk pull. It starts once destination matching is built."
         )
 
     if state.closure is None:
@@ -315,7 +315,7 @@ def gate(state: WizardState) -> list[Blocker]:
                 node_id=None,
                 title="Destination not yet checked",
                 detail="Run the existence check against the destination before continuing.",
-                remedy="The existence check starts automatically once destination matching is ready.",
+                remedy="Build destination indexes, then run Check existence.",
             )
         ]
     return validate_plan(state.plan)
