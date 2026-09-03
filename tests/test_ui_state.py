@@ -19,7 +19,7 @@ pytest.importorskip("streamlit")
 from wdmigrator import api
 from wdmigrator.ui import indexes, state as ui_state
 from wdmigrator.ui.runner import JobState
-from wdmigrator.ui.steps import confirm, conflicts, connect, execute, resolve, select
+from wdmigrator.ui.steps import confirm, conflicts, connect, execute, plan, resolve, results, run, select
 
 SOURCE = api.target_from_parts("impl-services1.wd12.myworkday.com", "source_tenant")
 DEST = api.target_from_parts("impl-services1.wd12.myworkday.com", "dest_tenant")
@@ -142,6 +142,55 @@ class TestSelectStepGate:
         state.cf_index = _index("calculated_field")
         state.selected_field_wids = {"W1"}
         assert select.gate(state) == []
+
+
+class TestWizardStepOrder:
+    def test_the_visible_wizard_is_five_steps(self):
+        assert ui_state.STEP_ORDER == ["connect", "select", "plan", "run", "results"]
+        for step_id in ui_state.STEP_ORDER:
+            assert step_id in ui_state.STEP_TITLES
+
+
+class TestPlanStepGate:
+    def test_blocks_until_the_closure_exists(self):
+        assert plan.gate(ui_state.WizardState())
+
+    def test_blocks_until_the_destination_has_been_checked(self):
+        state = _matching_ready(ui_state.WizardState())
+        state.closure = api.Closure()
+        blockers = plan.gate(state)
+        assert any("not yet checked" in b.title.lower() or "not swept" in b.title.lower()
+                   for b in blockers)
+
+
+class TestRunStepGate:
+    def test_blocks_before_any_execution(self):
+        assert run.gate(ui_state.WizardState())
+
+    def test_clears_once_records_exist(self):
+        state = ui_state.WizardState()
+        state.execute_records = [object()]
+        assert run.gate(state) == []
+
+
+class TestExecuteStartRequiresLiveGate:
+    def test_start_stays_disabled_until_the_tenant_name_and_ack_are_set(self):
+        state = ui_state.WizardState()
+        state.source = _verified_side(SOURCE)
+        state.dest = _verified_side(DEST)
+        state.plan = api.MigrationPlan()
+        state.dry_run_records = [object()]
+        state.dry_run_reviewed = True
+        state.dry_run_plan_hash = state.plan.plan_hash()
+        assert execute._start_disabled(state)
+        state.confirmed_tenant_name = DEST.tenant
+        assert execute._start_disabled(state)
+        state.irreversible_ack = True
+        # Remaining engine BLOCKs (nothing to write on an empty plan, etc.)
+        # may still disable Start — the live gate itself is no longer why.
+        live = confirm.gate_live(state)
+        if not live:
+            assert not execute._start_disabled(state)
 
 
 class TestResolveStepGate:
@@ -414,17 +463,17 @@ class TestResetDownstream:
         assert state.dest_cf_index is None
         assert state.dest_measure_index is None
 
-    def test_resolve_scoped_reset_keeps_the_destination_sweeps(self):
+    def test_plan_scoped_reset_keeps_the_destination_sweeps(self):
         """They are scoped to the connection, not the plan — re-resolving after
         an override should not cost a second 25-second destination sweep."""
         state = _matching_ready(ui_state.WizardState())
 
-        ui_state.reset_downstream(state, from_step="resolve")
+        ui_state.reset_downstream(state, from_step="plan")
 
         assert state.dest_cf_index is not None
         assert state.dest_measure_index is not None
 
-    def test_resolve_scoped_reset_keeps_selections_and_indexes(self):
+    def test_plan_scoped_reset_keeps_selections_and_indexes(self):
         """Re-resolving after an override shouldn't force rebuilding a
         158-second report index."""
         state = ui_state.WizardState()
@@ -432,7 +481,7 @@ class TestResetDownstream:
         state.selected_field_wids = {"W1"}
         state.plan = api.MigrationPlan()
 
-        ui_state.reset_downstream(state, from_step="resolve")
+        ui_state.reset_downstream(state, from_step="plan")
 
         assert state.cf_index is not None
         assert state.selected_field_wids == {"W1"}
@@ -441,8 +490,18 @@ class TestResetDownstream:
     def test_never_leaves_the_current_step_past_the_wiped_point(self):
         state = ui_state.WizardState()
         state.step = "results"
-        ui_state.reset_downstream(state, from_step="conflicts")
-        assert state.step == "conflicts"
+        ui_state.reset_downstream(state, from_step="plan")
+        assert state.step == "plan"
+
+    def test_run_scoped_reset_keeps_the_plan(self):
+        state = ui_state.WizardState()
+        state.plan = api.MigrationPlan()
+        state.dry_run_reviewed = True
+        state.execute_records = [object()]
+        ui_state.reset_downstream(state, from_step="run")
+        assert state.plan is not None
+        assert state.dry_run_reviewed is True
+        assert state.execute_records == []
 
 
 class TestBuildGuard:
@@ -482,3 +541,44 @@ class TestOwnerReference:
         assert ref["ID"][0]["type"] == "WorkdayUserName"
         assert ref["ID"][0]["_value_1"] == ui_state.DEFAULT_REPORT_OWNER_USERNAME
         assert ui_state.DEFAULT_REPORT_OWNER_USERNAME == "wd-support"
+
+
+class TestDrain:
+    def test_drain_runs_a_local_generator_to_completion(self):
+        from wdmigrator.ui.runner import drain, start_job
+
+        def gen():
+            yield 1
+            yield 2
+            return "done"
+
+        job = start_job(gen())
+        drain(job)
+        assert job.done
+        assert job.events == [1, 2]
+        assert job.result == "done"
+        assert job.error is None
+
+
+class TestRunLog:
+    def test_writes_once_under_out(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        state = ui_state.WizardState()
+        record = api.WriteRecord(
+            node_id="n1",
+            kind="report",
+            name="R",
+            reference_id="R1",
+            action=api.Action.CREATE,
+            status=api.WriteStatus.SUCCESS,
+            dry_run=True,
+        )
+        results._write_run_log(state, [record])
+        assert state.run_log_path
+        path = __import__("pathlib").Path(state.run_log_path)
+        assert path.exists()
+        assert "migration-" in path.name
+        first = path.read_text()
+        results._write_run_log(state, [record])
+        assert list((__import__("pathlib").Path("out")).glob("migration-*.json")) == [path]
+        assert path.read_text() == first

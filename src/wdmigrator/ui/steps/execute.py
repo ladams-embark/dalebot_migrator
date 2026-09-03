@@ -1,11 +1,12 @@
-"""Step 6: Execute — the only step that can write to a tenant.
+"""Live execution — the only step that can write to a tenant.
 
-``batch_size=1``: at most one object is pulled from the generator per
-Streamlit rerun, regardless of how much of the pump time budget is left.
-Pause and Cancel are serviced between :func:`pump` calls, i.e. always
-between objects — a browser refresh or a click mid-run can never leave an
-object half-written. The engine re-checks ``assert_write_allowed`` inside
-``write_node`` before every single write, not just once here.
+Composed into the Run step. ``batch_size=1``: at most one object is pulled
+from the generator per Streamlit rerun, regardless of how much of the pump
+time budget is left. Pause and Cancel are serviced between :func:`pump`
+calls, i.e. always between objects — a browser refresh or a click mid-run
+can never leave an object half-written. The engine re-checks
+``assert_write_allowed`` inside ``write_node`` before every single write,
+not just once here.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from wdmigrator.api import (
     GuardViolation,
     ReferenceAction,
     ReferenceDecision,
+    WriteStatus,
     build_plan,
     find_preflight_reference_candidates,
     find_reference_sites,
@@ -30,9 +32,10 @@ from wdmigrator.api import (
 )
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
-from wdmigrator.ui.indexes import destination_match_indexes
-from wdmigrator.ui.runner import pump, start_job
+from wdmigrator.ui.indexes import _format_duration, destination_match_indexes
+from wdmigrator.ui.runner import READ_TIME_BUDGET, WRITE_TIME_BUDGET, pump, start_job
 from wdmigrator.ui.state import WizardState, build_guard, owner_reference
+from wdmigrator.ui.steps import confirm
 
 STEP_ID = "execute"
 
@@ -341,7 +344,7 @@ def _pump_reprobe(state: WizardState) -> None:
     is the only change — the safety property is identical.
     """
     job = state.reprobe_job
-    pump(job, time_budget=0.8)
+    pump(job, time_budget=READ_TIME_BUDGET)
     last = job.last_event
     render_job_progress(
         job,
@@ -571,7 +574,46 @@ def _render_reference_resolution(state: WizardState) -> None:
     st.caption(apply_caption)
 
 
+def _unfinished_records(state: WizardState) -> list:
+    """Writes that did not land cleanly — FAILED or INDETERMINATE.
+
+    SUCCESS and SKIPPED are done; NOT_ATTEMPTED never made it onto the wire.
+    INDETERMINATE is the dangerous one: the PUT may have committed, so a
+    retry without re-probing can duplicate an object this service cannot
+    delete.
+    """
+    return [
+        r
+        for r in state.execute_records
+        if r.status in (WriteStatus.FAILED, WriteStatus.INDETERMINATE)
+    ]
+
+
+def _eta_caption(job) -> str | None:
+    """Remaining-time caption from objects already written this run."""
+    last = job.last_event
+    if last is None or not last.total or last.position >= last.total:
+        return None
+    durations = [
+        p.record.duration_ms for p in job.events if p.record.duration_ms > 0
+    ]
+    avg_s = (sum(durations) / len(durations) / 1000.0) if durations else 0.15
+    remaining = last.total - last.position
+    return (
+        f"{_format_duration(remaining * max(0.15, avg_s))} remaining "
+        f"({remaining} object(s) left)"
+    )
+
+
+def _start_disabled(state: WizardState) -> bool:
+    """Start is a live write — the Run-step gate and required replacements
+    both have to be clear. Never auto-start."""
+    return bool(_required_replacements_missing(state) or confirm.gate_live(state))
+
+
 def _start(state: WizardState) -> None:
+    if _start_disabled(state):
+        return
     guard = build_guard(state, dry_run=False)
     tt_connection = (
         state.dest.connection.for_service(TIME_TRACKING_SERVICE_NAME)
@@ -593,11 +635,12 @@ def _start(state: WizardState) -> None:
     state.execute_paused = False
 
 
-def render(state: WizardState) -> None:
-    st.header("Execute")
+def render(state: WizardState, *, heading: bool = True) -> None:
+    if heading:
+        st.header("Execute")
 
     if state.plan is None:
-        theme.banner("danger", "No plan", remedy="Go back to Conflicts.")
+        theme.banner("danger", "No plan", remedy="Go back to Plan.")
         return
 
     # A re-probe kicked off from the mapping table owns the page while it runs.
@@ -627,14 +670,6 @@ def render(state: WizardState) -> None:
         theme.figures(
             [("Objects to write", state.plan.writes_planned)], tones={"Objects to write": "write"}
         )
-        theme.banner(
-            "warning",
-            f"This writes to {state.dest.target.tenant}",
-            "Objects are written one at a time, in dependency order, and each one's "
-            "destination WID feeds the next. Pause and cancel take effect between "
-            "objects, never mid-write.",
-            remedy="Nothing written here can be undone by this tool.",
-        )
         if missing_required:
             theme.banner(
                 "danger",
@@ -646,11 +681,14 @@ def render(state: WizardState) -> None:
                 remedy="Fill in the replacement type and value for every "
                        "row flagged as required.",
             )
+        start_blocked = _start_disabled(state)
+        if start_blocked and not missing_required:
+            st.caption("Finish the gate above, then Start. This never starts itself.")
         if st.button(
             "Start live execution",
             key="execute_start",
             type="primary",
-            disabled=bool(missing_required),
+            disabled=start_blocked,
         ):
             _start(state)
             st.rerun()
@@ -674,13 +712,16 @@ def render(state: WizardState) -> None:
                 st.rerun()
 
         if not state.execute_paused and job.running:
-            pump(job, time_budget=0.8, batch_size=1)
+            pump(job, time_budget=WRITE_TIME_BUDGET, batch_size=1)
 
         last = job.last_event
         fraction = last.fraction if last is not None else 0.0
         render_job_progress(job, label="Live execution", fraction=fraction)
         if last is not None:
             st.caption(f"{last.position}/{last.total}: {last.node.name or last.node.node_id} — {last.record.status.value}")
+        eta = _eta_caption(job)
+        if eta:
+            st.caption(eta)
 
         if job.events:
             st.dataframe(
@@ -694,6 +735,7 @@ def render(state: WizardState) -> None:
         if job.error is not None:
             state.execute_records = [p.record for p in job.events]
             state.execute_job = None
+            st.rerun()
         elif job.cancelled:
             state.execute_records = [p.record for p in job.events]
             state.execute_job = None
@@ -709,7 +751,10 @@ def render(state: WizardState) -> None:
             # Stay here if something stopped on an unresolvable reference —
             # that is answerable in place, and bouncing to Results would hide
             # the one question that would let the run finish.
-            if _blocked_record(state) is None:
+            # Stay here on a blocking reference (answerable in place) or on
+            # FAILED / INDETERMINATE (must re-probe before a resume). Only a
+            # clean finish auto-advances — live Start never fires itself.
+            if _blocked_record(state) is None and not _unfinished_records(state):
                 state.step = "results"
             st.rerun()
         elif not state.execute_paused:
@@ -719,6 +764,42 @@ def render(state: WizardState) -> None:
     if state.blocking_references:
         st.divider()
         _render_reference_resolution(state)
+        return
+
+    unfinished = _unfinished_records(state)
+    if unfinished:
+        indeterminate = [r for r in unfinished if r.needs_reprobe]
+        if indeterminate:
+            theme.banner(
+                "danger",
+                f"{len(indeterminate)} object(s) ended INDETERMINATE",
+                "A transport or protocol failure left the destination in an "
+                "unknown state — the PUT may have committed. This is not a "
+                "normal skip or a clean failure. Re-probe before touching "
+                "those objects again; retrying a committed write creates a "
+                "duplicate this tool cannot delete.",
+                remedy="Re-probe below, then Start again. Already-present "
+                       "objects become SKIP.",
+            )
+        else:
+            theme.banner(
+                "danger",
+                f"{len(unfinished)} object(s) failed",
+                "Objects written before the failure are already on the "
+                "destination and cannot be undone by this tool. Re-probe so "
+                "those become SKIP, then start again from what is left.",
+            )
+        if st.button(
+            "Re-probe and resume",
+            key="execute_resume_reprobe",
+            type="primary",
+        ):
+            _start_reprobe(state)
+            st.rerun()
+        st.caption(
+            "Re-probing does not write. Start live execution stays a separate "
+            "click after the probe finishes."
+        )
         return
 
     theme.banner(

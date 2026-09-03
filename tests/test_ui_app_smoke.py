@@ -31,6 +31,27 @@ def test_connect_step_is_the_initial_step():
     assert "Connect" in headers
 
 
+def test_the_step_rail_is_five_visible_steps():
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    at.run(timeout=15)
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    for title in ("Connect", "Select", "Plan", "Run", "Results"):
+        assert title in rendered
+
+
+def test_connect_does_not_prefill_credentials_but_keeps_quick_fill():
+    """Users always type credentials. Quick fill still exists for dpt1."""
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    at.run(timeout=15)
+    assert not at.exception
+    user_fields = [w for w in at.text_input if getattr(w, "key", None) in {"src_user", "dst_user"}]
+    assert user_fields, "username fields are missing"
+    for field in user_fields:
+        assert not field.value
+    quick = [b for b in at.button if b.key in {"src_quick_fill", "dst_quick_fill"}]
+    assert len(quick) == 2
+
+
 class _StubTarget:
     tenant = "stub_tenant"
 
@@ -102,7 +123,7 @@ class TestConflictsRefusesToProbeUnmatched:
         from wdmigrator.ui.state import STATE_KEY, WizardState
 
         at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
-        state = WizardState(step="conflicts")
+        state = WizardState(step="plan")
         state.source.connection = _StubConnection()
         state.dest.connection = _StubConnection()
         state.closure = Closure()
@@ -172,12 +193,12 @@ class TestReportSelectionSurvivesRefiltering:
     search term matches was impossible.
     """
 
-    def test_adding_is_an_explicit_button_not_a_read_of_the_live_table(self):
+    def test_adding_banks_highlighted_rows_without_an_add_button(self):
         at = _select_step_app(report_index=_report_index("Alpha", "Beta"))
         assert not at.exception
-        assert [b for b in at.button if b.key == "report_add"], (
-            "no 'Add selected reports' button — selections would again be derived "
-            "from the table's transient row positions"
+        assert not [b for b in at.button if b.key == "report_add"], (
+            "Add selected reports is gone — highlighting the table should bank "
+            "the row, and Clear is how a pick is dropped"
         )
 
     def test_already_added_reports_survive_a_filter_that_matches_nothing(self):
@@ -251,12 +272,12 @@ class TestDashboardSelectionSurvivesRefiltering:
         kinds[0].set_value(["dashboards"]).run(timeout=20)
         return at
 
-    def test_adding_is_an_explicit_button_not_a_read_of_the_live_table(self):
+    def test_adding_banks_highlighted_rows_without_an_add_button(self):
         at = self._app(dashboard_index=_dashboard_index("Alpha", "Beta"))
         assert not at.exception
-        assert [b for b in at.button if b.key == "dashboard_add"], (
-            "no 'Add selected dashboards' button — selections would again be "
-            "derived from the table's transient row positions"
+        assert not [b for b in at.button if b.key == "dashboard_add"], (
+            "Add selected dashboards is gone — highlighting the table should "
+            "bank the row, and Clear is how a pick is dropped"
         )
 
     def test_dashboards_added_under_different_searches_accumulate(self):
@@ -288,3 +309,56 @@ def test_next_button_is_disabled_with_no_credentials_entered():
     next_buttons = [b for b in at.button if b.key == "nav_next"]
     assert next_buttons
     assert next_buttons[0].disabled
+
+
+def test_plan_step_renders_the_probe_fallback_for_stubs():
+    """AppTest stubs omit ``.service``, so Plan must not start a tenant call.
+    The Check existence button stays as the offline fallback."""
+    import time
+
+    from wdmigrator.api import Closure, Index
+    from wdmigrator.ui.state import STATE_KEY, WizardState
+
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    state = WizardState(step="plan")
+    state.source.connection = _StubConnection()
+    state.dest.connection = _StubConnection()
+    state.closure = Closure()
+    for attr, kind in (
+        ("dest_cf_index", "calculated_field"),
+        ("dest_measure_index", "calculated_measure"),
+    ):
+        setattr(state, attr, Index(kind=kind, tenant="stub_tenant", fetched_at=time.time()))
+    at.session_state[STATE_KEY] = state
+    at.run(timeout=20)
+    assert not at.exception
+    assert "Plan" in [h.value for h in at.header]
+    found = [b for b in at.button if b.key == "conflicts_start"]
+    assert found
+    assert not found[0].disabled
+
+
+def test_run_step_does_not_auto_start_live_execution():
+    from wdmigrator.api import MigrationPlan, target_from_parts
+    from wdmigrator.ui.state import STATE_KEY, WizardState
+
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    state = WizardState(step="run")
+    state.plan = MigrationPlan()
+    state.source.target = target_from_parts(
+        "impl-services1.wd12.myworkday.com", "source_tenant"
+    )
+    state.dest.target = target_from_parts(
+        "impl-services1.wd12.myworkday.com", "dest_tenant"
+    )
+    state.source.connection = _StubConnection()
+    state.dest.connection = _StubConnection()
+    at.session_state[STATE_KEY] = state
+    at.run(timeout=20)
+    assert not at.exception
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    assert "Unexpected error" not in rendered
+    assert "Run" in [h.value for h in at.header]
+    start = [b for b in at.button if b.key == "execute_start"]
+    assert start, "Start live execution is missing"
+    assert start[0].disabled, "live Start must stay a click after the gate"

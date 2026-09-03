@@ -216,7 +216,7 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
         st.rerun()
 
     with st.expander(
-        "Don't know the services host? Find it from just the tenant ID",
+        "Find services host from tenant ID",
         expanded=side.discovery_expanded,
     ):
         side.discovery_tenant_id = st.text_input(
@@ -243,11 +243,7 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
         f"{label} Username",
         key=f"{key}_user",
         value=side.username,
-        help=(
-            "Just the username — the tenant is appended for you. An email "
-            "address works too. If it is already written as `name@tenant`, "
-            "that is accepted as-is rather than suffixed twice."
-        ),
+        help="Username only — the tenant is appended. name@tenant is kept as-is.",
     )
     side.password = secrets_ui.password_input(f"{label} Password", key=f"{key}_pass")
 
@@ -274,11 +270,8 @@ def _render_package_loader(state: WizardState) -> None:
 
     theme.section(
         "Or load a stored package",
-        "A stored package is a pre-resolved bundle of reports from a source "
-        "tenant, saved to disk. Loading one replaces the source-side of this "
-        "wizard: Select and Resolve become read-only, and you only need a "
-        "destination connection below.",
-        eyebrow="Alternative to a live source",
+        "Replaces the source connection. Destination still needs credentials.",
+        eyebrow="No live source",
     )
 
     if state.package is not None:
@@ -333,15 +326,6 @@ def _render_package_loader(state: WizardState) -> None:
 
 def render(state: WizardState) -> None:
     st.header("Connect")
-    theme.checklist(
-        [
-            "Both sides need a verified connection before you can pick anything to migrate.",
-            "Both ISUs need Get and Put on the Configuration Set: Custom Reports and Fields "
-            "domain. Special OX Web Services access is not required.",
-            "After any permission change in Workday, run Activate Pending Security Policy "
-            "Changes — until you do, the ISU returns empty data rather than an error.",
-        ]
-    )
     col1, col2 = st.columns(2)
     with col1:
         _render_side(state, state.source, Role.SOURCE, "Source", "src")

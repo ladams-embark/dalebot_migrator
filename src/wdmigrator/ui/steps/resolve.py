@@ -25,7 +25,7 @@ from wdmigrator.api import (
     topological_sort,
 )
 from wdmigrator.ui import theme
-from wdmigrator.ui.state import WizardState, reset_downstream
+from wdmigrator.ui.state import WizardState, clear_downstream_of_closure
 
 STEP_ID = "resolve"
 
@@ -82,18 +82,15 @@ def _compute(state: WizardState) -> None:
 
     state.closure = closure
     state.closure_error = None
-    reset_downstream(state, from_step="conflicts")
+    clear_downstream_of_closure(state)
 
 
-def render(state: WizardState) -> None:
-    st.header("Resolve")
+def render(state: WizardState, *, heading: bool = True) -> None:
+    if heading:
+        st.header("Resolve")
     if state.package is not None:
-        st.caption(
-            "Nothing to resolve — a stored package was loaded on Connect, so "
-            "the closure it captured is used as-is. The counts and order below "
-            "come straight from the package."
-        )
-    else:
+        st.caption("Using the closure from the loaded package.")
+    elif heading:
         st.caption(
             "Expands your selection into everything that must migrate with it, in "
             "child-most-first order. Makes no tenant calls — the source index already "
@@ -161,17 +158,33 @@ def render(state: WizardState) -> None:
         )
 
     ordered = topological_sort(state.closure.nodes)
+    by_id = {n.node_id: n for n in ordered}
     with st.expander(f"Migration order (child-most first) — {len(ordered)} objects"):
         st.dataframe(
             [
-                {"order": i + 1, "kind": n.kind.value, "name": n.name, "wid": n.source_wid}
+                {
+                    "order": i + 1,
+                    "kind": n.kind.value,
+                    "name": n.name,
+                    "why": (
+                        "selected"
+                        if n.selected
+                        else ", ".join(
+                            (by_id[rid].name or rid)
+                            for rid in sorted(n.required_by)
+                            if rid in by_id
+                        )
+                        or "pulled in"
+                    ),
+                    "wid": n.source_wid,
+                }
                 for i, n in enumerate(ordered)
             ],
             use_container_width=True,
             hide_index=True,
         )
 
-    st.caption("Changed your selection? Go back to Select, then come back here and Recompute.")
+    st.caption("Changed the selection? Go back to Select.")
 
 
 def gate(state: WizardState) -> list[Blocker]:
@@ -181,7 +194,7 @@ def gate(state: WizardState) -> list[Blocker]:
             Blocker(
                 node_id=None,
                 title="Dependencies not resolved",
-                detail=state.closure_error or "Click Recompute closure to resolve dependencies.",
+                detail=state.closure_error or "Dependencies have not been resolved yet.",
                 remedy="Resolve dependencies with no errors before continuing.",
             )
         )

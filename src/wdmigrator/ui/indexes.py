@@ -34,7 +34,7 @@ from wdmigrator.api import (
 )
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
-from wdmigrator.ui.runner import pump, start_job
+from wdmigrator.ui.runner import READ_TIME_BUDGET, pump, start_job
 
 #: Measured live against commitconsulting_dpt1 (~9,650 fields / ~5,150 reports
 #: at Count=999). Shown up front so a first-time user knows what they're
@@ -292,22 +292,35 @@ def _progress_detail(event: _StageEvent, specs_for_job: list[IndexSpec] | None) 
     return " · ".join(parts)
 
 
+def _connection_can_sweep(specs: list[IndexSpec]) -> bool:
+    """A live SOAP client has ``.service``. Offline AppTest stubs omit it on
+    purpose so a Select render cannot start a tenant call."""
+    return any(getattr(spec.connection, "service", None) is not None for spec in specs)
+
+
 def bulk_build_indexes(
     state,
     specs: list[IndexSpec],
     *,
     job_attr: str,
     button_label: str,
-) -> None:
-    """Render one status list + one Build button + one progress bar.
+    auto_start: bool = False,
+) -> bool:
+    """Render one status list + progress (and a Rebuild button).
+
+    Returns True if a job is in progress so the caller can ``st.rerun()``
+    after pumping every index job on the page — source, destination, and
+    the deferred report sweep run in parallel and must share one rerun.
 
     Any spec whose cache is on disk is filled in silently — no click needed.
-    The Build button only surfaces the sweeps left; a Rebuild button under it
-    handles the "destination refreshed, this cache is stale" case (confirmed
-    live — see CLAUDE.md). ``job_attr`` is a plain attribute name on ``state``
-    so Select and Conflicts can share this function while keeping independent
-    jobs.
+    When ``auto_start`` is True and a live connection is present, missing
+    sweeps start themselves. The Build button remains as a fallback for
+    stubs and cancelled runs. Rebuild handles the "destination refreshed,
+    this cache is stale" case (confirmed live — see CLAUDE.md).
     """
+    if not specs:
+        return False
+
     _load_cached(state, specs)
     _summarise(state, specs)
 
@@ -330,14 +343,14 @@ def bulk_build_indexes(
         with col2:
             if st.button("Cancel", key=f"{job_attr}_cancel", use_container_width=True):
                 job.cancel()
-                st.rerun()
+                return True
 
-        pump(job, time_budget=0.8)
+        pump(job, time_budget=READ_TIME_BUDGET)
         if job.error is not None:
             setattr(state, job_attr, None)
             setattr(state, specs_attr, None)
-            st.rerun()
-        elif job.cancelled:
+            return True
+        if job.cancelled:
             setattr(state, job_attr, None)
             setattr(state, specs_attr, None)
             theme.banner(
@@ -347,14 +360,12 @@ def bulk_build_indexes(
                 "when you cancelled was discarded, since a half-built index would "
                 "make dependency resolution look complete when it isn't.",
             )
-            st.rerun()
-        elif job.done:
+            return False
+        if job.done:
             setattr(state, job_attr, None)
             setattr(state, specs_attr, None)
-            st.rerun()
-        else:
-            st.rerun()
-        return
+            return True
+        return True
 
     missing = _missing(state, specs)
     col1, col2 = st.columns([3, 1])
@@ -363,6 +374,11 @@ def bulk_build_indexes(
             estimates = ", ".join(
                 BUILD_ESTIMATE.get(s.kind, _DEFAULT_ESTIMATE) for s in missing
             )
+            can_auto = auto_start and _connection_can_sweep(missing)
+            if can_auto:
+                setattr(state, specs_attr, missing)
+                setattr(state, job_attr, start_job(_chained_build(state, missing)))
+                return True
             if st.button(
                 f"{button_label} ({len(missing)} to build: {estimates})",
                 key=f"{job_attr}_start",
@@ -371,7 +387,7 @@ def bulk_build_indexes(
             ):
                 setattr(state, specs_attr, missing)
                 setattr(state, job_attr, start_job(_chained_build(state, missing)))
-                st.rerun()
+                return True
     with col2:
         built = [s for s in specs if getattr(state, s.index_attr) is not None]
         if built and st.button(
@@ -384,4 +400,5 @@ def bulk_build_indexes(
             state.implementer_required = False
             setattr(state, specs_attr, specs)
             setattr(state, job_attr, start_job(_chained_build(state, specs)))
-            st.rerun()
+            return True
+    return False

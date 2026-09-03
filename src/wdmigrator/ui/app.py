@@ -1,12 +1,12 @@
 """Wizard entry point — gated linear navigation.
 
 Tabs or a sidebar are deliberately not used for navigation: either would let
-a user click straight to Execute without passing through Conflicts and
-Confirm. Instead each step exposes ``gate(state) -> list[Blocker]``, and the
-*only* way to reach step N+1 is this module's own "Next" button, which stays
-disabled until step N's gate returns empty. The step rail at the top is a
-read-only progress display, not a nav control — see
-``wdmigrator.ui.theme.stepper``.
+a user click straight to Run without passing through Plan. Instead each step
+exposes ``gate(state) -> list[Blocker]``, and the *only* way to reach step
+N+1 is this module's own Continue button (or Connect's auto-advance after
+both sides verify), which stays disabled until step N's gate returns empty.
+The step rail at the top is a read-only progress display, not a nav control
+— see ``wdmigrator.ui.theme.stepper``.
 """
 
 from __future__ import annotations
@@ -24,16 +24,27 @@ import streamlit as st
 from wdmigrator.api import redact
 from wdmigrator.ui import components, theme
 from wdmigrator.ui.state import STEP_ORDER, STEP_TITLES, WizardState, get_state
-from wdmigrator.ui.steps import confirm, conflicts, connect, execute, resolve, results, select
+from wdmigrator.ui.steps import connect, plan, results, run, select
 
 _STEPS = {
     "connect": connect,
     "select": select,
-    "resolve": resolve,
-    "conflicts": conflicts,
-    "confirm": confirm,
-    "execute": execute,
+    "plan": plan,
+    "run": run,
     "results": results,
+}
+
+#: After both connections verify, skip the extra Continue click. Select,
+#: Plan, and Run stay manual — those are the human decisions.
+_AUTO_ADVANCE_FROM = frozenset({"connect"})
+
+#: One line under the step rail. The step body should not repeat this.
+_STEP_HINT = {
+    "connect": "Enter both tenants, then Test. Continue unlocks when both succeed.",
+    "select": "Highlight a row to add it, or add a report by exact name. Clear drops a pick.",
+    "plan": "Check CREATE vs SKIP, then tick that you read the dry run.",
+    "run": "Type the destination tenant name, tick the box, then Start. Writes cannot be undone.",
+    "results": "Download the log, or start a new migration.",
 }
 
 
@@ -56,11 +67,8 @@ def main() -> None:
     )
     theme.inject()
 
-    allow_non_impl = os.environ.get("WDMIGRATOR_ALLOW_NON_IMPL")
-    if allow_non_impl == "1":
+    if os.environ.get("WDMIGRATOR_ALLOW_NON_IMPL") == "1":
         st.caption("ALLOW_NON_IMPL = 1")
-    else:
-        st.caption(f"ALLOW_NON_IMPL = {allow_non_impl!r}")
 
     state = get_state()
 
@@ -82,6 +90,7 @@ def main() -> None:
         dest_env=state.dest.target.environment if state.dest.target else None,
     )
     theme.stepper(state.step, STEP_ORDER, STEP_TITLES, _unlocked_through(state))
+    st.caption(_STEP_HINT[state.step])
     st.divider()
 
     module = _STEPS[state.step]
@@ -99,9 +108,19 @@ def main() -> None:
     current_index = STEP_ORDER.index(state.step)
     blockers = module.gate(state)
 
+    if (
+        not state.hold_step
+        and state.step in _AUTO_ADVANCE_FROM
+        and not blockers
+        and current_index < len(STEP_ORDER) - 1
+    ):
+        state.step = STEP_ORDER[current_index + 1]
+        st.rerun()
+
     nav_cols = st.columns([1, 1, 6])
     with nav_cols[0]:
         if current_index > 0 and st.button("Back", key="nav_back", use_container_width=True):
+            state.hold_step = True
             state.step = STEP_ORDER[current_index - 1]
             st.rerun()
     with nav_cols[1]:
@@ -114,9 +133,13 @@ def main() -> None:
                 type="primary",
                 use_container_width=True,
             ):
+                state.hold_step = False
                 state.step = STEP_ORDER[current_index + 1]
                 st.rerun()
 
     if blockers and current_index < len(STEP_ORDER) - 1:
-        with st.expander(f"{len(blockers)} thing(s) to resolve before continuing", expanded=False):
-            components.render_blockers(blockers)
+        first, *rest = blockers
+        theme.banner("warning", first.title, first.detail, remedy=first.remedy or None)
+        if rest:
+            with st.expander(f"{len(rest)} more before continuing", expanded=False):
+                components.render_blockers(rest)

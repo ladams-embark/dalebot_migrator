@@ -1,4 +1,4 @@
-"""Step 7: Results — outcome summary, per-object detail, exports.
+"""Results — outcome summary, per-object detail, exports, and a run log.
 
 Shows whichever run is most recent: a live execution if one happened, else
 the last dry run. Export bytes are built straight from ``state.*_records``
@@ -12,6 +12,8 @@ from __future__ import annotations
 import csv
 import io
 import json
+from datetime import datetime, timezone
+from pathlib import Path
 
 import streamlit as st
 
@@ -36,7 +38,7 @@ from wdmigrator.api import (
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.indexes import destination_match_indexes
-from wdmigrator.ui.runner import pump, start_job
+from wdmigrator.ui.runner import READ_TIME_BUDGET, WRITE_TIME_BUDGET, pump, start_job
 from wdmigrator.ui.state import WizardState, build_guard, owner_reference, reset_downstream
 
 STEP_ID = "results"
@@ -78,16 +80,59 @@ def _wid_map_from(records) -> dict:
     return {r.reference_id or r.node_id: r.dest_wid for r in records if r.dest_wid}
 
 
+def _dest_can_read(state: WizardState) -> bool:
+    """Live SOAP client has ``.service``. AppTest stubs omit it on purpose."""
+    connection = state.dest.connection
+    return connection is not None and getattr(connection, "service", None) is not None
+
+
+def _write_run_log(state: WizardState, records) -> None:
+    """Always persist a run log under ``out/``. Once per set of records."""
+    if state.run_log_path:
+        return
+    out = Path("out")
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = out / f"migration-{stamp}.json"
+    payload = {
+        "written_at": stamp,
+        "live": bool(state.execute_records),
+        "destination_tenant": (
+            state.dest.target.tenant if state.dest.target is not None else None
+        ),
+        "plan_hash": state.plan.plan_hash() if state.plan is not None else "",
+        "run_log_path": str(path),
+        "records": json.loads(_records_to_json(records).decode("utf-8")),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    state.run_log_path = str(path)
+
+
 def render(state: WizardState) -> None:
     st.header("Results")
 
     records = state.execute_records or state.dry_run_records
     if not records:
         theme.banner("neutral", "Nothing has been run yet",
-                     "Results appear here after a dry run or a live execution.")
+                     "A dry run or live execution shows up here.")
         return
 
+    _write_run_log(state, records)
+
     is_live = bool(state.execute_records)
+    indeterminate = [r for r in records if getattr(r, "needs_reprobe", False)]
+    if indeterminate:
+        theme.banner(
+            "danger",
+            f"{len(indeterminate)} object(s) ended INDETERMINATE",
+            "A PUT timed out or the transport failed after the request left "
+            "this tool. The destination may already hold the object. This is "
+            "not a skip — do not retry those writes without re-probing, or "
+            "you can create a duplicate this service cannot delete.",
+            remedy="Go back to Run and use Re-probe and resume, or re-check "
+                   "the objects in Workday before writing again.",
+        )
+
     theme.section(
         "Live execution" if is_live else "Dry run",
         None if is_live else "No live execution has been run — these are serialized "
@@ -138,6 +183,9 @@ def render(state: WizardState) -> None:
                 file_name="wid_map.json", mime="application/json",
                 use_container_width=True,
             )
+
+    if state.run_log_path:
+        st.caption(f"Run log written to `{state.run_log_path}`")
 
     if is_live:
         st.divider()
@@ -263,7 +311,7 @@ def _start_restore_reprobe(state: WizardState, replaced: set[str]) -> None:
 
 def _pump_restore_reprobe(state: WizardState) -> None:
     job = state.restore_reprobe_job
-    pump(job, time_budget=0.8)
+    pump(job, time_budget=READ_TIME_BUDGET)
     last = job.last_event
     render_job_progress(
         job,
@@ -316,7 +364,7 @@ def _pump_restore_reprobe(state: WizardState) -> None:
 
 def _pump_restore_execute(state: WizardState) -> None:
     job = state.restore_execute_job
-    pump(job, time_budget=0.8, batch_size=1)
+    pump(job, time_budget=WRITE_TIME_BUDGET, batch_size=1)
     last = job.last_event
     render_job_progress(
         job,
@@ -465,23 +513,28 @@ def _render_verify(state: WizardState) -> None:
     """
     theme.section(
         "Verification",
-        "Read every written object back from the destination and compare "
-        "structural signals to the source (tab count, worklet count, member "
-        "count, columns). The writer's own success bit has reported clean "
-        "runs where dashboards came back as empty shells — this is the "
-        "check that catches that.",
+        "Reads written objects back and compares structure to the source.",
         eyebrow="Post-run read-back",
     )
 
     if state.verify_job is not None:
-        pump(state.verify_job, time_budget=0.8)
+        if state.verify_job.error is not None:
+            theme.banner(
+                "danger",
+                "Verification failed",
+                str(state.verify_job.error),
+                remedy="Re-verify below once the destination is reachable.",
+            )
+            if st.button("Re-verify", key="verify_rerun_after_error"):
+                state.verify_job = None
+                state.verify_records = []
+                st.rerun()
+            return
+        pump(state.verify_job, time_budget=READ_TIME_BUDGET)
         last = state.verify_job.last_event
         fraction = last.fraction if last is not None else 0.0
         render_job_progress(state.verify_job, label="Verification", fraction=fraction)
-        if state.verify_job.error is not None:
-            state.verify_job = None
-            st.rerun()
-        elif state.verify_job.done:
+        if state.verify_job.done:
             state.verify_records = [event.record for event in state.verify_job.events]
             state.verify_job = None
             st.rerun()
@@ -490,6 +543,12 @@ def _render_verify(state: WizardState) -> None:
         return
 
     if not state.verify_records:
+        if _dest_can_read(state):
+            state.verify_job = start_job(
+                iter_verify(state.dest.connection, state.plan.ordered_nodes, state.execute_records)
+            )
+            st.rerun()
+            return
         if st.button("Verify against destination", key="verify_start", type="primary"):
             state.verify_job = start_job(
                 iter_verify(state.dest.connection, state.plan.ordered_nodes, state.execute_records)
@@ -537,6 +596,7 @@ def _render_verify(state: WizardState) -> None:
 
     if st.button("Re-verify", key="verify_rerun"):
         state.verify_records = []
+        state.verify_job = None
         st.rerun()
 
 
