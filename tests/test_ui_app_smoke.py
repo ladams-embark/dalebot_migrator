@@ -339,6 +339,8 @@ def test_plan_step_renders_the_probe_fallback_for_stubs():
     found = [b for b in at.button if b.key == "conflicts_start"]
     assert found
     assert not found[0].disabled
+    rerun = [b for b in at.button if b.key == "dest_index_rerun_now"]
+    assert rerun, "manual destination index rerun button is missing on Plan"
 
 
 def test_select_with_a_loaded_package_offers_destination_matching():
