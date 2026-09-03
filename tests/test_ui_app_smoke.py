@@ -72,6 +72,7 @@ def _select_step_app(**state_kwargs):
     at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
     state = WizardState(step="select", **state_kwargs)
     state.source.connection = _StubConnection()
+    state.dest.connection = _StubConnection()
     at.session_state[STATE_KEY] = state
     at.run(timeout=20)
     return at
@@ -149,6 +150,8 @@ class TestConflictsRefusesToProbeUnmatched:
         rendered = " ".join(str(w.value) for w in at.markdown)
         assert "Destination calculated field index" in rendered
         assert "Destination calculated measure index" in rendered
+        build = [b for b in at.button if b.key == "dest_index_job_start"]
+        assert build, "Build destination indexes must stay clickable when auto-start cannot run"
 
     def test_the_probe_button_is_disabled_until_both_sweeps_exist(self):
         at = self._app(ready=False)
@@ -336,6 +339,50 @@ def test_plan_step_renders_the_probe_fallback_for_stubs():
     found = [b for b in at.button if b.key == "conflicts_start"]
     assert found
     assert not found[0].disabled
+
+
+def test_select_with_a_loaded_package_offers_destination_matching():
+    """A package replaces the source picker, not the destination sweep.
+
+    Select used to return after the package summary, so destination matching
+    never started and Plan auto-started a job it did not pump — leaving no
+    Build button either.
+    """
+    from wdmigrator.api import Closure, package_from_closure
+    from wdmigrator.ui.state import STATE_KEY, WizardState
+
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    state = WizardState(step="select")
+    state.package = package_from_closure(
+        Closure(), name="sample", description="", source_tenant="t"
+    )
+    state.dest.connection = _StubConnection()
+    at.session_state[STATE_KEY] = state
+    at.run(timeout=20)
+    assert not at.exception
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    assert "Destination calculated field index" in rendered
+    build = [b for b in at.button if b.key == "dest_index_job_start"]
+    assert build, "package runs must still be able to kick off destination matching"
+
+
+def test_a_session_from_before_hold_step_does_not_crash():
+    """Streamlit keeps the WizardState instance across a script reload.
+
+    After deploy, ``app.py`` reads ``state.hold_step`` on an instance that
+    predates the field. Hydrate fills it instead of crashing the nav bar.
+    """
+    from wdmigrator.ui.state import STATE_KEY, WizardState
+
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    at.run(timeout=15)
+    assert not at.exception
+    state = at.session_state[STATE_KEY]
+    assert isinstance(state, WizardState)
+    delattr(state, "hold_step")
+    at.run(timeout=15)
+    assert not at.exception
+    assert at.session_state[STATE_KEY].hold_step is False
 
 
 def test_run_step_does_not_auto_start_live_execution():

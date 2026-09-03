@@ -29,8 +29,6 @@ from wdmigrator.api import (
     Action,
     Blocker,
     build_plan,
-    iter_calculated_field_index,
-    iter_calculated_measure_index,
     iter_check_existence,
     validate_plan,
 )
@@ -38,8 +36,8 @@ from wdmigrator.api import TIME_TRACKING_KINDS, TIME_TRACKING_SERVICE_NAME
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_blockers, render_job_progress
 from wdmigrator.ui.indexes import (
-    IndexSpec,
     bulk_build_indexes,
+    destination_index_specs,
     destination_match_indexes,
     destination_matching_ready,
 )
@@ -72,7 +70,7 @@ def _start_probe(state: WizardState) -> None:
     )
 
 
-def _render_destination_indexes(state: WizardState) -> None:
+def _render_destination_indexes(state: WizardState) -> bool:
     """The two destination sweeps that make cross-tenant matching possible.
 
     Both are destination reads, not writes. Normally already built from the
@@ -80,37 +78,29 @@ def _render_destination_indexes(state: WizardState) -> None:
     Build click instead of two — so most of the time this renders as a status
     confirmation rather than an outstanding "Build" button. Kept here as a
     fallback (and for the Rebuild option) in case a session skipped Select's
-    combined build.
+    combined build, including a package-loaded run whose Select page used to
+    return before destination matching started.
     """
     theme.section(
         "Destination matching",
         "Needed so shared fields are reused instead of duplicated. Rebuild if the destination was refreshed.",
         eyebrow="Required before probing",
     )
+    if state.dest.connection is None:
+        theme.banner(
+            "danger",
+            "Destination is not connected",
+            "Cross-tenant matching reads the destination tenant. Go back to Connect.",
+        )
+        return False
     # A measure's BI_Calculated_Measure_ID is Workday-generated with a
     # tenant-local sequence number, so two tenants can never agree on one —
     # which makes this index the *only* thing standing between a shared measure
     # and a duplicate. It is one page, so rebuilding it is nearly free; the
     # caption below says when that is worth doing.
-    specs = [
-        IndexSpec(
-            kind="calculated_field",
-            label="Destination calculated field",
-            iterator_fn=iter_calculated_field_index,
-            connection=state.dest.connection,
-            index_attr="dest_cf_index",
-        ),
-        IndexSpec(
-            kind="calculated_measure",
-            label="Destination calculated measure",
-            iterator_fn=iter_calculated_measure_index,
-            connection=state.dest.connection,
-            index_attr="dest_measure_index",
-        ),
-    ]
-    bulk_build_indexes(
+    running = bulk_build_indexes(
         state,
-        specs,
+        destination_index_specs(state.dest.connection),
         job_attr="dest_index_job",
         button_label="Build destination indexes",
         auto_start=True,
@@ -120,10 +110,11 @@ def _render_destination_indexes(state: WizardState) -> None:
             "warning",
             "Destination sweeps not built",
             "Probing without these indexes can plan CREATE for fields the destination already has.",
-            remedy="Wait for both indexes above.",
+            remedy="Wait for both indexes above, or click Build destination indexes.",
         )
     else:
         st.caption("Rebuild if the destination was refreshed this session.")
+    return running
 
 
 def _pump_probe(state: WizardState) -> None:
@@ -220,8 +211,11 @@ def render(state: WizardState, *, heading: bool = True) -> None:
         return
 
     if state.existence_job is None:
-        _render_destination_indexes(state)
+        dest_running = _render_destination_indexes(state)
         st.divider()
+        if dest_running:
+            st.rerun()
+            return
 
     if state.existence_job is None and state.plan is None:
         dest_live = getattr(state.dest.connection, "service", None) is not None
@@ -312,7 +306,7 @@ def gate(state: WizardState) -> list[Blocker]:
                     "indexes, every object whose ID differs is reported absent and "
                     "planned as a CREATE."
                 ),
-                remedy="Wait for both destination indexes above, then the existence check starts itself.",
+                remedy="Wait for both destination indexes above, or click Build destination indexes.",
             )
         ]
     if state.plan is None:

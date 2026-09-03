@@ -19,7 +19,6 @@ from wdmigrator.api import (
     LookupOutcome,
     iter_analytic_indicator_index,
     iter_calculated_field_index,
-    iter_calculated_measure_index,
     iter_dashboard_index,
     iter_gauge_range_index,
     iter_prompt_field_index,
@@ -32,7 +31,7 @@ from wdmigrator.api import (
     lookup_report_by_name,
 )
 from wdmigrator.ui import theme
-from wdmigrator.ui.indexes import IndexSpec, bulk_build_indexes
+from wdmigrator.ui.indexes import IndexSpec, bulk_build_indexes, destination_index_specs
 from wdmigrator.ui.state import WizardState, reset_downstream
 
 STEP_ID = "select"
@@ -215,22 +214,7 @@ def _destination_specs(connection) -> list[IndexSpec]:
     "destination" apart if it ever needs to (e.g. resetting one side's cache
     without touching the other).
     """
-    return [
-        IndexSpec(
-            kind="calculated_field",
-            label="Destination calculated field",
-            iterator_fn=iter_calculated_field_index,
-            connection=connection,
-            index_attr="dest_cf_index",
-        ),
-        IndexSpec(
-            kind="calculated_measure",
-            label="Destination calculated measure",
-            iterator_fn=iter_calculated_measure_index,
-            connection=connection,
-            index_attr="dest_measure_index",
-        ),
-    ]
+    return destination_index_specs(connection)
 
 
 def _render_calculated_fields(state: WizardState) -> None:
@@ -582,10 +566,36 @@ def _render_package_summary(state: WizardState) -> None:
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
+def _render_destination_matching(state: WizardState) -> bool:
+    """Destination CF/measure sweeps. Required even when the source is a package."""
+    if state.dest.connection is None:
+        theme.banner(
+            "danger",
+            "Destination is not connected",
+            "Cross-tenant matching reads the destination tenant. Go back to Connect.",
+        )
+        return False
+    theme.section(
+        "Destination matching",
+        "Needed so shared fields are reused instead of duplicated. Starts itself; Build is there if it does not.",
+        eyebrow="Starts automatically, in parallel",
+    )
+    return bulk_build_indexes(
+        state,
+        _destination_specs(state.dest.connection),
+        job_attr="dest_index_job",
+        button_label="Build destination indexes",
+        auto_start=True,
+    )
+
+
 def render(state: WizardState) -> None:
     st.header("Select")
     if state.package is not None:
         _render_package_summary(state)
+        st.divider()
+        if _render_destination_matching(state):
+            st.rerun()
         return
     connection = state.source.connection
     if connection is None:
@@ -604,11 +614,6 @@ def render(state: WizardState) -> None:
 
     specs = _source_specs(chosen, connection)
     report_specs = _report_specs(connection) if "reports" in chosen else []
-    dest_specs = (
-        _destination_specs(state.dest.connection)
-        if state.dest.connection is not None
-        else []
-    )
     running = False
     theme.section("Source indexes", eyebrow="Starts automatically")
     running = bulk_build_indexes(
@@ -627,15 +632,7 @@ def render(state: WizardState) -> None:
             button_label="Build report index",
             auto_start=True,
         ) or running
-    if dest_specs:
-        theme.section("Destination matching", eyebrow="Starts automatically, in parallel")
-        running = bulk_build_indexes(
-            state,
-            dest_specs,
-            job_attr="dest_index_job",
-            button_label="Build destination indexes",
-            auto_start=True,
-        ) or running
+    running = _render_destination_matching(state) or running
     if running:
         st.rerun()
 

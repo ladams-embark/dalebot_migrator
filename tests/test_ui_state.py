@@ -144,6 +144,22 @@ class TestSelectStepGate:
         assert select.gate(state) == []
 
 
+class TestHydrateWizardState:
+    def test_fills_fields_added_after_the_session_started(self):
+        state = ui_state.WizardState()
+        delattr(state, "hold_step")
+        delattr(state, "run_log_path")
+        ui_state.hydrate_wizard_state(state)
+        assert state.hold_step is False
+        assert state.run_log_path == ""
+
+    def test_leaves_existing_values_alone(self):
+        state = ui_state.WizardState(step="plan", hold_step=True)
+        ui_state.hydrate_wizard_state(state)
+        assert state.step == "plan"
+        assert state.hold_step is True
+
+
 class TestWizardStepOrder:
     def test_the_visible_wizard_is_five_steps(self):
         assert ui_state.STEP_ORDER == ["connect", "select", "plan", "run", "results"]
