@@ -1,4 +1,6 @@
-"""Step 5: Confirm — owner remap, an automatic dry run, then the live gate.
+"""Confirm — owner remap, an automatic dry run, then the live gate.
+
+Composed into Plan (dry-run review) and Run (live gate).
 
 This is where the plan's own hard rule lives: **live execution requires a
 dry run that has already been run and reviewed for this exact plan hash.**
@@ -25,6 +27,8 @@ ahead of time what will block a live run later.
 
 from __future__ import annotations
 
+import json
+
 import streamlit as st
 
 from wdmigrator.api import (
@@ -39,8 +43,7 @@ from wdmigrator.api import (
     iter_execute,
 )
 from wdmigrator.ui import safety_ui, theme
-from wdmigrator.ui.components import render_job_progress
-from wdmigrator.ui.runner import pump, start_job
+from wdmigrator.ui.runner import drain, start_job
 from wdmigrator.ui.state import DEFAULT_REPORT_OWNER_USERNAME, WizardState, build_guard, owner_reference
 
 
@@ -149,28 +152,45 @@ def _run_dry_run(state: WizardState) -> None:
         tt_connection=tt_connection,
         report_sharing=state.report_sharing,
     )
-    state.dry_run_job = start_job(generator)
-    state.dry_run_records = []
     state.dry_run_reviewed = False
+    state.dry_run_records = []
     state.dry_run_plan_hash = ""
-
-
-def _pump_dry_run(state: WizardState) -> None:
-    job = state.dry_run_job
-    pump(job, time_budget=0.8)
-    last = job.last_event
-    fraction = last.fraction if last is not None else 0.0
-    render_job_progress(job, label="Dry run", fraction=fraction)
-
-    if job.error is not None:
+    state.dry_run_job = start_job(generator)
+    drain(state.dry_run_job)
+    if state.dry_run_job.error is not None:
+        theme.banner("danger", "Dry run failed", str(state.dry_run_job.error))
         state.dry_run_job = None
-    elif job.done:
-        state.dry_run_records = [p.record for p in job.events]
-        state.dry_run_plan_hash = state.plan.plan_hash()
-        state.dry_run_job = None
-        st.rerun()
-    else:
-        st.rerun()
+        return
+    state.dry_run_records = [p.record for p in state.dry_run_job.events]
+    state.dry_run_plan_hash = state.plan.plan_hash()
+    state.dry_run_job = None
+
+
+def _plan_export_bytes(state: WizardState) -> bytes:
+    plan = state.plan
+    payload = {
+        "plan_hash": plan.plan_hash(),
+        "destination_tenant": state.dest.target.tenant if state.dest.target else None,
+        "writes_planned": plan.writes_planned,
+        "counts": plan.counts(),
+        "nodes": [
+            {
+                "node_id": n.node_id,
+                "kind": n.kind.value,
+                "name": n.name,
+                "action": plan.action_for(n).value,
+                "existence": (
+                    plan.existence[n.node_id].state.value
+                    if n.node_id in plan.existence
+                    else None
+                ),
+                "selected": n.selected,
+                "required_by": sorted(n.required_by),
+            }
+            for n in plan.ordered_nodes
+        ],
+    }
+    return json.dumps(payload, indent=2).encode("utf-8")
 
 
 def _render_dry_run_results(state: WizardState) -> None:
@@ -212,11 +232,9 @@ def _render_dry_run_results(state: WizardState) -> None:
     )
 
 
-def render(state: WizardState) -> None:
-    st.header("Confirm")
-
+def render_plan_review(state: WizardState) -> None:
+    """Owner remap, sharing, automatic dry run, downloadable plan."""
     if state.plan is None:
-        theme.banner("danger", "No plan", remedy="Go back to Conflicts.")
         return
 
     counts = state.plan.counts()
@@ -226,6 +244,13 @@ def render(state: WizardState) -> None:
         tones={"Writes planned": "write"},
     )
     st.caption(f"Destination: `{state.dest.target.tenant}`")
+    st.download_button(
+        "Download plan (JSON)",
+        data=_plan_export_bytes(state),
+        file_name=f"migration-plan-{state.plan.plan_hash()}.json",
+        mime="application/json",
+        key="plan_download_json",
+    )
 
     if _plan_has_report_creates(state):
         _render_owner_remap(state)
@@ -235,21 +260,17 @@ def render(state: WizardState) -> None:
     theme.section(
         "Dry run",
         "Required before a live run, and pinned to this exact plan. Runs "
-        "automatically below — and re-runs itself if you go back and change the "
-        "plan — so there's nothing to click here. It never contacts the "
-        "destination tenant.",
+        "automatically — and re-runs itself if the plan changes. It never "
+        "contacts the destination tenant.",
         eyebrow="Automatic",
     )
 
     plan_hash = state.plan.plan_hash()
     dry_run_stale = bool(state.dry_run_records) and state.dry_run_plan_hash != plan_hash
-    if state.dry_run_job is None and (not state.dry_run_records or dry_run_stale):
+    if not state.dry_run_records or dry_run_stale:
         _run_dry_run(state)
-        st.rerun()
 
-    if state.dry_run_job is not None:
-        _pump_dry_run(state)
-    elif state.dry_run_records and state.dry_run_plan_hash == plan_hash:
+    if state.dry_run_records and state.dry_run_plan_hash == state.plan.plan_hash():
         _render_dry_run_results(state)
 
     dry_guard = build_guard(state, dry_run=True)
@@ -258,13 +279,19 @@ def render(state: WizardState) -> None:
         with st.expander(f"What a live run would hit right now ({len(dry_findings)})"):
             theme.checklist([f"{g.title} — {g.detail}" for g in dry_findings])
 
-    st.divider()
+
+def render_live_gate(state: WizardState) -> None:
+    """Tenant-name, warning acknowledgements, irreversibility. No writes."""
+    if state.plan is None:
+        theme.banner("danger", "No plan", remedy="Go back to Plan.")
+        return
+
     theme.section(
         "Live execution gate",
         "Everything below has to pass before the destination tenant is touched. "
         "This service has no delete operation — nothing written here can be undone by "
         "this tool, only by hand in the Workday UI, object by object.",
-        eyebrow="Step 2 of 2",
+        eyebrow="Required before Start",
     )
     state.confirmed_tenant_name = st.text_input(
         f"Type the destination tenant name to confirm (`{state.dest.target.tenant}`)",
@@ -283,18 +310,38 @@ def render(state: WizardState) -> None:
     )
 
 
-def gate(state: WizardState) -> list[Blocker]:
+def render(state: WizardState) -> None:
+    """Kept for tests that import confirm.render; the wizard uses Plan + Run."""
+    st.header("Confirm")
+    if state.plan is None:
+        theme.banner("danger", "No plan", remedy="Go back to Plan.")
+        return
+    render_plan_review(state)
+    st.divider()
+    render_live_gate(state)
+
+
+def gate_plan_review(state: WizardState) -> list[Blocker]:
+    """Plan step: valid plan + reviewed dry run. Does not require the live gate."""
     blockers: list[Blocker] = []
     if state.plan is None:
-        return [Blocker(None, "No plan", "Resolve conflicts before confirming.", "Go back to Conflicts.")]
+        return [Blocker(None, "No plan", "Resolve conflicts before confirming.", "Stay on this step until the destination probe finishes.")]
 
     if state.plan.writes_planned == 0:
         blockers.append(Blocker(None, "Nothing to write", "Every object resolved to SKIP.", "Nothing to execute."))
 
     if state.dry_run_plan_hash != state.plan.plan_hash() or not state.dry_run_records:
-        blockers.append(Blocker(None, "Dry run required", "No dry run has been run for this exact plan.", "Run the dry run above."))
+        blockers.append(Blocker(None, "Dry run required", "No dry run has been run for this exact plan.", "The dry run starts automatically above."))
     elif not state.dry_run_reviewed:
         blockers.append(Blocker(None, "Dry run not reviewed", "The dry run output has not been marked reviewed.", "Check 'I have reviewed this dry run's output.'"))
+    return blockers
+
+
+def gate_live(state: WizardState) -> list[Blocker]:
+    """Run step: tenant name, irreversibility, engine BLOCKs."""
+    blockers: list[Blocker] = []
+    if state.plan is None:
+        return [Blocker(None, "No plan", "Resolve the plan before running.", "Go back to Plan.")]
 
     if state.dest.target is not None and state.confirmed_tenant_name.strip() != state.dest.target.tenant:
         blockers.append(Blocker(None, "Tenant name not confirmed", "The typed tenant name does not match the destination.", f"Type '{state.dest.target.tenant}' exactly."))
@@ -306,5 +353,9 @@ def gate(state: WizardState) -> list[Blocker]:
     for g in evaluate_guards(live_guard):
         if g.level is Level.BLOCK:
             blockers.append(Blocker(None, g.title, g.detail, g.remedy))
-
     return blockers
+
+
+def gate(state: WizardState) -> list[Blocker]:
+    """Full confirm gate (plan review + live). Used by tests."""
+    return gate_plan_review(state) + gate_live(state)

@@ -37,14 +37,12 @@ from wdmigrator.ui.runner import JobState
 
 STATE_KEY = "wizard"
 
-STEP_ORDER = ["connect", "select", "resolve", "conflicts", "confirm", "execute", "results"]
+STEP_ORDER = ["connect", "select", "plan", "run", "results"]
 STEP_TITLES = {
     "connect": "Connect",
     "select": "Select",
-    "resolve": "Resolve",
-    "conflicts": "Conflicts",
-    "confirm": "Confirm",
-    "execute": "Execute",
+    "plan": "Plan",
+    "run": "Run",
     "results": "Results",
 }
 
@@ -88,9 +86,10 @@ class WizardState:
     #: the "Load stored package" affordance on the Connect step. When set:
     #:   * the source connection is not required (the package IS the source);
     #:   * Select renders a read-only summary of the loaded closure;
-    #:   * Resolve is a no-op — ``state.closure`` is set straight from the
-    #:     package on load, so nothing here calls ``resolve_closure`` again;
-    #:   * Conflicts / Confirm / Execute / Results run unchanged.
+    #:   * Plan's resolve pass is a no-op — ``state.closure`` is set straight
+    #:     from the package on load, so nothing here calls ``resolve_closure``
+    #:     again;
+    #:   * Plan / Run / Results run unchanged.
     #: Cleared by ``reset_downstream("select")`` or when the user clicks the
     #: "Clear loaded package" button on Connect.
     package: Optional[Package] = None
@@ -121,9 +120,13 @@ class WizardState:
     time_calculation_index: Optional[Index] = None
     time_calculation_tag_index: Optional[Index] = None
     time_calculation_group_index: Optional[Index] = None
-    #: One job drains every source index sweep back-to-back — Build once,
-    #: everything comes in. See ``wdmigrator.ui.indexes.bulk_build_indexes``.
+    #: One job drains every source index sweep back-to-back — starts itself
+    #: on Select when a live connection is present. See
+    #: ``wdmigrator.ui.indexes.bulk_build_indexes``.
     source_index_job: Optional[JobState] = None
+    #: Report index is a separate job so exact-name add does not wait on the
+    #: ~2.5 minute report sweep. Browse table fills in when this finishes.
+    report_index_job: Optional[JobState] = None
     #: Set when a dashboard/prompt-set/prompt-field sweep failed with the
     #: implementer fault, so the Select step can explain it once rather than
     #: showing a raw error.
@@ -221,11 +224,17 @@ class WizardState:
     #: How reports should land on the destination — see :class:`ReportSharing`.
     #: Defaults to UNSHARED, the historical behaviour and the safest option:
     #: only the report's owner can see it until someone chooses otherwise. The
-    #: Confirm step exposes a radio to switch to SHARED_WITH_ALL_AUTHORIZED_USERS.
+    #: Plan step exposes a radio to switch to SHARED_WITH_ALL_AUTHORIZED_USERS.
     report_sharing: ReportSharing = ReportSharing.UNSHARED
     # Re-probe kicked off by submitting the mapping table, so a decision does
-    # not cost a trip back through Conflicts and Confirm.
+    # not cost a trip back through Plan.
     reprobe_job: Optional[JobState] = None
+    #: Set when the user clicks Back so Connect's auto-advance (both sides
+    #: verified → Select) does not bounce them forward again.
+    hold_step: bool = False
+    #: Set after a live run log is written under ``out/`` so a rerun does not
+    #: create a second file for the same records.
+    run_log_path: str = ""
 
 
 def get_state() -> WizardState:
@@ -261,6 +270,7 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.time_calculation_tag_index = None
         state.time_calculation_group_index = None
         state.source_index_job = None
+        state.report_index_job = None
         # Credential-scoped, like the source indexes above: this reset is what
         # runs when a connection changes, and a destination index swept against
         # a *different* destination would silently authorise skipping objects
@@ -277,25 +287,23 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.selected_time_calculation_wids = set()
         state.reference_decisions = {}
 
-    if idx <= STEP_ORDER.index("resolve"):
+    if idx <= STEP_ORDER.index("plan"):
         state.closure = None
         state.closure_error = None
-
-    if idx <= STEP_ORDER.index("conflicts"):
         state.existence_job = None
         state.plan = None
         state.action_overrides = {}
-
-    if idx <= STEP_ORDER.index("confirm"):
         state.dry_run_job = None
         state.dry_run_records = []
         state.dry_run_plan_hash = ""
         state.dry_run_reviewed = False
         state.confirmed_tenant_name = ""
         state.warnings_acknowledged = set()
+        state.irreversible_ack = False
 
-    if idx <= STEP_ORDER.index("execute"):
+    if idx <= STEP_ORDER.index("run"):
         state.execute_job = None
+        state.execute_paused = False
         state.execute_records = []
         state.blocking_references = {}
         state.preflight_populated_for_hash = ""
@@ -306,10 +314,42 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
         state.restore_execute_job = None
         state.restore_records = []
         state.restore_update_node_ids = set()
+        state.run_log_path = ""
 
     # Never leave the user parked past the point their data just got wiped.
     if STEP_ORDER.index(state.step) > idx:
         state.step = from_step
+
+
+def clear_downstream_of_closure(state: WizardState) -> None:
+    """Keep the current closure; drop the plan, dry run, and any writes.
+
+    Used after a fresh resolve so an old CREATE/SKIP table cannot outlive
+    the objects it was built from.
+    """
+    state.existence_job = None
+    state.plan = None
+    state.action_overrides = {}
+    state.dry_run_job = None
+    state.dry_run_records = []
+    state.dry_run_plan_hash = ""
+    state.dry_run_reviewed = False
+    state.confirmed_tenant_name = ""
+    state.warnings_acknowledged = set()
+    state.irreversible_ack = False
+    state.execute_job = None
+    state.execute_paused = False
+    state.execute_records = []
+    state.blocking_references = {}
+    state.preflight_populated_for_hash = ""
+    state.reprobe_job = None
+    state.verify_job = None
+    state.verify_records = []
+    state.restore_reprobe_job = None
+    state.restore_execute_job = None
+    state.restore_records = []
+    state.restore_update_node_ids = set()
+    state.run_log_path = ""
 
 
 DEFAULT_REPORT_OWNER_USERNAME = "wd-support"

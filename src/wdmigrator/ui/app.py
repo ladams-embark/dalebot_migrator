@@ -1,12 +1,12 @@
 """Wizard entry point — gated linear navigation.
 
 Tabs or a sidebar are deliberately not used for navigation: either would let
-a user click straight to Execute without passing through Conflicts and
-Confirm. Instead each step exposes ``gate(state) -> list[Blocker]``, and the
-*only* way to reach step N+1 is this module's own "Next" button, which stays
-disabled until step N's gate returns empty. The step rail at the top is a
-read-only progress display, not a nav control — see
-``wdmigrator.ui.theme.stepper``.
+a user click straight to Run without passing through Plan. Instead each step
+exposes ``gate(state) -> list[Blocker]``, and the *only* way to reach step
+N+1 is this module's own Continue button (or Connect's auto-advance after
+both sides verify), which stays disabled until step N's gate returns empty.
+The step rail at the top is a read-only progress display, not a nav control
+— see ``wdmigrator.ui.theme.stepper``.
 """
 
 from __future__ import annotations
@@ -24,17 +24,19 @@ import streamlit as st
 from wdmigrator.api import redact
 from wdmigrator.ui import components, theme
 from wdmigrator.ui.state import STEP_ORDER, STEP_TITLES, WizardState, get_state
-from wdmigrator.ui.steps import confirm, conflicts, connect, execute, resolve, results, select
+from wdmigrator.ui.steps import connect, plan, results, run, select
 
 _STEPS = {
     "connect": connect,
     "select": select,
-    "resolve": resolve,
-    "conflicts": conflicts,
-    "confirm": confirm,
-    "execute": execute,
+    "plan": plan,
+    "run": run,
     "results": results,
 }
+
+#: After both connections verify, skip the extra Continue click. Select,
+#: Plan, and Run stay manual — those are the human decisions.
+_AUTO_ADVANCE_FROM = frozenset({"connect"})
 
 
 def _unlocked_through(state: WizardState) -> int:
@@ -99,9 +101,19 @@ def main() -> None:
     current_index = STEP_ORDER.index(state.step)
     blockers = module.gate(state)
 
+    if (
+        not state.hold_step
+        and state.step in _AUTO_ADVANCE_FROM
+        and not blockers
+        and current_index < len(STEP_ORDER) - 1
+    ):
+        state.step = STEP_ORDER[current_index + 1]
+        st.rerun()
+
     nav_cols = st.columns([1, 1, 6])
     with nav_cols[0]:
         if current_index > 0 and st.button("Back", key="nav_back", use_container_width=True):
+            state.hold_step = True
             state.step = STEP_ORDER[current_index - 1]
             st.rerun()
     with nav_cols[1]:
@@ -114,6 +126,7 @@ def main() -> None:
                 type="primary",
                 use_container_width=True,
             ):
+                state.hold_step = False
                 state.step = STEP_ORDER[current_index + 1]
                 st.rerun()
 

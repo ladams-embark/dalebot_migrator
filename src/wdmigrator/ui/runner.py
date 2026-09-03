@@ -59,10 +59,20 @@ def start_job(generator: Iterator[Any]) -> JobState:
     return JobState(generator=generator)
 
 
+#: Default budget for live PUTs. Short so Pause/Cancel land between objects.
+WRITE_TIME_BUDGET = 0.8
+
+#: Read-only jobs (indexes, existence probes, verify) issue SOAP then wait on
+#: Workday. Spending most of each rerun inside ``pump`` rather than tearing
+#: down and rebuilding the Streamlit script between pages cuts the wait
+#: without changing the cancel-between-items contract.
+READ_TIME_BUDGET = 2.5
+
+
 def pump(
     job: JobState,
     *,
-    time_budget: float = 0.8,
+    time_budget: float = WRITE_TIME_BUDGET,
     batch_size: int | None = None,
 ) -> None:
     """Advance ``job`` for up to ``time_budget`` seconds or ``batch_size`` items.
@@ -101,3 +111,14 @@ def pump(
             return
         job.events.append(event)
         pulled += 1
+
+
+def drain(job: JobState) -> None:
+    """Run ``job`` to completion in this call.
+
+    For work that does not touch a tenant — the dry run serializes envelopes
+    locally — pumping across Streamlit reruns only adds latency. Live writes
+    must not use this: they need ``batch_size=1`` so Pause/Cancel land
+    between objects.
+    """
+    pump(job, time_budget=float("inf"))

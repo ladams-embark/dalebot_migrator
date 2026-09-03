@@ -43,8 +43,8 @@ from wdmigrator.ui.indexes import (
     destination_match_indexes,
     destination_matching_ready,
 )
-from wdmigrator.ui.runner import pump, start_job
-from wdmigrator.ui.state import WizardState, reset_downstream
+from wdmigrator.ui.runner import READ_TIME_BUDGET, pump, start_job
+from wdmigrator.ui.state import WizardState, clear_downstream_of_closure
 
 STEP_ID = "conflicts"
 
@@ -56,6 +56,7 @@ def _needs_tt(state: WizardState) -> bool:
 
 
 def _start_probe(state: WizardState) -> None:
+    clear_downstream_of_closure(state)
     tt_connection = (
         state.dest.connection.for_service(TIME_TRACKING_SERVICE_NAME)
         if _needs_tt(state)
@@ -69,8 +70,6 @@ def _start_probe(state: WizardState) -> None:
             **destination_match_indexes(state),
         )
     )
-    state.plan = None
-    reset_downstream(state, from_step="confirm")
 
 
 def _render_destination_indexes(state: WizardState) -> None:
@@ -119,6 +118,7 @@ def _render_destination_indexes(state: WizardState) -> None:
         specs,
         job_attr="dest_index_job",
         button_label="Build destination indexes",
+        auto_start=True,
     )
     if not destination_matching_ready(state):
         theme.banner(
@@ -140,7 +140,7 @@ def _render_destination_indexes(state: WizardState) -> None:
 
 def _pump_probe(state: WizardState) -> None:
     job = state.existence_job
-    pump(job, time_budget=0.8)
+    pump(job, time_budget=READ_TIME_BUDGET)
     last = job.last_event
     fraction = last.fraction if last is not None else 0.0
     render_job_progress(job, label="Destination existence check", fraction=fraction)
@@ -204,26 +204,35 @@ def _render_overrides(state: WizardState) -> None:
         },
         key="conflicts_editor",
     )
-    if st.button("Apply overrides", key="conflicts_apply"):
-        for _, row in edited.iterrows():
-            state.action_overrides[row["node_id"]] = Action(row["action"])
-        state.plan = build_plan(state.closure, plan.existence,
-                               overrides=state.action_overrides,
-                               reference_decisions=state.reference_decisions)
-        reset_downstream(state, from_step="confirm")
+    dirty = False
+    for _, row in edited.iterrows():
+        action = Action(row["action"])
+        current = plan.action_for(
+            next(n for n in plan.ordered_nodes if n.node_id == row["node_id"])
+        )
+        if action is not current:
+            state.action_overrides[row["node_id"]] = action
+            dirty = True
+    if dirty:
+        state.plan = build_plan(
+            state.closure, plan.existence,
+            overrides=state.action_overrides,
+            reference_decisions=state.reference_decisions,
+        )
         st.rerun()
 
 
-def render(state: WizardState) -> None:
-    st.header("Conflicts")
+def render(state: WizardState, *, heading: bool = True) -> None:
+    if heading:
+        st.header("Conflicts")
     st.caption(
         "Probes the destination tenant for every object in the resolved closure to "
         "decide CREATE vs SKIP. This is real, targeted destination traffic — one Get "
-        "per object, not a bulk pull."
+        "per object, not a bulk pull. Starts itself once destination matching is ready."
     )
 
     if state.closure is None:
-        theme.banner("danger", "No resolved closure", remedy="Go back to Resolve.")
+        theme.banner("danger", "No resolved closure", remedy="Go back to Plan.")
         return
 
     if state.existence_job is None:
@@ -231,6 +240,11 @@ def render(state: WizardState) -> None:
         st.divider()
 
     if state.existence_job is None and state.plan is None:
+        dest_live = getattr(state.dest.connection, "service", None) is not None
+        if destination_matching_ready(state) and dest_live:
+            _start_probe(state)
+            st.rerun()
+            return
         if st.button(
             f"Check existence for {len(state.closure)} objects",
             key="conflicts_start",
@@ -314,7 +328,7 @@ def gate(state: WizardState) -> list[Blocker]:
                     "indexes, every object whose ID differs is reported absent and "
                     "planned as a CREATE."
                 ),
-                remedy="Build both destination indexes above, then re-check existence.",
+                remedy="Wait for both destination indexes above, then the existence check starts itself.",
             )
         ]
     if state.plan is None:
@@ -323,7 +337,7 @@ def gate(state: WizardState) -> list[Blocker]:
                 node_id=None,
                 title="Destination not yet checked",
                 detail="Run the existence check against the destination before continuing.",
-                remedy="Click 'Check existence' above.",
+                remedy="The existence check starts automatically once destination matching is ready.",
             )
         ]
     return validate_plan(state.plan)

@@ -33,7 +33,7 @@ from wdmigrator.api import (
 )
 from wdmigrator.ui import theme
 from wdmigrator.ui.indexes import IndexSpec, bulk_build_indexes
-from wdmigrator.ui.state import WizardState
+from wdmigrator.ui.state import WizardState, reset_downstream
 
 STEP_ID = "select"
 
@@ -93,16 +93,6 @@ def _source_specs(chosen: list[str], connection) -> list[IndexSpec]:
                 iterator_fn=iter_analytic_indicator_index,
                 connection=connection,
                 index_attr="analytic_indicator_index",
-            )
-        )
-    if "reports" in chosen:
-        specs.append(
-            IndexSpec(
-                kind="report",
-                label="Report",
-                iterator_fn=iter_report_index,
-                connection=connection,
-                index_attr="report_index",
             )
         )
     if "dashboards" in chosen:
@@ -168,6 +158,44 @@ def _source_specs(chosen: list[str], connection) -> list[IndexSpec]:
             ]
         )
     return specs
+
+
+def _report_specs(connection) -> list[IndexSpec]:
+    """The slow report sweep — its own job so exact-name add is not blocked."""
+    return [
+        IndexSpec(
+            kind="report",
+            label="Report",
+            iterator_fn=iter_report_index,
+            connection=connection,
+            index_attr="report_index",
+        )
+    ]
+
+
+def _bank_payloads(rows, df, store: dict, payload_for) -> int:
+    """Copy newly highlighted rows into a wid→payload map. Add-only."""
+    added = 0
+    for i in rows:
+        wid = df.iloc[i]["wid"]
+        if wid in store:
+            continue
+        payload = payload_for(wid)
+        if payload is not None:
+            store[wid] = payload
+            added += 1
+    return added
+
+
+def _bank_wids(rows, df, store: set) -> int:
+    """Copy newly highlighted rows into a WID set. Add-only."""
+    added = 0
+    for i in rows:
+        wid = df.iloc[i]["wid"]
+        if wid not in store:
+            store.add(wid)
+            added += 1
+    return added
 
 
 def _destination_specs(connection) -> list[IndexSpec]:
@@ -248,15 +276,15 @@ def _render_calculated_fields(state: WizardState) -> None:
                 key="cf_search_table",
             )
             rows = event.selection["rows"] if event and event.selection else []
-            if st.button("Add selected calculated fields", key="cf_add", disabled=not rows):
-                for i in rows:
-                    state.selected_field_wids.add(df.iloc[i]["wid"])
+            if rows and _bank_wids(rows, df, state.selected_field_wids):
+                reset_downstream(state, from_step="plan")
                 st.rerun()
 
     if state.selected_field_wids:
         theme.figures([("Fields selected", len(state.selected_field_wids))])
         if st.button("Clear calculated field selections", key="cf_clear"):
             state.selected_field_wids.clear()
+            reset_downstream(state, from_step="plan")
             st.rerun()
 
 
@@ -282,6 +310,7 @@ def _render_reports(state: WizardState) -> None:
                 full = lookup_report(state.source.connection, wid=result.wid)
                 if full.outcome is LookupOutcome.FOUND and full.data is not None:
                     state.selected_reports_added[full.wid] = full.data
+                    reset_downstream(state, from_step="plan")
                     theme.banner("success", f"Added “{name}”")
                 else:
                     theme.banner(
@@ -337,25 +366,21 @@ def _render_reports(state: WizardState) -> None:
             key="report_table_select",
         )
         rows = event.selection["rows"] if event and event.selection else []
-        # Adding is an explicit button, not a read of the live table selection,
-        # for the same reason the calculated field picker works this way: the
-        # table reports *row positions into the frame it was handed*, so
-        # retyping the filter makes those positions refer to different reports.
-        # Selections have to be banked before the frame changes underneath them,
-        # or picking reports across two different searches is impossible.
-        if st.button("Add selected reports", key="report_add", disabled=not rows):
-            for i in rows:
-                wid = df.iloc[i]["wid"]
-                payload = state.report_index.payload(wid)
-                if payload is not None:
-                    state.selected_reports_added[wid] = payload
+        # Bank immediately: the table reports row *positions* into the current
+        # frame, so we copy WIDs out before a later filter repoints them.
+        # Add-only — Clear is the way to drop a pick.
+        if rows and _bank_payloads(
+            rows, df, state.selected_reports_added,
+            lambda wid: state.report_index.payload(wid),
+        ):
+            reset_downstream(state, from_step="plan")
             st.rerun()
     else:
         theme.banner(
             "neutral",
             "Index not built",
-            "Build the report index above to browse and multi-select from a table. "
-            "Until then, exact-name lookup is the only way to add a report.",
+            "The report index is sweeping in the background (~2.5 minutes). "
+            "Until it lands, add a report by its exact name above.",
         )
 
     state.selected_reports = dict(state.selected_reports_added)
@@ -373,6 +398,7 @@ def _render_reports(state: WizardState) -> None:
         if st.button("Clear report selections", key="report_clear"):
             state.selected_reports_added = {}
             state.selected_reports = {}
+            reset_downstream(state, from_step="plan")
             st.rerun()
 
 
@@ -403,9 +429,8 @@ def _render_dashboards(state: WizardState) -> None:
         theme.banner(
             "neutral",
             "Index not built",
-            "Build the dashboard index above. Both dashboard flavours are swept — "
-            "tabbed and untabbed are separate object types in Workday and nothing "
-            "identifies which a dashboard is ahead of time.",
+            "The dashboard index is sweeping in the background. Both flavours "
+            "are swept — tabbed and untabbed are separate object types.",
         )
         return
 
@@ -433,15 +458,11 @@ def _render_dashboards(state: WizardState) -> None:
         key="dashboard_table_select",
     )
     rows = event.selection["rows"] if event and event.selection else []
-    # Banked on an explicit add rather than read off the live table, for the
-    # same reason as reports: the table's row positions are relative to the
-    # frame it was handed, so retyping the filter silently repoints them.
-    if st.button("Add selected dashboards", key="dashboard_add", disabled=not rows):
-        for i in rows:
-            wid = df.iloc[i]["wid"]
-            payload = state.dashboard_index.payload(wid)
-            if payload is not None:
-                state.selected_dashboards_added[wid] = payload
+    if rows and _bank_payloads(
+        rows, df, state.selected_dashboards_added,
+        lambda wid: state.dashboard_index.payload(wid),
+    ):
+        reset_downstream(state, from_step="plan")
         st.rerun()
 
     state.selected_dashboards = dict(state.selected_dashboards_added)
@@ -455,6 +476,7 @@ def _render_dashboards(state: WizardState) -> None:
         if st.button("Clear dashboard selections", key="dashboard_clear"):
             state.selected_dashboards_added = {}
             state.selected_dashboards = {}
+            reset_downstream(state, from_step="plan")
             st.rerun()
 
 
@@ -470,7 +492,7 @@ def _render_time_calculations(state: WizardState) -> None:
         theme.banner(
             "neutral",
             "Time calculation index not built",
-            "Enable Time calculations above and click Build indexes.",
+            "The time-calculation index is sweeping in the background.",
         )
         return
 
@@ -510,9 +532,11 @@ def _render_time_calculations(state: WizardState) -> None:
         key="tc_table",
     )
     rows = picked.get("selection", {}).get("rows", []) if isinstance(picked, dict) else []
-    if st.button("Add selected", key="tc_add", disabled=not rows):
-        for i in rows:
-            state.selected_time_calculation_wids.add(df.iloc[i]["wid"])
+    if hasattr(picked, "selection"):
+        rows = picked.selection["rows"] if picked.selection else []
+    if rows and _bank_wids(rows, df, state.selected_time_calculation_wids):
+        reset_downstream(state, from_step="plan")
+        st.rerun()
 
     if state.selected_time_calculation_wids:
         theme.figures(
@@ -526,6 +550,8 @@ def _render_time_calculations(state: WizardState) -> None:
                 st.write(f"• {s.name if s else wid} — {s.reference_id if s else ''}")
         if st.button("Clear selections", key="tc_clear"):
             state.selected_time_calculation_wids = set()
+            reset_downstream(state, from_step="plan")
+            st.rerun()
 
 
 def _render_package_summary(state: WizardState) -> None:
@@ -588,24 +614,48 @@ def render(state: WizardState) -> None:
     )
 
     specs = _source_specs(chosen, connection)
-    # The destination sweeps Conflicts needs for cross-tenant matching are
-    # built in the same pass as the source ones — both sides are already
-    # connected by this point (Connect's gate requires it), and Conflicts
-    # cannot probe anything without them anyway, so deferring them just
-    # turned into a second, separate "click Build" round trip later.
-    if state.dest.connection is not None:
-        specs = specs + _destination_specs(state.dest.connection)
+    report_specs = _report_specs(connection) if "reports" in chosen else []
+    dest_specs = (
+        _destination_specs(state.dest.connection)
+        if state.dest.connection is not None
+        else []
+    )
+    if dest_specs:
         st.caption(
-            "Includes the destination calculated-field and calculated-measure sweeps "
-            "Conflicts needs for cross-tenant matching — one Build step covers both "
-            "sides instead of two."
+            "Source and destination indexes build at the same time — destination "
+            "matching is what keeps shared calculated fields from being duplicated. "
+            "The report catalog is a separate sweep so you can add a report by "
+            "exact name without waiting on it."
         )
-    bulk_build_indexes(
+    running = False
+    theme.section("Source indexes", eyebrow="Starts automatically")
+    running = bulk_build_indexes(
         state,
         specs,
         job_attr="source_index_job",
-        button_label="Build indexes",
-    )
+        button_label="Build source indexes",
+        auto_start=True,
+    ) or running
+    if report_specs:
+        theme.section("Report catalog", eyebrow="Background — does not block exact-name add")
+        running = bulk_build_indexes(
+            state,
+            report_specs,
+            job_attr="report_index_job",
+            button_label="Build report index",
+            auto_start=True,
+        ) or running
+    if dest_specs:
+        theme.section("Destination matching", eyebrow="Starts automatically, in parallel")
+        running = bulk_build_indexes(
+            state,
+            dest_specs,
+            job_attr="dest_index_job",
+            button_label="Build destination indexes",
+            auto_start=True,
+        ) or running
+    if running:
+        st.rerun()
 
     st.divider()
     if "dashboards" in chosen:
@@ -681,7 +731,8 @@ def gate(state: WizardState) -> list[Blocker]:
                             "index is absent, so the gap surfaces as a live "
                             "write failure rather than a blocker here."
                         ),
-                        remedy="Enable Time calculations above and click Build indexes.",
+                        remedy="Enable Time calculations above — the tag and group "
+                               "indexes start with the source sweep.",
                     )
                 )
     if state.selected_dashboards and state.prompt_set_index is None:
@@ -695,7 +746,7 @@ def gate(state: WizardState) -> list[Blocker]:
                     "on demand — the request criteria Workday exposes for them do "
                     "not filter — so the index is the only way to resolve them."
                 ),
-                remedy="Build the prompt set index above (a few seconds).",
+                remedy="Wait for the prompt set index (a few seconds), or rebuild it above.",
             )
         )
     if state.selected_dashboards and state.prompt_field_index is None:
@@ -710,7 +761,7 @@ def gate(state: WizardState) -> list[Blocker]:
                     "the dependency never enters the closure and the prompt set "
                     "fails against the live tenant instead of here."
                 ),
-                remedy="Build the prompt field index above (a few seconds).",
+                remedy="Wait for the prompt field index (a few seconds), or rebuild it above.",
             )
         )
     # Both are dependencies of *reports*, and a dashboard drags its worklet
@@ -743,7 +794,7 @@ def gate(state: WizardState) -> list[Blocker]:
                             "the index is absent, so the gap surfaces as a live "
                             "write failure rather than a blocker here."
                         ),
-                        remedy="Build it above (a few seconds).",
+                        remedy="Wait for it above (a few seconds), or rebuild.",
                     )
                 )
     if state.cf_index is None:
@@ -756,7 +807,7 @@ def gate(state: WizardState) -> list[Blocker]:
                     "index, even if you only selected reports — every WID a report "
                     "references has to be classified against it."
                 ),
-                remedy="Build the calculated field index above (~25s).",
+                remedy="Wait for the calculated field index above (~25s), or rebuild it.",
             )
         )
     return blockers
