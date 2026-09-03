@@ -589,6 +589,76 @@ def _render_destination_matching(state: WizardState) -> bool:
     )
 
 
+def _is_live_connection(connection) -> bool:
+    """A live SOAP client has ``.service``; AppTest stubs intentionally do not."""
+    return getattr(connection, "service", None) is not None
+
+
+def _render_select_bootstrap_loading(
+    state: WizardState,
+    *,
+    source_specs: list[IndexSpec],
+    report_specs: list[IndexSpec],
+) -> bool:
+    """Dedicated loading screen immediately after Connect auto-advances.
+
+    This keeps the first Select render focused on "indexes are building now"
+    rather than exposing picker controls while required jobs are still
+    starting up.
+    """
+    src_live = _is_live_connection(state.source.connection)
+    dst_live = _is_live_connection(state.dest.connection)
+    if not (src_live and dst_live):
+        return False
+
+    required_ready = (
+        state.cf_index is not None
+        and state.dest_cf_index is not None
+        and state.dest_measure_index is not None
+    )
+    running_required = (
+        state.source_index_job is not None or state.dest_index_job is not None
+    )
+    if not (running_required or not required_ready):
+        return False
+
+    theme.section(
+        "Preparing indexes",
+        "Building required source and destination indexes. This can take a few minutes.",
+        eyebrow="Loading",
+    )
+    running = False
+    running = bulk_build_indexes(
+        state,
+        source_specs,
+        job_attr="source_index_job",
+        button_label="Build source indexes",
+        auto_start=True,
+    ) or running
+    running = bulk_build_indexes(
+        state,
+        _destination_specs(state.dest.connection),
+        job_attr="dest_index_job",
+        button_label="Build destination indexes",
+        auto_start=True,
+    ) or running
+    if report_specs:
+        running = bulk_build_indexes(
+            state,
+            report_specs,
+            job_attr="report_index_job",
+            button_label="Build report index",
+            auto_start=True,
+        ) or running
+    st.caption(
+        "Index jobs are already in progress. Selection controls appear after "
+        "required indexes finish."
+    )
+    if running:
+        st.rerun()
+    return True
+
+
 def render(state: WizardState) -> None:
     st.header("Select")
     if state.package is not None:
@@ -602,11 +672,21 @@ def render(state: WizardState) -> None:
         theme.banner("danger", "Source is not connected", remedy="Go back to Connect.")
         return
 
+    # Pull the current choice from session state so the bootstrap screen can
+    # build the same indexes this run will need before the multiselect renders.
+    chosen = st.session_state.get("object_kinds", ["reports"])
+    specs = _source_specs(chosen, connection)
+    report_specs = _report_specs(connection) if "reports" in chosen else []
+    if _render_select_bootstrap_loading(
+        state, source_specs=specs, report_specs=report_specs
+    ):
+        return
+
     theme.section("Object kinds", eyebrow="Start here")
     chosen = st.multiselect(
         "Object kinds",
         options=list(_OBJECT_KINDS),
-        default=["reports"],
+        default=chosen,
         format_func=lambda key: _OBJECT_KINDS[key],
         key="object_kinds",
         label_visibility="collapsed",
