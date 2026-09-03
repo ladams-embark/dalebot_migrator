@@ -627,7 +627,9 @@ PREFLIGHT_TENANT_DATA_ELEMENTS = (
 #: whose parameter defaults to a set of Event Classifications (delivered enum
 #: values) should keep those defaults intact after migration; blanking would
 #: hand the destination a report with empty defaults for content the user
-#: actually wants pre-selected.
+#: actually wants pre-selected. ``Event_Lite_Type_ID`` is the same kind of
+#: delivered enum (Hire, Time Off, and the like) and is consistent across
+#: tenants, so it is kept rather than prompted.
 #:
 #: Membership is deliberately conservative: an id type is only in here when
 #: the underlying object is delivered by Workday (not tenant-configurable),
@@ -640,6 +642,7 @@ PREFLIGHT_TENANT_DATA_ELEMENTS = (
 #: and any KEEP guess can be flipped to BLANK or REPLACE in place.
 DELIVERED_INSTANCE_REFERENCE_ID_TYPES = frozenset({
     "Event_Classification_Value_ID",
+    "Event_Lite_Type_ID",
     "Business_Process_Type_ID",
     "Country_ID",
     "Country_Region_ID",

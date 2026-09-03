@@ -1410,6 +1410,14 @@ class TestDeliveredInstanceReferenceDefaultsToKeep:
         [c] = find_preflight_reference_candidates([node])
         assert c.default_action is ReferenceAction.KEEP
 
+    def test_event_lite_type_defaults_to_KEEP(self):
+        node = self._report([
+            [("WID", "ELT_A"),
+             ("Event_Lite_Type_ID", "Time Off")],
+        ])
+        [c] = find_preflight_reference_candidates([node])
+        assert c.default_action is ReferenceAction.KEEP
+
     def test_tenant_local_organization_still_defaults_to_BLANK(self):
         node = self._report([
             [("WID", "ORG_A"),

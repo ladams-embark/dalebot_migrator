@@ -28,6 +28,8 @@ from wdmigrator.api import (
     cache_path,
     calculated_field_match_index,
     calculated_measure_match_index,
+    iter_calculated_field_index,
+    iter_calculated_measure_index,
     load_index,
     requires_implementer,
     save_index,
@@ -98,6 +100,31 @@ def destination_match_indexes(state) -> dict:
         "match_index": calculated_field_match_index(state.dest_cf_index),
         "measure_match_index": calculated_measure_match_index(state.dest_measure_index),
     }
+
+
+def destination_index_specs(connection: Connection) -> list[IndexSpec]:
+    """The two destination sweeps cross-tenant matching needs.
+
+    Shared by Select (including a loaded package, which has no source
+    indexes to browse) and Plan, so a package-loaded run cannot skip the
+    destination sweep that a live-source run starts on Select.
+    """
+    return [
+        IndexSpec(
+            kind="calculated_field",
+            label="Destination calculated field",
+            iterator_fn=iter_calculated_field_index,
+            connection=connection,
+            index_attr="dest_cf_index",
+        ),
+        IndexSpec(
+            kind="calculated_measure",
+            label="Destination calculated measure",
+            iterator_fn=iter_calculated_measure_index,
+            connection=connection,
+            index_attr="dest_measure_index",
+        ),
+    ]
 
 
 def age_label(seconds: float) -> str:
@@ -314,9 +341,16 @@ def bulk_build_indexes(
 
     Any spec whose cache is on disk is filled in silently — no click needed.
     When ``auto_start`` is True and a live connection is present, missing
-    sweeps start themselves. The Build button remains as a fallback for
-    stubs and cancelled runs. Rebuild handles the "destination refreshed,
-    this cache is stale" case (confirmed live — see CLAUDE.md).
+    sweeps start themselves. The Build button is always shown while a job
+    is not running, so a package-loaded Plan (or a cancelled run) is never
+    left with no way to kick the sweep off. Rebuild handles the
+    "destination refreshed, this cache is stale" case (confirmed live —
+    see CLAUDE.md).
+
+    Starting a job used to ``return True`` before this function rendered
+    progress or called :func:`pump`. Callers that forgot ``st.rerun()``
+    then sat on a started-but-idle job with the Build button gone — the
+    package-loaded destination matching path.
     """
     if not specs:
         return False
@@ -327,78 +361,78 @@ def bulk_build_indexes(
     job = getattr(state, job_attr)
     specs_attr = f"_{job_attr}_specs"
 
-    if job is not None:
+    if job is None:
+        missing = _missing(state, specs)
+        start_specs: list[IndexSpec] | None = None
         col1, col2 = st.columns([3, 1])
         with col1:
-            last = job.last_event
-            fraction = 0.0
-            label = button_label
-            detail = None
-            if isinstance(last, _StageEvent):
-                stage_frac = (last.stage - 1 + max(0.0, min(1.0, last.fraction))) / last.total_stages
-                fraction = min(1.0, stage_frac)
-                label = f"{last.label} ({last.stage}/{last.total_stages})"
-                detail = _progress_detail(last, getattr(state, specs_attr, None))
-            render_job_progress(job, label=label, fraction=fraction, detail=detail)
+            if missing:
+                estimates = ", ".join(
+                    BUILD_ESTIMATE.get(s.kind, _DEFAULT_ESTIMATE) for s in missing
+                )
+                can_auto = auto_start and _connection_can_sweep(missing)
+                clicked = st.button(
+                    f"{button_label} ({len(missing)} to build: {estimates})",
+                    key=f"{job_attr}_start",
+                    type="primary",
+                    use_container_width=True,
+                )
+                if can_auto or clicked:
+                    start_specs = missing
         with col2:
-            if st.button("Cancel", key=f"{job_attr}_cancel", use_container_width=True):
-                job.cancel()
-                return True
-
-        pump(job, time_budget=READ_TIME_BUDGET)
-        if job.error is not None:
-            setattr(state, job_attr, None)
-            setattr(state, specs_attr, None)
-            return True
-        if job.cancelled:
-            setattr(state, job_attr, None)
-            setattr(state, specs_attr, None)
-            theme.banner(
-                "warning",
-                "Index build cancelled",
-                "Whichever indexes had already finished are kept — the one running "
-                "when you cancelled was discarded, since a half-built index would "
-                "make dependency resolution look complete when it isn't.",
-            )
-            return False
-        if job.done:
-            setattr(state, job_attr, None)
-            setattr(state, specs_attr, None)
-            return True
-        return True
-
-    missing = _missing(state, specs)
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if missing:
-            estimates = ", ".join(
-                BUILD_ESTIMATE.get(s.kind, _DEFAULT_ESTIMATE) for s in missing
-            )
-            can_auto = auto_start and _connection_can_sweep(missing)
-            if can_auto:
-                setattr(state, specs_attr, missing)
-                setattr(state, job_attr, start_job(_chained_build(state, missing)))
-                return True
-            if st.button(
-                f"{button_label} ({len(missing)} to build: {estimates})",
-                key=f"{job_attr}_start",
-                type="primary",
+            built = [s for s in specs if getattr(state, s.index_attr) is not None]
+            if built and st.button(
+                "Rebuild all",
+                key=f"{job_attr}_rebuild",
                 use_container_width=True,
             ):
-                setattr(state, specs_attr, missing)
-                setattr(state, job_attr, start_job(_chained_build(state, missing)))
-                return True
+                for spec in built:
+                    setattr(state, spec.index_attr, None)
+                state.implementer_required = False
+                start_specs = specs
+        if start_specs is not None:
+            setattr(state, specs_attr, start_specs)
+            job = start_job(_chained_build(state, start_specs))
+            setattr(state, job_attr, job)
+
+    if job is None:
+        return False
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        last = job.last_event
+        fraction = 0.0
+        label = button_label
+        detail = None
+        if isinstance(last, _StageEvent):
+            stage_frac = (last.stage - 1 + max(0.0, min(1.0, last.fraction))) / last.total_stages
+            fraction = min(1.0, stage_frac)
+            label = f"{last.label} ({last.stage}/{last.total_stages})"
+            detail = _progress_detail(last, getattr(state, specs_attr, None))
+        render_job_progress(job, label=label, fraction=fraction, detail=detail)
     with col2:
-        built = [s for s in specs if getattr(state, s.index_attr) is not None]
-        if built and st.button(
-            "Rebuild all",
-            key=f"{job_attr}_rebuild",
-            use_container_width=True,
-        ):
-            for spec in built:
-                setattr(state, spec.index_attr, None)
-            state.implementer_required = False
-            setattr(state, specs_attr, specs)
-            setattr(state, job_attr, start_job(_chained_build(state, specs)))
+        if st.button("Cancel", key=f"{job_attr}_cancel", use_container_width=True):
+            job.cancel()
             return True
-    return False
+
+    pump(job, time_budget=READ_TIME_BUDGET)
+    if job.error is not None:
+        setattr(state, job_attr, None)
+        setattr(state, specs_attr, None)
+        return True
+    if job.cancelled:
+        setattr(state, job_attr, None)
+        setattr(state, specs_attr, None)
+        theme.banner(
+            "warning",
+            "Index build cancelled",
+            "Whichever indexes had already finished are kept — the one running "
+            "when you cancelled was discarded, since a half-built index would "
+            "make dependency resolution look complete when it isn't.",
+        )
+        return False
+    if job.done:
+        setattr(state, job_attr, None)
+        setattr(state, specs_attr, None)
+        return True
+    return True

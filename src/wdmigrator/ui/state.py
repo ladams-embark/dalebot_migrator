@@ -17,7 +17,7 @@ another the moment auth is added on top of this app.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from typing import Optional
 
 import streamlit as st
@@ -237,10 +237,32 @@ class WizardState:
     run_log_path: str = ""
 
 
+def hydrate_wizard_state(state: WizardState) -> None:
+    """Fill attributes added after this session's ``WizardState`` was created.
+
+    Streamlit keeps the same instance across reruns, including a script reload
+    that does not restart the process. A newly deployed field such as
+    ``hold_step`` is therefore missing on an in-flight session, which would
+    otherwise crash the nav bar with ``AttributeError``.
+    """
+    for f in fields(WizardState):
+        if hasattr(state, f.name):
+            continue
+        if f.default is not MISSING:
+            setattr(state, f.name, f.default)
+        elif f.default_factory is not MISSING:  # type: ignore[misc]
+            setattr(state, f.name, f.default_factory())
+        else:
+            setattr(state, f.name, None)
+
+
 def get_state() -> WizardState:
     if STATE_KEY not in st.session_state:
         st.session_state[STATE_KEY] = WizardState()
-    return st.session_state[STATE_KEY]
+        return st.session_state[STATE_KEY]
+    state = st.session_state[STATE_KEY]
+    hydrate_wizard_state(state)
+    return state
 
 
 def reset_downstream(state: WizardState, *, from_step: str) -> None:
