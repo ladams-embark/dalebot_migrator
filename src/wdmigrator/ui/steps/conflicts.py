@@ -98,12 +98,30 @@ def _render_destination_indexes(state: WizardState) -> bool:
     # which makes this index the *only* thing standing between a shared measure
     # and a duplicate. It is one page, so rebuilding it is nearly free; the
     # caption below says when that is worth doing.
+    specs = destination_index_specs(state.dest.connection)
+    force_start = False
+    with st.container():
+        cols = st.columns([3, 1])
+        with cols[1]:
+            if st.button(
+                "Re-run now",
+                key="dest_index_rerun_now",
+                disabled=state.dest_index_job is not None,
+                use_container_width=True,
+            ):
+                for spec in specs:
+                    setattr(state, spec.index_attr, None)
+                state.implementer_required = False
+                # Rebuild from this step in one click: clear cached indexes and
+                # start the destination sweep in this same render.
+                state.dest_index_job = None
+                force_start = True
     running = bulk_build_indexes(
         state,
-        destination_index_specs(state.dest.connection),
+        specs,
         job_attr="dest_index_job",
         button_label="Build destination indexes",
-        auto_start=False,
+        auto_start=force_start,
     )
     if not destination_matching_ready(state):
         theme.banner(
