@@ -345,13 +345,19 @@ def test_run_step_does_not_auto_start_live_execution():
     at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
     state = WizardState(step="run")
     state.plan = MigrationPlan()
+    state.source.target = target_from_parts(
+        "impl-services1.wd12.myworkday.com", "source_tenant"
+    )
     state.dest.target = target_from_parts(
         "impl-services1.wd12.myworkday.com", "dest_tenant"
     )
+    state.source.connection = _StubConnection()
     state.dest.connection = _StubConnection()
     at.session_state[STATE_KEY] = state
     at.run(timeout=20)
     assert not at.exception
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    assert "Unexpected error" not in rendered
     assert "Run" in [h.value for h in at.header]
     start = [b for b in at.button if b.key == "execute_start"]
     assert start, "Start live execution is missing"

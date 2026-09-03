@@ -174,7 +174,7 @@ def _report_specs(connection) -> list[IndexSpec]:
 
 
 def _bank_payloads(rows, df, store: dict, payload_for) -> int:
-    """Copy newly highlighted rows into a wid→payload map. Add-only."""
+    """Copy newly highlighted rows into a wid-to-payload map. Add-only."""
     added = 0
     for i in rows:
         wid = df.iloc[i]["wid"]

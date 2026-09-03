@@ -230,7 +230,7 @@ class WizardState:
     # not cost a trip back through Plan.
     reprobe_job: Optional[JobState] = None
     #: Set when the user clicks Back so Connect's auto-advance (both sides
-    #: verified → Select) does not bounce them forward again.
+    #: verified, skip to Select) does not bounce them forward again.
     hold_step: bool = False
     #: Set after a live run log is written under ``out/`` so a rerun does not
     #: create a second file for the same records.
