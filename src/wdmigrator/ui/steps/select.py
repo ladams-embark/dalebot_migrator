@@ -650,10 +650,21 @@ def _render_select_bootstrap_loading(
             button_label="Build report index",
             auto_start=True,
         ) or running
-    st.caption(
-        "Index jobs are already in progress. Selection controls appear after "
-        "required indexes finish."
+    running_required_now = (
+        state.source_index_job is not None or state.dest_index_job is not None
     )
+    if running_required_now:
+        st.caption(
+            "Required index jobs are running. Selection controls appear after "
+            "required indexes finish."
+        )
+    else:
+        theme.banner(
+            "warning",
+            "Required index jobs have not started yet",
+            "Auto-start can lag on the first render. Use the Build buttons "
+            "above to start source and destination indexes now.",
+        )
     if running:
         st.rerun()
     return True
