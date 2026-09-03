@@ -2,5 +2,5 @@
 # This file exists so `pip install -r requirements.txt` still works.
 #
 # Installs wdmigrator in editable mode plus the dev/test extras:
-#   zeep, requests, python-dotenv, lxml, click, pytest, pytest-dotenv
+#   zeep, requests, python-dotenv, lxml, click, pytest
 -e .[dev]

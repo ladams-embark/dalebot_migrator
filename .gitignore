@@ -26,3 +26,6 @@ out/
 # Session scratchpad — one-off scripts and dumps produced during Claude Code
 # sessions. Content is per-session and machine-local, not something to ship.
 scratchpad/
+
+# Claude Code machine-local allowlists (Windows paths, one-off commands)
+.claude/settings.local.json
