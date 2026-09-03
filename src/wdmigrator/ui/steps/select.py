@@ -577,15 +577,15 @@ def _render_destination_matching(state: WizardState) -> bool:
         return False
     theme.section(
         "Destination matching",
-        "Needed so shared fields are reused instead of duplicated. Starts itself; Build is there if it does not.",
-        eyebrow="Starts automatically, in parallel",
+        "Needed so shared fields are reused instead of duplicated. Click Build destination indexes to start.",
+        eyebrow="Manual start",
     )
     return bulk_build_indexes(
         state,
         _destination_specs(state.dest.connection),
         job_attr="dest_index_job",
         button_label="Build destination indexes",
-        auto_start=True,
+        auto_start=False,
     )
 
 
