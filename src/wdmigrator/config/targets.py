@@ -26,8 +26,14 @@ _RESERVED_SEGMENTS = frozenset(
     {"wday", "ccx", "service", "authgwy", "d", "login", "home"}
 )
 
-#: A services host has a "-servicesN" suffix on its first label.
+#: A services host has a "-servicesN" suffix on its first label
+#: (``impl-services1.wd12...``, ``wd5-services1.myworkday.com``).
 _SERVICES_LABEL = re.compile(r"^(?P<base>.+?)-services\d+$")
+#: Production REST API Endpoint hosts use a *bare* ``servicesN`` first label
+#: (``services1.wd108.myworkday.com`` for aesseal). That is already the SOAP
+#: host — rewriting it as ``services1-services1...`` is how Connect failed
+#: when that URL was pasted.
+_BARE_SERVICES_LABEL = re.compile(r"^services\d+$")
 
 
 class TenantURLError(ValueError):
@@ -106,7 +112,7 @@ def derive_services_host(host: str) -> tuple[str, bool]:
         raise TenantURLError("No host to derive a services host from.")
 
     labels = host.split(".")
-    if _SERVICES_LABEL.match(labels[0]):
+    if _SERVICES_LABEL.match(labels[0]) or _BARE_SERVICES_LABEL.match(labels[0]):
         return host, False
 
     labels[0] = f"{labels[0]}-services1"
@@ -119,6 +125,9 @@ def _ui_host_for(services_host: str) -> str:
     match = _SERVICES_LABEL.match(labels[0])
     if match:
         labels[0] = match.group("base")
+        return ".".join(labels)
+    if _BARE_SERVICES_LABEL.match(labels[0]) and len(labels) > 1:
+        return ".".join(labels[1:])
     return ".".join(labels)
 
 
@@ -151,6 +160,11 @@ def classify_environment(host: str, tenant: str) -> Environment:
     if first.startswith("sbx") or "sandbox" in first:
         return Environment.SANDBOX
     if first in ("www", "wd") or re.fullmatch(r"wd\d+", first):
+        return Environment.PRODUCTION
+    # ``services1.wd108.myworkday.com`` — production REST API Endpoint shape
+    # (aesseal). The SOAP host's first label is the services token, the pod
+    # number is the next label.
+    if _BARE_SERVICES_LABEL.match(first):
         return Environment.PRODUCTION
 
     # Unrecognised host shape. Treated as PRODUCTION by the safety layer.
