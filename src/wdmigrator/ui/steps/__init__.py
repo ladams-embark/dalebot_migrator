@@ -1,4 +1,4 @@
-"""The wizard steps, in order: connect, select, plan, run, results.
+"""The wizard steps, in order: connect, scope, select, plan, run, results.
 
 Each module exposes `render(state)` and `gate(state) -> list[Blocker]`; see
 `wdmigrator.ui.app` for how they're driven. Resolve / Conflicts / Confirm /

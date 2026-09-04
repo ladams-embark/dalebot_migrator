@@ -196,7 +196,7 @@ def render(state: WizardState) -> None:
     st.divider()
     if st.button("Start a new migration", key="results_restart"):
         reset_downstream(state, from_step="select")
-        state.step = "select"
+        state.step = "scope"
         st.rerun()
 
 

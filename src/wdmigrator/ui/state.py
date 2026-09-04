@@ -37,13 +37,25 @@ from wdmigrator.ui.runner import JobState
 
 STATE_KEY = "wizard"
 
-STEP_ORDER = ["connect", "select", "plan", "run", "results"]
+STEP_ORDER = ["connect", "scope", "select", "plan", "run", "results"]
 STEP_TITLES = {
     "connect": "Connect",
+    "scope": "Scope",
     "select": "Select",
     "plan": "Plan",
     "run": "Run",
     "results": "Results",
+}
+
+#: User-facing object kinds the Scope step offers. Order is the usual start
+#: (reports), then fields, then dashboards last — dashboards sit at the end of
+#: the dependency chain and are the only kind with an account-level
+#: (implementer) prerequisite.
+OBJECT_KINDS = {
+    "reports": "Reports",
+    "calculated_fields": "Calculated fields",
+    "dashboards": "Custom dashboards",
+    "time_calculations": "Time calculations",
 }
 
 
@@ -93,6 +105,12 @@ class WizardState:
     #: Cleared by ``reset_downstream("select")`` or when the user clicks the
     #: "Clear loaded package" button on Connect.
     package: Optional[Package] = None
+
+    #: Object kinds committed on the Scope step *before* any index sweep
+    #: starts. Empty means the user has not chosen yet — Select must not
+    #: default this to reports, which is how dashboard indexes were skipped
+    #: and the dashboard picker never appeared. Keys are :data:`OBJECT_KINDS`.
+    object_kinds: list = field(default_factory=list)
 
     # SOURCE indexes. Everything Select needs to browse pickers and to resolve
     # dependencies. Dashboards, prompt sets, and prompt fields require an
@@ -273,6 +291,9 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
     is called explicitly at those points instead.
     """
     idx = STEP_ORDER.index(from_step)
+
+    if idx <= STEP_ORDER.index("scope"):
+        state.object_kinds = []
 
     if idx <= STEP_ORDER.index("select"):
         # NOTE: ``state.package`` is deliberately NOT cleared here. A stored

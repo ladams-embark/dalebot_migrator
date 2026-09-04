@@ -21,7 +21,7 @@ object B must be remapped after B is written.
 
 ### Two interfaces
 1. **Streamlit wizard** (`src/wdmigrator/ui/`) — a gated linear flow:
-   Connect → Select → Resolve → Conflicts → Confirm → Execute → Results.
+   Connect → Scope → Select → Plan → Run → Results.
    Each step has a `gate()` that must pass before the user can advance.
 2. **Scripts** (`scripts/`) — standalone Python scripts for batch operations
    (export, migration) driven by `.env` credentials and CLI flags.

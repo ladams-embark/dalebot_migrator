@@ -1,6 +1,35 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-08-13 (session 10)_
+_Last updated: 2026-09-04 (scope-before-indexes)_
+
+## Done this session (2026-09-04) — object types before indexes
+
+Dashboard migration in the wizard broke after the Select bootstrap loading
+screen (PRs #12–#13). Connect auto-advanced into an index sweep that defaulted
+`object_kinds` to reports, hid the kinds chooser, and never built the
+dashboard catalog.
+
+**Fix:** a new **Scope** step sits between Connect and Select.
+
+- Connect still auto-advances. Scope does not (unless a package is loaded).
+- The user ticks Reports / Calculated fields / Custom dashboards / Time
+  calculations *before* any sweep starts. Empty default — no more silent
+  reports default.
+- Select then builds only the indexes that scope needs and only shows those
+  pickers. A dashboard-only run sweeps dashboard / prompt set / prompt field
+  first (so the catalog appears before the ~25s CF index), not the 2.5-minute
+  report catalog.
+- Approval path, offline AppTest: tick Custom dashboards on Scope → Continue
+  lands on Select with the dashboard picker → picking a dashboard with the
+  resolve-required indexes present unlocks Continue to Plan.
+  `770 passed, 15 deselected`.
+
+Live tenant write was not run — this environment has no `.env` credentials,
+and a destination Put still needs dry-run=false plus explicit confirmation.
+
+---
+
+_Previously: 2026-08-13 (session 10)_
 
 ## What this project is
 A Python tool that migrates configuration (calculated fields, custom report

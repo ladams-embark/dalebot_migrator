@@ -24,23 +24,27 @@ import streamlit as st
 from wdmigrator.api import redact
 from wdmigrator.ui import components, theme
 from wdmigrator.ui.state import STEP_ORDER, STEP_TITLES, WizardState, get_state
-from wdmigrator.ui.steps import connect, plan, results, run, select
+from wdmigrator.ui.steps import connect, plan, results, run, scope, select
 
 _STEPS = {
     "connect": connect,
+    "scope": scope,
     "select": select,
     "plan": plan,
     "run": run,
     "results": results,
 }
 
-#: After both connections verify, skip the extra Continue click. Select,
-#: Plan, and Run stay manual — those are the human decisions.
+#: After both connections verify, skip the extra Continue click. Scope is
+#: the first human decision (what to migrate) and must not be skipped —
+#: except when a stored package already carries the objects. Select, Plan,
+#: and Run stay manual.
 _AUTO_ADVANCE_FROM = frozenset({"connect"})
 
 #: One line under the step rail. The step body should not repeat this.
 _STEP_HINT = {
     "connect": "Enter both tenants, then Test. Continue unlocks when both succeed.",
+    "scope": "Tick the object types to migrate. Indexes are built on the next step.",
     "select": "Highlight a row to add it, or add a report by exact name. Clear drops a pick.",
     "plan": "Check CREATE vs SKIP, then tick that you read the dry run.",
     "run": "Type the destination tenant name, tick the box, then Start. Writes cannot be undone.",
@@ -108,9 +112,12 @@ def main() -> None:
     current_index = STEP_ORDER.index(state.step)
     blockers = module.gate(state)
 
+    auto_advance = state.step in _AUTO_ADVANCE_FROM or (
+        state.step == "scope" and state.package is not None
+    )
     if (
         not state.hold_step
-        and state.step in _AUTO_ADVANCE_FROM
+        and auto_advance
         and not blockers
         and current_index < len(STEP_ORDER) - 1
     ):

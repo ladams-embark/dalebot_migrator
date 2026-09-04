@@ -19,7 +19,7 @@ pytest.importorskip("streamlit")
 from wdmigrator import api
 from wdmigrator.ui import indexes, state as ui_state
 from wdmigrator.ui.runner import JobState
-from wdmigrator.ui.steps import confirm, conflicts, connect, execute, plan, resolve, results, run, select
+from wdmigrator.ui.steps import confirm, conflicts, connect, execute, plan, resolve, results, run, scope, select
 
 SOURCE = api.target_from_parts("impl-services1.wd12.myworkday.com", "source_tenant")
 DEST = api.target_from_parts("impl-services1.wd12.myworkday.com", "dest_tenant")
@@ -56,9 +56,33 @@ class TestConnectStepGate:
         assert connect.gate(state) == []
 
 
+class TestScopeStepGate:
+    def test_blocks_until_at_least_one_kind_is_chosen(self):
+        state = ui_state.WizardState()
+        blockers = scope.gate(state)
+        assert any("No object types chosen" in b.title for b in blockers)
+
+        state.object_kinds = ["dashboards"]
+        assert scope.gate(state) == []
+
+    def test_a_loaded_package_does_not_need_a_kind(self):
+        state = ui_state.WizardState()
+        state.package = api.package_from_closure(
+            api.Closure(), name="sample", description="", source_tenant="t"
+        )
+        assert scope.gate(state) == []
+
+
 class TestSelectStepGate:
+    def test_blocks_when_scope_has_not_chosen_a_kind(self):
+        state = ui_state.WizardState()
+        blockers = select.gate(state)
+        assert any("No object types chosen" in b.title for b in blockers)
+        assert not any("Nothing selected" in b.title for b in blockers)
+
     def test_requires_a_selection_and_the_complete_cf_index(self):
         state = ui_state.WizardState()
+        state.object_kinds = ["calculated_fields"]
         blockers = select.gate(state)
         assert any("Nothing selected" in b.title for b in blockers)
         assert any("index" in b.title.lower() for b in blockers)
@@ -72,12 +96,14 @@ class TestSelectStepGate:
         directly — the resolver needs it to classify every WID a report
         references."""
         state = ui_state.WizardState()
+        state.object_kinds = ["reports"]
         state.selected_reports = {"W2": {}}
         blockers = select.gate(state)
         assert any("index" in b.title.lower() for b in blockers)
 
     def test_a_dashboard_selection_satisfies_the_selection_requirement(self):
         state = ui_state.WizardState()
+        state.object_kinds = ["dashboards"]
         state.selected_dashboards = {"DB1": {}}
         assert not any("Nothing selected" in b.title for b in select.gate(state))
 
@@ -86,6 +112,7 @@ class TestSelectStepGate:
         for them do not filter — so the index is the only route, and a dashboard
         that binds one would otherwise resolve as if it had no prompts."""
         state = ui_state.WizardState()
+        state.object_kinds = ["dashboards"]
         state.cf_index = _index("calculated_field")
         state.selected_dashboards = {"DB1": {}}
         assert any("Prompt set index" in b.title for b in select.gate(state))
@@ -102,6 +129,7 @@ class TestSelectStepGate:
         — the dependency never enters the closure, so the gap surfaces as a
         live write failure rather than here."""
         state = ui_state.WizardState()
+        state.object_kinds = ["dashboards"]
         state.cf_index = _index("calculated_field")
         state.prompt_set_index = _index("prompt_set")
         state.gauge_range_index = _index("gauge_range")
@@ -126,6 +154,7 @@ class TestSelectStepGate:
         matrix measure names an analytic indicator — and both are silently
         skipped by `resolve` when the index is None."""
         state = ui_state.WizardState()
+        state.object_kinds = ["reports"]
         state.cf_index = _index("calculated_field")
         state.gauge_range_index = _index("gauge_range")
         state.analytic_indicator_index = _index("analytic_indicator")
@@ -139,6 +168,7 @@ class TestSelectStepGate:
         """Nothing here depends on a gauge range or an indicator, so demanding
         those sweeps would be two pointless tenant calls."""
         state = ui_state.WizardState()
+        state.object_kinds = ["calculated_fields"]
         state.cf_index = _index("calculated_field")
         state.selected_field_wids = {"W1"}
         assert select.gate(state) == []
@@ -161,8 +191,10 @@ class TestHydrateWizardState:
 
 
 class TestWizardStepOrder:
-    def test_the_visible_wizard_is_five_steps(self):
-        assert ui_state.STEP_ORDER == ["connect", "select", "plan", "run", "results"]
+    def test_the_visible_wizard_is_six_steps(self):
+        assert ui_state.STEP_ORDER == [
+            "connect", "scope", "select", "plan", "run", "results",
+        ]
         for step_id in ui_state.STEP_ORDER:
             assert step_id in ui_state.STEP_TITLES
 
@@ -467,6 +499,20 @@ class TestResetDownstream:
         assert state.prompt_set_index is None
         assert state.selected_dashboards == {}
         assert state.implementer_required is False
+
+    def test_credential_scoped_reset_keeps_the_scope_choice(self):
+        """Reconnecting should not forget that this run is a dashboard
+        migration — only the indexes and picks built from the old tenant."""
+        state = ui_state.WizardState()
+        state.object_kinds = ["dashboards"]
+        ui_state.reset_downstream(state, from_step="select")
+        assert state.object_kinds == ["dashboards"]
+
+    def test_scope_reset_clears_the_kind_choice(self):
+        state = ui_state.WizardState()
+        state.object_kinds = ["dashboards"]
+        ui_state.reset_downstream(state, from_step="scope")
+        assert state.object_kinds == []
 
     def test_credential_scoped_reset_wipes_the_destination_sweeps(self):
         """A destination index swept against a *different* destination would

@@ -1,4 +1,9 @@
-"""Step 2: Select — build source indexes, pick reports and/or calculated fields.
+"""Step 3: Select — build indexes for the scoped kinds, then pick objects.
+
+Object types are chosen on Scope, *before* this step. That is load-bearing:
+a default of reports plus an auto-start sweep hid the dashboard picker and
+never built the dashboard index. This step only sweeps and only renders
+pickers for ``state.object_kinds``.
 
 Server-side report search is exact-match only — substring queries return
 zero hits, a documented Workday limitation, not a shortcut we chose (see
@@ -32,7 +37,7 @@ from wdmigrator.api import (
 )
 from wdmigrator.ui import theme
 from wdmigrator.ui.indexes import IndexSpec, bulk_build_indexes, destination_index_specs
-from wdmigrator.ui.state import WizardState, reset_downstream
+from wdmigrator.ui.state import OBJECT_KINDS, WizardState, reset_downstream
 
 STEP_ID = "select"
 
@@ -43,57 +48,17 @@ STEP_ID = "select"
 _CF_MAX_RESULTS = 500
 _REPORT_MAX_ROWS = 5000
 
-#: What the user picks first. Dashboards are listed last deliberately — they sit
-#: at the end of the dependency chain, and they are the only kind with an
-#: account-level prerequisite.
-_OBJECT_KINDS = {
-    "reports": "Reports",
-    "calculated_fields": "Calculated fields",
-    "dashboards": "Custom dashboards",
-    "time_calculations": "Time calculations",
-}
-
-
 def _source_specs(chosen: list[str], connection) -> list[IndexSpec]:
     """Which source sweeps this selection needs, in the order they should run.
 
-    The calculated-field sweep is always first: resolving dependencies needs the
-    complete index no matter what the user picked from it, since every WID
-    encountered inside a report or dashboard is classified against it. Report-
-    dependency indexes (gauge range, analytic indicator) run next when there's
-    any report-shaped selection — reports directly, or dashboards that carry
-    them as worklets. The dashboard implementer-gated three come last so that
-    the cheap common-case sweeps are already in when a non-implementer account
-    hits the wall.
+    Catalog indexes the user will pick from run first so the picker appears
+    before the calculated-field sweep (~25s) finishes. Resolve still needs
+    that CF index — it is always included, last — and the Select gate will
+    not unlock until it lands. Report-dependency indexes (gauge range,
+    analytic indicator) run when there's any report-shaped selection —
+    reports directly, or dashboards that carry them as worklets.
     """
-    specs = [
-        IndexSpec(
-            kind="calculated_field",
-            label="Calculated field",
-            iterator_fn=iter_calculated_field_index,
-            connection=connection,
-            index_attr="cf_index",
-        )
-    ]
-    if "reports" in chosen or "dashboards" in chosen:
-        specs.append(
-            IndexSpec(
-                kind="gauge_range",
-                label="Gauge range",
-                iterator_fn=iter_gauge_range_index,
-                connection=connection,
-                index_attr="gauge_range_index",
-            )
-        )
-        specs.append(
-            IndexSpec(
-                kind="analytic_indicator",
-                label="Analytic indicator",
-                iterator_fn=iter_analytic_indicator_index,
-                connection=connection,
-                index_attr="analytic_indicator_index",
-            )
-        )
+    specs: list[IndexSpec] = []
     if "dashboards" in chosen:
         specs.extend(
             [
@@ -156,6 +121,36 @@ def _source_specs(chosen: list[str], connection) -> list[IndexSpec]:
                 ),
             ]
         )
+    if "reports" in chosen or "dashboards" in chosen:
+        specs.append(
+            IndexSpec(
+                kind="gauge_range",
+                label="Gauge range",
+                iterator_fn=iter_gauge_range_index,
+                connection=connection,
+                index_attr="gauge_range_index",
+            )
+        )
+        specs.append(
+            IndexSpec(
+                kind="analytic_indicator",
+                label="Analytic indicator",
+                iterator_fn=iter_analytic_indicator_index,
+                connection=connection,
+                index_attr="analytic_indicator_index",
+            )
+        )
+    # Always last: every WID inside a report or dashboard is classified
+    # against the complete calculated-field index.
+    specs.append(
+        IndexSpec(
+            kind="calculated_field",
+            label="Calculated field",
+            iterator_fn=iter_calculated_field_index,
+            connection=connection,
+            index_attr="cf_index",
+        )
+    )
     return specs
 
 
@@ -566,7 +561,7 @@ def _render_package_summary(state: WizardState) -> None:
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
-def _render_destination_matching(state: WizardState) -> bool:
+def _render_destination_matching(state: WizardState, *, auto_start: bool = False) -> bool:
     """Destination CF/measure sweeps. Required even when the source is a package."""
     if state.dest.connection is None:
         theme.banner(
@@ -577,97 +572,69 @@ def _render_destination_matching(state: WizardState) -> bool:
         return False
     theme.section(
         "Destination matching",
-        "Needed so shared fields are reused instead of duplicated. Click Build destination indexes to start.",
-        eyebrow="Manual start",
+        "Needed so shared fields are reused instead of duplicated."
+        + (
+            ""
+            if auto_start
+            else " Click Build destination indexes to start."
+        ),
+        eyebrow="Starts automatically" if auto_start else "Manual start",
     )
     return bulk_build_indexes(
         state,
         _destination_specs(state.dest.connection),
         job_attr="dest_index_job",
         button_label="Build destination indexes",
-        auto_start=False,
+        auto_start=auto_start,
     )
 
 
-def _is_live_connection(connection) -> bool:
-    """A live SOAP client has ``.service``; AppTest stubs intentionally do not."""
-    return getattr(connection, "service", None) is not None
+def _scope_caption(chosen: list[str]) -> str:
+    labels = [OBJECT_KINDS[k] for k in chosen if k in OBJECT_KINDS]
+    if not labels:
+        return "No object types chosen — go back to Scope."
+    return "Migrating: " + ", ".join(labels) + ". Change this on Scope."
 
 
-def _render_select_bootstrap_loading(
-    state: WizardState,
-    *,
-    source_specs: list[IndexSpec],
-    report_specs: list[IndexSpec],
-) -> bool:
-    """Dedicated loading screen immediately after Connect auto-advances.
+def _render_pickers(state: WizardState, chosen: list[str]) -> None:
+    """Only the pickers for kinds committed on Scope.
 
-    This keeps the first Select render focused on "indexes are building now"
-    rather than exposing picker controls while required jobs are still
-    starting up.
+    Calculated fields used to render unconditionally as an "optional" column,
+    which made a dashboard-only run look like a field-and-report run and hid
+    the actual dashboard table below a loading screen.
     """
-    src_live = _is_live_connection(state.source.connection)
-    dst_live = _is_live_connection(state.dest.connection)
-    if not (src_live and dst_live):
-        return False
+    if "dashboards" in chosen:
+        _render_dashboards(state)
+        st.divider()
 
-    required_ready = (
-        state.cf_index is not None
-        and state.dest_cf_index is not None
-        and state.dest_measure_index is not None
-    )
-    running_required = (
-        state.source_index_job is not None or state.dest_index_job is not None
-    )
-    if not (running_required or not required_ready):
-        return False
+    show_cf = "calculated_fields" in chosen
+    show_reports = "reports" in chosen
+    if show_cf and show_reports:
+        col1, col2 = st.columns(2)
+        with col1:
+            _render_calculated_fields(state)
+        with col2:
+            _render_reports(state)
+    elif show_cf:
+        _render_calculated_fields(state)
+    elif show_reports:
+        _render_reports(state)
 
-    theme.section(
-        "Preparing indexes",
-        "Building required source and destination indexes. This can take a few minutes.",
-        eyebrow="Loading",
-    )
-    running = False
-    running = bulk_build_indexes(
-        state,
-        source_specs,
-        job_attr="source_index_job",
-        button_label="Build source indexes",
-        auto_start=True,
-    ) or running
-    running = bulk_build_indexes(
-        state,
-        _destination_specs(state.dest.connection),
-        job_attr="dest_index_job",
-        button_label="Build destination indexes",
-        auto_start=True,
-    ) or running
-    if report_specs:
-        running = bulk_build_indexes(
-            state,
-            report_specs,
-            job_attr="report_index_job",
-            button_label="Build report index",
-            auto_start=True,
-        ) or running
-    running_required_now = (
-        state.source_index_job is not None or state.dest_index_job is not None
-    )
-    if running_required_now:
-        st.caption(
-            "Required index jobs are running. Selection controls appear after "
-            "required indexes finish."
-        )
-    else:
-        theme.banner(
-            "warning",
-            "Required index jobs have not started yet",
-            "Auto-start can lag on the first render. Use the Build buttons "
-            "above to start source and destination indexes now.",
-        )
-    if running:
-        st.rerun()
-    return True
+    if "time_calculations" in chosen:
+        if show_cf or show_reports or "dashboards" in chosen:
+            st.divider()
+        _render_time_calculations(state)
+
+    if "calculated_fields" not in chosen:
+        state.selected_field_wids = set()
+    if "reports" not in chosen:
+        state.selected_reports = {}
+        state.selected_reports_added = {}
+    if "dashboards" not in chosen:
+        state.selected_dashboards = {}
+        state.selected_dashboards_added = {}
+    if "time_calculations" not in chosen:
+        state.selected_time_calculation_wids = set()
 
 
 def render(state: WizardState) -> None:
@@ -675,7 +642,7 @@ def render(state: WizardState) -> None:
     if state.package is not None:
         _render_package_summary(state)
         st.divider()
-        if _render_destination_matching(state):
+        if _render_destination_matching(state, auto_start=False):
             st.rerun()
         return
     connection = state.source.connection
@@ -683,25 +650,18 @@ def render(state: WizardState) -> None:
         theme.banner("danger", "Source is not connected", remedy="Go back to Connect.")
         return
 
-    # Pull the current choice from session state so the bootstrap screen can
-    # build the same indexes this run will need before the multiselect renders.
-    chosen = st.session_state.get("object_kinds", ["reports"])
-    specs = _source_specs(chosen, connection)
-    report_specs = _report_specs(connection) if "reports" in chosen else []
-    if _render_select_bootstrap_loading(
-        state, source_specs=specs, report_specs=report_specs
-    ):
+    chosen = list(state.object_kinds)
+    if not chosen:
+        theme.banner(
+            "warning",
+            "No object types chosen",
+            "Indexes are not built until Scope has a type ticked, so a "
+            "dashboard run is not turned into a report sweep by default.",
+            remedy="Go back to Scope and tick at least one object type.",
+        )
         return
 
-    theme.section("Object kinds", eyebrow="Start here")
-    chosen = st.multiselect(
-        "Object kinds",
-        options=list(_OBJECT_KINDS),
-        default=chosen,
-        format_func=lambda key: _OBJECT_KINDS[key],
-        key="object_kinds",
-        label_visibility="collapsed",
-    )
+    st.caption(_scope_caption(chosen))
 
     specs = _source_specs(chosen, connection)
     report_specs = _report_specs(connection) if "reports" in chosen else []
@@ -723,36 +683,31 @@ def render(state: WizardState) -> None:
             button_label="Build report index",
             auto_start=True,
         ) or running
-    running = _render_destination_matching(state) or running
-    if running:
-        st.rerun()
+    running = _render_destination_matching(state, auto_start=True) or running
 
     st.divider()
-    if "dashboards" in chosen:
-        _render_dashboards(state)
-        st.divider()
-
-    col1, col2 = st.columns(2)
-    with col1:
-        _render_calculated_fields(state)
-    with col2:
-        if "reports" in chosen:
-            _render_reports(state)
-    if "reports" not in chosen:
-        state.selected_reports = {}
-    if "dashboards" not in chosen:
-        state.selected_dashboards = {}
-    if "time_calculations" in chosen:
-        st.divider()
-        _render_time_calculations(state)
-    else:
-        state.selected_time_calculation_wids = set()
+    # Pickers render while indexes are still sweeping: the dashboard catalog
+    # is the first source stage, so it can be selected before the calculated
+    # field sweep (~25s) finishes. Continue stays gated on the rest.
+    _render_pickers(state, chosen)
+    if running:
+        st.rerun()
 
 
 def gate(state: WizardState) -> list[Blocker]:
     blockers = []
     # Package is the source: selection is baked in, indexes are irrelevant.
     if state.package is not None:
+        return blockers
+    if not state.object_kinds:
+        blockers.append(
+            Blocker(
+                node_id=None,
+                title="No object types chosen",
+                detail="Scope has to name the types before this step can pick objects.",
+                remedy="Go back to Scope and tick at least one object type.",
+            )
+        )
         return blockers
     if not (
         state.selected_field_wids
