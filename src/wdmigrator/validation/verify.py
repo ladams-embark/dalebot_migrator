@@ -37,8 +37,8 @@ from typing import Iterator
 
 from wdmigrator.auth.client import Connection
 from wdmigrator.discovery.inventory import (
-    DASHBOARD_FLAVOURS,
     LookupOutcome,
+    dashboard_flavour_from_payload,
     dashboard_has_worklets,
     ids_of,
     lookup_analytic_indicator,
@@ -267,11 +267,20 @@ def _fetch_destination(connection: Connection, node: Node, dest_wid: str | None)
     if kind is NodeKind.REPORT:
         return lookup_report(connection, wid=dest_wid) if dest_wid else None
     if kind in DASHBOARD_TABBED_BY_KIND:
-        tabbed = DASHBOARD_TABBED_BY_KIND[kind]
+        spec = dashboard_flavour_from_payload(node.payload)
+        tabbed = spec["tabbed"] if spec else DASHBOARD_TABBED_BY_KIND[kind]
+        delivered = bool(spec and spec["delivered"])
         if dest_wid:
-            return lookup_dashboard(connection, tabbed=tabbed, wid=dest_wid)
+            return lookup_dashboard(
+                connection, tabbed=tabbed, wid=dest_wid, delivered=delivered
+            )
         if node.reference_id:
-            return lookup_dashboard(connection, tabbed=tabbed, reference_id=node.reference_id)
+            return lookup_dashboard(
+                connection,
+                tabbed=tabbed,
+                reference_id=node.reference_id,
+                delivered=delivered,
+            )
         return None
     if kind is NodeKind.PROMPT_SET:
         return lookup_prompt_set(connection, wid=dest_wid) if dest_wid else (

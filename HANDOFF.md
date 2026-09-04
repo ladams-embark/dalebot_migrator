@@ -1,8 +1,34 @@
 # Handoff — Dale Bot / Workday Migration Tool
 
-_Last updated: 2026-09-04 (scope-before-indexes)_
+_Last updated: 2026-09-04 (delivered-dashboards)_
 
-## Done this session (2026-09-04) — object types before indexes
+## Done this session (2026-09-04) — Workday-delivered dashboard Get/Put
+
+Custom dashboards already migrated. The same Core_Implementation_Service
+exposes Workday-owned analogues:
+
+- `Get/Put_Workday_Delivered_Dashboards_without_Tabs` (`Landing_Page_ID`)
+- `Get/Put_Workday_Delivered_Dashboards_with_Tabs` (`Landing_Page_Group_ID`)
+
+**Live Get (implementer, `commitconsulting_dpt1`, 2026-09-04):** 52 custom
+untabbed, 111 custom tabbed, **16 delivered untabbed, 88 delivered tabbed**.
+A non-implementer ISU fails all four Gets the same way ("task submitted is
+not authorized"). Delivered data has no `Name` and `Descriptor` is empty;
+the picker label is the business ID (`HOME`, `FINANCIAL_MANAGEMENT_OVERVIEW`).
+
+**Put is update-only.** The WSDL takes only the data block; the reference
+inside it is required. No `Add_Only`. Planner: FOUND → UPDATE
+(`prefer_update`); NOT_FOUND → UNKNOWN (never CREATE). Nested
+`Landing_Page_ID` references stay passthrough — only a *selected* delivered
+dashboard becomes a node.
+
+No destination Put was sent. Dry-run serialization is the offline check.
+
+---
+
+_Previously: 2026-09-04 (scope-before-indexes)_
+
+## Done previous session (2026-09-04) — object types before indexes
 
 Dashboard migration in the wizard broke after the Select bootstrap loading
 screen (PRs #12–#13). Connect auto-advanced into an index sweep that defaulted

@@ -112,6 +112,8 @@ DASHBOARD_FLAVOURS = {
         "reference": "Custom_Dashboard_without_Tabs_Reference",
         "data": "Custom_Dashboard_without_Tabs_Data",
         "id_type": "Custom_Landing_Page_ID",
+        "tabbed": False,
+        "delivered": False,
     },
     True: {
         "get": "Get_Custom_Dashboards_with_Tabs",
@@ -120,8 +122,74 @@ DASHBOARD_FLAVOURS = {
         "reference": "Custom_Dashboard_with_Tabs_Reference",
         "data": "Custom_Dashboard_with_Tabs_Data",
         "id_type": "Custom_Landing_Page_Group_ID",
+        "tabbed": True,
+        "delivered": False,
     },
 }
+
+#: Workday-owned analogues of :data:`DASHBOARD_FLAVOURS`. Confirmed in the
+#: bundled WSDL (Core_Implementation_Service): the Get/Put pair is
+#: ``Get_Workday_Delivered_Dashboards_{with,without}_Tabs`` /
+#: ``Put_Workday_Delivered_Dashboard_{with,without}_Tabs``.
+#:
+#: These are not creatable. Put takes only a data block whose first child is
+#: a required reference (``Landing_Page_ID`` / ``Landing_Page_Group_ID`` or
+#: WID) — there is no ``Add_Only``, no ``Name``, and no top-level reference
+#: sibling. A Put therefore updates the tenant's copy of a Workday-owned
+#: dashboard (worklets, tabs, announcements) rather than inserting a new one.
+DELIVERED_DASHBOARD_FLAVOURS = {
+    False: {
+        "get": "Get_Workday_Delivered_Dashboards_without_Tabs",
+        "put": "Put_Workday_Delivered_Dashboard_without_Tabs",
+        "collection": "Workday_Delivered_Dashboard_without_Tabs",
+        "reference": "Workday_Delivered_Dashboard_without_Tabs_Reference",
+        "data": "Workday_Delivered_Dashboard_without_Tabs_Data",
+        "id_type": "Landing_Page_ID",
+        "tabbed": False,
+        "delivered": True,
+    },
+    True: {
+        "get": "Get_Workday_Delivered_Dashboards_with_Tabs",
+        "put": "Put_Workday_Delivered_Dashboard_with_Tabs",
+        "collection": "Workday_Delivered_Dashboard_with_Tabs",
+        "reference": "Workday_Delivered_Dashboard_with_Tabs_Reference",
+        "data": "Workday_Delivered_Dashboard_with_Tabs_Data",
+        "id_type": "Landing_Page_Group_ID",
+        "tabbed": True,
+        "delivered": True,
+    },
+}
+
+#: Custom first, then delivered; untabbed then tabbed within each. The sweep
+#: walks this so a dashboard-scoped Select builds one index covering all four
+#: operations.
+ALL_DASHBOARD_FLAVOURS = (
+    DASHBOARD_FLAVOURS[False],
+    DASHBOARD_FLAVOURS[True],
+    DELIVERED_DASHBOARD_FLAVOURS[False],
+    DELIVERED_DASHBOARD_FLAVOURS[True],
+)
+
+
+def dashboard_flavour(*, tabbed: bool, delivered: bool = False) -> dict:
+    """The Get/Put spec for one dashboard flavour."""
+    table = DELIVERED_DASHBOARD_FLAVOURS if delivered else DASHBOARD_FLAVOURS
+    return table[bool(tabbed)]
+
+
+def dashboard_flavour_from_payload(payload: Mapping | None) -> dict | None:
+    """Which flavour a Get item (or selected payload) belongs to.
+
+    Derived from the payload's own reference/data keys so a caller cannot
+    send a delivered dashboard to ``Put_Custom_Dashboard_*`` by guessing
+    ``tabbed`` alone.
+    """
+    if not payload:
+        return None
+    for spec in ALL_DASHBOARD_FLAVOURS:
+        if spec["reference"] in payload or spec["data"] in payload:
+            return spec
+    return None
 
 #: The fault a non-implementer account gets from every dashboard operation.
 #: Distinct from the `Report_Metadata` entitlement failure ("the web service or
@@ -135,10 +203,10 @@ IMPLEMENTER_REQUIRED_FRAGMENT = "task submitted is not authorized"
 #: commitconsulting_dpt1: the same ISU reads 9,716 fields and 5,197 reports
 #: fine, and fails all five dashboard-side operations).
 IMPLEMENTER_REQUIRED_REMEDY = (
-    "Custom dashboards require an implementer account. A normal Integration "
-    "System User cannot read or write them no matter which domains it is "
-    "granted — connect with an implementer account on both tenants, or migrate "
-    "reports and calculated fields only."
+    "Dashboards (custom and Workday-delivered) require an implementer account. "
+    "A normal Integration System User cannot read or write them no matter "
+    "which domains it is granted — connect with an implementer account on "
+    "both tenants, or migrate reports and calculated fields only."
 )
 
 
@@ -195,6 +263,10 @@ class DashboardSummary:
     #: guessing wrong sends a write to the wrong operation.
     tabbed: bool = False
     worklet_count: int = 0
+    #: True for ``Get/Put_Workday_Delivered_Dashboard_*``. Those objects are
+    #: Workday-owned: Put updates the destination's existing copy and cannot
+    #: create a new one.
+    delivered: bool = False
 
 
 @dataclass(frozen=True)
@@ -671,27 +743,29 @@ def lookup_dashboard(
     tabbed: bool,
     reference_id: str | None = None,
     wid: str | None = None,
+    delivered: bool = False,
 ) -> LookupResult:
-    """Fetch one custom dashboard by its business ID or WID.
+    """Fetch one dashboard by its business ID or WID.
 
-    ``tabbed`` picks the operation, and it is required rather than inferred:
-    ``Custom_Landing_Page_ID`` and ``Custom_Landing_Page_Group_ID`` are separate
-    ID spaces addressed by separate operations, and asking the wrong one returns
-    a clean "not found" that would be read as "safe to create".
+    ``tabbed`` and ``delivered`` pick the operation, and they are required
+    rather than inferred: custom vs Workday-owned and tabbed vs untabbed are
+    four disjoint ID spaces, and asking the wrong operation returns a clean
+    "not found" that would be read as "safe to create" for a custom dashboard
+    — or, for a delivered one, as "missing" when the object cannot be created.
 
     Unlike reports, the business ID **works as a lookup key** — confirmed live
     2026-08-07 on `commitconsulting_dpt1`, fetching
     ``Custom_Landing_Page_Group_ID = 'Commit - Optimize Reporting Dashboard'``
-    resolved the same dashboard as its WID. So dashboards get real cross-tenant
-    identity, and none of the name-matching compromise
-    :func:`lookup_report_by_name` is forced into.
+    resolved the same dashboard as its WID. Delivered dashboards use
+    ``Landing_Page_ID`` / ``Landing_Page_Group_ID`` the same way (WSDL
+    enumerations on ``Landing_Page__Workday_Owned_*``).
 
     Requires an implementer account; see :data:`IMPLEMENTER_REQUIRED_REMEDY`.
     """
     if bool(reference_id) == bool(wid):
         raise ValueError("Pass exactly one of reference_id or wid.")
 
-    spec = DASHBOARD_FLAVOURS[bool(tabbed)]
+    spec = dashboard_flavour(tabbed=tabbed, delivered=delivered)
     ref = (
         _reference(spec["id_type"], reference_id)
         if reference_id
@@ -1383,8 +1457,7 @@ def iter_report_index(
     )
 
 
-def _dashboard_summary(item: dict, *, tabbed: bool) -> DashboardSummary | None:
-    spec = DASHBOARD_FLAVOURS[tabbed]
+def _dashboard_summary(item: dict, spec: Mapping) -> DashboardSummary | None:
     ids = ids_of(item.get(spec["reference"]))
     wid = ids.get("WID")
     if not wid:
@@ -1393,12 +1466,20 @@ def _dashboard_summary(item: dict, *, tabbed: bool) -> DashboardSummary | None:
     worklets = data.get("Worklets_Data") or data.get("Content_Data") or []
     if isinstance(worklets, dict):
         worklets = [worklets]
+    # Delivered data has Description but no Name. Confirmed live 2026-09-04
+    # on commitconsulting_dpt1 (16 untabbed + 88 tabbed): Descriptor is
+    # always empty too, so the picker label is the business ID
+    # (``Landing_Page_ID`` / ``Landing_Page_Group_ID``), e.g. HOME.
+    reference = item.get(spec["reference"]) or {}
+    reference_id = ids.get(spec["id_type"])
+    name = data.get("Name") or reference.get("Descriptor") or reference_id
     return DashboardSummary(
         wid=wid,
-        reference_id=ids.get(spec["id_type"]),
-        name=data.get("Name"),
-        tabbed=tabbed,
+        reference_id=reference_id,
+        name=name,
+        tabbed=bool(spec["tabbed"]),
         worklet_count=len(worklets),
+        delivered=bool(spec["delivered"]),
     )
 
 
@@ -1536,27 +1617,30 @@ def _prompt_set_summary(item: dict) -> PromptSetSummary | None:
 def iter_dashboard_index(
     connection: Connection, *, page_size: int = PAGE_SIZE
 ) -> Iterator[IndexProgress]:
-    """Sweep every custom dashboard, both flavours, into one index.
+    """Sweep every dashboard — custom and Workday-delivered, both flavours.
 
-    Both operations are swept because nothing identifies a dashboard's flavour
-    ahead of time, and the two ID spaces are disjoint. Cheap enough that this is
-    not a compromise: measured live on `commitconsulting_dpt1`, 52 untabbed and
-    127 tabbed dashboards, **one page each**, and the sweep carries full data
-    with only ``Include_Reference`` set — there is no ``Include_..._Data`` flag
-    on either Response_Group, and none is needed.
+    Four operations because nothing identifies a dashboard's flavour ahead of
+    time, and the four ID spaces are disjoint. Cheap enough that this is not
+    a compromise: custom dashboards were measured live on
+    `commitconsulting_dpt1` at 52 untabbed + 111 tabbed, **one page each**.
+    Delivered Get (same tenant, implementer account, 2026-09-04) returned
+    16 untabbed + 88 tabbed. The sweep carries full data with only
+    ``Include_Reference`` set — there is no ``Include_..._Data`` flag on
+    any of the four Response_Groups.
 
     Requires an implementer account. A non-implementer gets "The task submitted
-    is not authorized" from both operations; see :data:`IMPLEMENTER_REQUIRED_REMEDY`.
+    is not authorized"; see :data:`IMPLEMENTER_REQUIRED_REMEDY`. Confirmed live
+    2026-09-04: the same ISU reads calculated fields and fails all four
+    dashboard Gets; ``wd-implementer`` reads all four.
     """
     started = time.monotonic()
     index = Index(kind="dashboard", tenant=connection.target.tenant, fetched_at=time.time())
 
     # Totals are only known after the first call of each flavour, so the
     # progress fraction is against the running sum rather than a figure known
-    # up front. Both are single-page in practice.
+    # up front. Each flavour is a single page in practice.
     grand_total = 0
-    for position, tabbed in enumerate(sorted(DASHBOARD_FLAVOURS)):
-        spec = DASHBOARD_FLAVOURS[tabbed]
+    for position, spec in enumerate(ALL_DASHBOARD_FLAVOURS):
         page = 1
         while True:
             connection.limiter.wait()
@@ -1571,13 +1655,13 @@ def iter_dashboard_index(
                 grand_total += int(results.get("Total_Results") or 0)
 
             for item in (data.get("Response_Data") or {}).get(spec["collection"]) or []:
-                summary = _dashboard_summary(item, tabbed=tabbed)
+                summary = _dashboard_summary(item, spec)
                 if summary is None:
                     continue
                 index.summaries[summary.wid] = summary
                 index.payloads[summary.wid] = item
 
-            last_flavour = position == len(DASHBOARD_FLAVOURS) - 1
+            last_flavour = position == len(ALL_DASHBOARD_FLAVOURS) - 1
             final = page >= total_pages and last_flavour
             yield IndexProgress(
                 page=page,

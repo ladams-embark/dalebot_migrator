@@ -44,7 +44,12 @@ from zeep.exceptions import Fault
 from zeep.helpers import serialize_object
 
 from wdmigrator.auth.client import Connection, Role
-from wdmigrator.discovery.inventory import DASHBOARD_FLAVOURS, ids_of
+from wdmigrator.discovery.inventory import (
+    DASHBOARD_FLAVOURS,
+    dashboard_flavour,
+    dashboard_flavour_from_payload,
+    ids_of,
+)
 from wdmigrator.migrate.ordering import substitute_reference_ids, substitute_wids
 from wdmigrator.migrate.planner import (
     Action,
@@ -1193,10 +1198,11 @@ def build_dashboard_payload(
     dest_wid: str | None = None,
     reference_decisions: Mapping[str, ReferenceDecision] | None = None,
 ) -> dict:
-    """Arguments for ``Put_Custom_Dashboard_with_Tabs`` / ``_without_Tabs``.
+    """Arguments for the custom or Workday-delivered dashboard Put.
 
-    Which of the two is decided by ``node.kind``; the flavours have separate
-    data blocks, reference keys and ID spaces, and are never interchangeable.
+    Flavour is taken from the payload's own keys (custom vs delivered,
+    tabbed vs untabbed). The four operations have separate data blocks,
+    reference keys and ID spaces, and are never interchangeable.
 
     Three things are stripped, all for the same underlying reason — they name
     tenant *data* rather than configuration, and no amount of dependency
@@ -1213,7 +1219,7 @@ def build_dashboard_payload(
     the normal ``Invalid ID value`` path into the reference-decision table.
     """
     tabbed = DASHBOARD_TABBED_BY_KIND[node.kind]
-    spec = DASHBOARD_FLAVOURS[tabbed]
+    spec = dashboard_flavour_from_payload(node.payload) or dashboard_flavour(tabbed=tabbed)
 
     data = node.payload.get(spec["data"])
     if not data:
@@ -1231,6 +1237,34 @@ def build_dashboard_payload(
         remapped.pop(key, None)
     if action is Action.CREATE:
         _strip_self_references(remapped, node.source_wid)
+
+    if spec["delivered"]:
+        # Put_Workday_Delivered_Dashboard_* takes only the data block. The
+        # reference inside it is required (minOccurs=1) and names the
+        # Workday-owned dashboard being updated. There is no Add_Only and no
+        # top-level reference sibling — creating one is not a legal payload.
+        if action is Action.CREATE:
+            raise WriteError(
+                f"Workday-delivered dashboard {node.name!r} cannot be created; "
+                "Put updates the destination's existing copy. Probe it as "
+                "FOUND or SKIP it."
+            )
+        dest_ref = (
+            {"ID": [{"type": "WID", "_value_1": dest_wid}]}
+            if dest_wid
+            else (
+                {"ID": [{"type": spec["id_type"], "_value_1": node.reference_id}]}
+                if node.reference_id
+                else None
+            )
+        )
+        if dest_ref is None:
+            raise WriteError(
+                f"Cannot UPDATE Workday-delivered dashboard {node.name!r} "
+                "without the destination WID or a Landing_Page ID."
+            )
+        remapped[spec["reference"]] = dest_ref
+        return {spec["data"]: remapped}
 
     payload: dict = {spec["data"]: remapped}
 
@@ -1464,6 +1498,10 @@ _OPERATIONS = {
 
 
 def operation_for(node: Node) -> str:
+    if node.kind in DASHBOARD_TABBED_BY_KIND:
+        spec = dashboard_flavour_from_payload(node.payload)
+        if spec is not None:
+            return spec["put"]
     return _OPERATIONS[node.kind]
 
 
@@ -1828,7 +1866,12 @@ def is_dashboard_worklet(node: Node) -> bool:
 
 
 def _reference_wid(response: dict, node: Node) -> str | None:
-    return ids_of(response.get(_RESPONSE_REFERENCE_KEY[node.kind])).get("WID")
+    if node.kind in DASHBOARD_TABBED_BY_KIND:
+        spec = dashboard_flavour_from_payload(node.payload)
+        key = spec["reference"] if spec else _RESPONSE_REFERENCE_KEY[node.kind]
+    else:
+        key = _RESPONSE_REFERENCE_KEY[node.kind]
+    return ids_of(response.get(key)).get("WID")
 
 
 def _is_transport_failure(exc: Exception) -> bool:
@@ -2148,8 +2191,13 @@ def write_node(
     # several SOAP calls while staying a single record.
     deferred = _defer_summary_calculations(payload) if node.kind is NodeKind.REPORT else None
     deferred_worklets = (
-        _defer_dashboard_worklets(payload, DASHBOARD_FLAVOURS[
-            DASHBOARD_TABBED_BY_KIND[node.kind]]["data"])
+        _defer_dashboard_worklets(
+            payload,
+            (
+                dashboard_flavour_from_payload(node.payload)
+                or dashboard_flavour(tabbed=DASHBOARD_TABBED_BY_KIND[node.kind])
+            )["data"],
+        )
         if node.kind in DASHBOARD_TABBED_BY_KIND
         else None
     )

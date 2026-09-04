@@ -107,7 +107,7 @@ def test_scope_step_does_not_build_indexes():
     assert "Scope" in [h.value for h in at.header]
     assert not [b for b in at.button if b.key and "index" in b.key]
     assert [c for c in at.checkbox if c.key == "scope_dashboards"], (
-        "Custom dashboards must be choosable before indexes are built"
+        "Dashboards must be choosable before indexes are built"
     )
     next_buttons = [b for b in at.button if b.key == "nav_next"]
     assert next_buttons
@@ -136,7 +136,7 @@ def test_scope_ticking_dashboards_unlocks_continue_and_select_shows_the_picker()
     assert "Select" in [h.value for h in at.header]
     rendered = " ".join(str(w.value) for w in at.markdown)
     assert "Dashboard index" in rendered
-    assert "Custom dashboards" in rendered
+    assert "Dashboards" in rendered
     assert "Preparing indexes" not in rendered
 
 
@@ -151,7 +151,7 @@ def test_choosing_dashboards_renders_the_dashboard_section():
     )
     rendered = " ".join(str(w.value) for w in at.markdown)
     assert "Dashboard index" in rendered
-    assert "Custom dashboards" in rendered
+    assert "Dashboards" in rendered
 
 
 def test_reports_only_select_does_not_show_the_dashboard_picker():
@@ -159,7 +159,7 @@ def test_reports_only_select_does_not_show_the_dashboard_picker():
     assert not at.exception
     rendered = " ".join(str(w.value) for w in at.markdown)
     assert "Dashboard index" not in rendered
-    assert "Custom dashboards" not in rendered
+    assert "Workday-delivered" not in rendered
 
 
 def test_the_implementer_requirement_is_explained_rather_than_shown_as_an_error():
@@ -240,6 +240,58 @@ def test_a_selected_dashboard_unlocks_continue_to_plan():
     assert "Commit - HR Dashboard" in rendered
     next_buttons = [b for b in at.button if b.key == "nav_next"]
     assert next_buttons and not next_buttons[0].disabled
+
+
+def test_dashboard_picker_labels_workday_delivered_origin():
+    """The catalog mixes custom and Workday-owned pages; origin must be visible."""
+    import time
+
+    from wdmigrator.api import DashboardSummary, Index
+
+    summaries = {
+        "D0": DashboardSummary(
+            wid="D0",
+            reference_id="My Custom",
+            name="My Custom",
+            tabbed=True,
+            worklet_count=1,
+            delivered=False,
+        ),
+        "D1": DashboardSummary(
+            wid="D1",
+            reference_id="HOME",
+            name="HOME",
+            tabbed=False,
+            worklet_count=3,
+            delivered=True,
+        ),
+    }
+    payloads = {"D0": {"name": "My Custom"}, "D1": {"name": "HOME"}}
+    index = Index(
+        kind="dashboard",
+        tenant="stub_tenant",
+        fetched_at=time.time(),
+        summaries=summaries,
+        payloads=payloads,
+    )
+    at = _select_step_app(
+        object_kinds=["dashboards"],
+        dashboard_index=index,
+        prompt_set_index=_empty_index("prompt_set"),
+        prompt_field_index=_empty_index("prompt_field"),
+        gauge_range_index=_empty_index("gauge_range"),
+        analytic_indicator_index=_empty_index("analytic_indicator"),
+        cf_index=_empty_index("calculated_field"),
+    )
+    assert not at.exception
+    frames = at.dataframe
+    assert frames, "dashboard picker table is missing"
+    table = frames[0].value
+    origins = set(table["origin"].tolist()) if "origin" in table.columns else set()
+    assert "Workday-delivered" in origins
+    assert "custom" in origins
+    names = set(table["name"].tolist()) if "name" in table.columns else set()
+    assert "HOME" in names
 
 
 class TestConflictsRefusesToProbeUnmatched:

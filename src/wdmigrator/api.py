@@ -72,7 +72,9 @@ from wdmigrator.auth import (
 
 # ── Discovery: indexing and targeted lookups ────────────────────────────────
 from wdmigrator.discovery import (
+    ALL_DASHBOARD_FLAVOURS,
     DASHBOARD_FLAVOURS,
+    DELIVERED_DASHBOARD_FLAVOURS,
     IMPLEMENTER_REQUIRED_REMEDY,
     PAGE_SIZE,
     CalculatedFieldSummary,
@@ -100,6 +102,8 @@ from wdmigrator.discovery import (
     calculated_measure_shape,
     calculated_field_match_index,
     classify_fault,
+    dashboard_flavour,
+    dashboard_flavour_from_payload,
     find_report_by_exact_name,
     ids_of,
     iter_calculated_field_index,
@@ -276,7 +280,9 @@ __all__ = [
     "discover_services_host",
     "iter_discover_services_host",
     # discovery
+    "ALL_DASHBOARD_FLAVOURS",
     "DASHBOARD_FLAVOURS",
+    "DELIVERED_DASHBOARD_FLAVOURS",
     "IMPLEMENTER_REQUIRED_REMEDY",
     "PAGE_SIZE",
     "CalculatedFieldSummary",
@@ -304,6 +310,8 @@ __all__ = [
     "calculated_measure_shape",
     "calculated_field_match_index",
     "classify_fault",
+    "dashboard_flavour",
+    "dashboard_flavour_from_payload",
     "find_report_by_exact_name",
     "ids_of",
     "iter_calculated_field_index",

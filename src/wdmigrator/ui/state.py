@@ -54,7 +54,7 @@ STEP_TITLES = {
 OBJECT_KINDS = {
     "reports": "Reports",
     "calculated_fields": "Calculated fields",
-    "dashboards": "Custom dashboards",
+    "dashboards": "Dashboards",
     "time_calculations": "Time calculations",
 }
 

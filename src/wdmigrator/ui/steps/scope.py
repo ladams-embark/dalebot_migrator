@@ -30,9 +30,11 @@ _KIND_HELP = {
         "field itself is what you want to migrate, not just a report dependency."
     ),
     "dashboards": (
-        "Needs an implementer account. Worklet reports, prompt sets, prompt "
-        "fields and calculated fields they use come along automatically — you "
-        "do not need to tick those types just to migrate a dashboard."
+        "Needs an implementer account. Includes custom dashboards and "
+        "Workday-delivered ones (Home, and so on). Worklet reports, prompt "
+        "sets, prompt fields and calculated fields they use come along "
+        "automatically — you do not need to tick those types just to "
+        "migrate a dashboard."
     ),
     "time_calculations": (
         "Time Tracking Implementation Service. Tags and groups they use come "
@@ -94,6 +96,6 @@ def gate(state: WizardState) -> list[Blocker]:
                 "until you continue — that is how a dashboard run gets a "
                 "dashboard catalog instead of a report sweep."
             ),
-            remedy="Tick Custom dashboards, Reports, Calculated fields, or Time calculations.",
+            remedy="Tick Dashboards, Reports, Calculated fields, or Time calculations.",
         )
     ]
