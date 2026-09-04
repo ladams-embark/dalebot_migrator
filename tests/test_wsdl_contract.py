@@ -7,6 +7,8 @@ needs review.
 
 import pytest
 
+from wdmigrator.discovery.inventory import ALL_DASHBOARD_FLAVOURS
+
 EXPECTED_OPERATIONS = (
     "Get_Calculated_Fields",
     "Put_Calculated_Field",
@@ -29,6 +31,17 @@ def test_operation_exists(offline_client, operation):
     """Operation names are confirmed from the WSDL, never invented."""
     assert hasattr(offline_client.service, operation), (
         f"{operation} not found in WSDL — docs/WSDL_NOTES.md is out of date"
+    )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [spec[op] for spec in ALL_DASHBOARD_FLAVOURS for op in ("get", "put")],
+)
+def test_dashboard_operations_exist(offline_client, operation):
+    """Custom and Workday-delivered Get/Put pairs, both flavours."""
+    assert hasattr(offline_client.service, operation), (
+        f"{operation} not found in WSDL — dashboard flavour table is out of date"
     )
 
 

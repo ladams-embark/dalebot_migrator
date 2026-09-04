@@ -200,6 +200,13 @@ class TestDefaultActions:
         shell = Existence("dashboard:D1", LookupOutcome.FOUND, "W1", is_shell=True)
         assert default_action(shell) is Action.UPDATE
 
+    def test_prefer_update_defaults_to_update(self):
+        """Workday-delivered dashboards already exist and cannot be created."""
+        found = Existence(
+            "dashboard:DDB1", LookupOutcome.FOUND, "W1", prefer_update=True
+        )
+        assert default_action(found) is Action.UPDATE
+
 
 class TestShellDashboardDetection:
     """A dashboard that failed mid-write leaves admin config in place but no
@@ -280,6 +287,79 @@ class TestShellDashboardDetection:
         }
         existence = probe_node(self._dest(item), node)
         assert existence.is_shell is True
+
+
+class TestDeliveredDashboardProbe:
+    """Workday-owned dashboards cannot be created. FOUND must UPDATE;
+    a miss is UNKNOWN rather than CREATE."""
+
+    def _node(self):
+        return Node(
+            node_id="dashboard:DDB1",
+            kind=NodeKind.DASHBOARD,
+            source_wid="DDB1",
+            reference_id="HOME",
+            name="HOME",
+            payload={
+                "Workday_Delivered_Dashboard_without_Tabs_Reference": {
+                    "ID": [
+                        {"type": "WID", "_value_1": "DDB1"},
+                        {"type": "Landing_Page_ID", "_value_1": "HOME"},
+                    ]
+                },
+                "Workday_Delivered_Dashboard_without_Tabs_Data": {
+                    "Worklets_Data": [{"Worklet_Reference": "..."}]
+                },
+            },
+        )
+
+    def test_found_prefers_update(self):
+        dest = FakeDestination()
+
+        def _get(**kwargs):
+            return {
+                "Response_Data": {
+                    "Workday_Delivered_Dashboard_without_Tabs": [
+                        {
+                            "Workday_Delivered_Dashboard_without_Tabs_Reference": {
+                                "ID": [
+                                    {"type": "WID", "_value_1": "DEST_DDB1"},
+                                    {"type": "Landing_Page_ID", "_value_1": "HOME"},
+                                ]
+                            },
+                            "Workday_Delivered_Dashboard_without_Tabs_Data": {
+                                "Worklets_Data": [{"Worklet_Reference": "..."}]
+                            },
+                        }
+                    ]
+                }
+            }
+
+        dest.service = SimpleNamespace(
+            Get_Workday_Delivered_Dashboards_without_Tabs=_get
+        )
+        existence = probe_node(dest, self._node())
+        assert existence.state is LookupOutcome.FOUND
+        assert existence.prefer_update is True
+        assert existence.dest_wid == "DEST_DDB1"
+        assert default_action(existence) is Action.UPDATE
+
+    def test_not_found_is_unknown_not_create(self):
+        dest = FakeDestination()
+
+        def _get(**kwargs):
+            raise Exception(
+                "Validation error occurred. Invalid ID value.  'HOME' is not a "
+                "valid ID value for type = 'Landing_Page_ID'"
+            )
+
+        dest.service = SimpleNamespace(
+            Get_Workday_Delivered_Dashboards_without_Tabs=_get
+        )
+        existence = probe_node(dest, self._node())
+        assert existence.state is LookupOutcome.UNKNOWN
+        assert "cannot be created" in (existence.fault or "")
+        assert default_action(existence) is Action.SKIP
 
 
 class TestProbing:

@@ -381,8 +381,10 @@ def _render_reports(state: WizardState) -> None:
 
 def _render_dashboards(state: WizardState) -> None:
     theme.section(
-        "Custom dashboards",
-        "Picking one pulls in its worklet reports and prompt sets. Needs an implementer account.",
+        "Dashboards",
+        "Custom and Workday-delivered. Picking one pulls in its worklet "
+        "reports and prompt sets. Needs an implementer account. "
+        "Workday-delivered pages are updated in place — they cannot be created.",
         eyebrow="Implementer account",
     )
 
@@ -393,7 +395,7 @@ def _render_dashboards(state: WizardState) -> None:
     if state.implementer_required:
         theme.banner(
             "warning",
-            "This account cannot read custom dashboards",
+            "This account cannot read dashboards",
             IMPLEMENTER_REQUIRED_REMEDY,
             remedy="Reports and calculated fields are unaffected — you can migrate "
                    "those with this connection.",
@@ -404,8 +406,9 @@ def _render_dashboards(state: WizardState) -> None:
         theme.banner(
             "neutral",
             "Index not built",
-            "The dashboard index is sweeping in the background. Both flavours "
-            "are swept — tabbed and untabbed are separate object types.",
+            "The dashboard index is sweeping in the background. All four "
+            "flavours are swept — custom and Workday-delivered, tabbed and "
+            "untabbed.",
         )
         return
 
@@ -414,6 +417,9 @@ def _render_dashboards(state: WizardState) -> None:
             {
                 "wid": wid,
                 "name": s.name,
+                "origin": (
+                    "Workday-delivered" if getattr(s, "delivered", False) else "custom"
+                ),
                 "layout": "tabbed" if s.tabbed else "single page",
                 "items": s.worklet_count,
             }

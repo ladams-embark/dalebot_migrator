@@ -37,6 +37,7 @@ from wdmigrator.discovery.inventory import (
     calculated_field_data,
     calculated_field_shape,
     calculated_measure_shape,
+    dashboard_flavour_from_payload,
     dashboard_has_worklets,
     lookup_calculated_field,
     lookup_calculated_measure,
@@ -91,6 +92,12 @@ class Existence:
     #: where UPDATE is empirically safe (confirmed live 2026-08-13 —
     #: HANDOFF.md).
     is_shell: bool = False
+    #: True when the destination already holds this object and the write is
+    #: meant to copy source configuration onto it. Used for Workday-delivered
+    #: dashboards: they exist in every tenant (FOUND), cannot be created, and
+    #: Put is an update of worklets/tabs — SKIP would make the Get/Put pair
+    #: a no-op.
+    prefer_update: bool = False
 
     @property
     def exists(self) -> bool:
@@ -256,15 +263,18 @@ def default_action(existence: Existence) -> Action:
     EXISTS defaults to SKIP rather than UPDATE: overwriting destination config
     is the destructive direction, and replace-vs-merge semantics are unverified.
 
-    The one exception is a shell dashboard — a dashboard that failed mid-write
-    and left its admin config in place but every tab empty. It probes as FOUND
-    and would otherwise SKIP forever, so every subsequent run silently leaves
-    it broken. UPDATE has been verified live for exactly this case (HANDOFF.md,
-    2026-08-13), so a shell routes to UPDATE.
+    Exceptions that route FOUND to UPDATE instead of SKIP:
+
+    - a shell dashboard — failed mid-write and left admin config in place
+      but every tab empty. UPDATE is verified live for that case
+      (HANDOFF.md, 2026-08-13).
+    - ``prefer_update`` — Workday-delivered dashboards. They already exist
+      in every tenant and cannot be created; Put updates worklets/tabs on
+      the destination's copy. SKIP would make the Get/Put pair a no-op.
     """
     if existence.state is LookupOutcome.NOT_FOUND:
         return Action.CREATE
-    if existence.is_shell:
+    if existence.is_shell or existence.prefer_update:
         return Action.UPDATE
     return Action.SKIP
 
@@ -297,20 +307,48 @@ def probe_node(
       carry their flavour, since the two are addressed by different operations.
     """
     if node.kind in DASHBOARD_TABBED_BY_KIND:
+        spec = dashboard_flavour_from_payload(node.payload)
+        delivered = bool(spec and spec["delivered"])
+        tabbed = spec["tabbed"] if spec else DASHBOARD_TABBED_BY_KIND[node.kind]
         if not node.reference_id:
             return Existence(
                 node_id=node.node_id,
                 state=LookupOutcome.UNKNOWN,
                 fault=(
-                    "Dashboard has no Custom_Landing_Page ID, so it cannot be "
+                    "Dashboard has no landing-page ID, so it cannot be "
                     "matched against the destination."
                 ),
             )
         result = lookup_dashboard(
             connection,
-            tabbed=DASHBOARD_TABBED_BY_KIND[node.kind],
+            tabbed=tabbed,
             reference_id=node.reference_id,
+            delivered=delivered,
         )
+        if delivered and result.outcome is LookupOutcome.NOT_FOUND:
+            # Workday-owned dashboards cannot be created. Collapsing this to
+            # a CREATE would send Put without a resolvable reference.
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.UNKNOWN,
+                fault=(
+                    "Workday-delivered dashboard is not on the destination; "
+                    "it cannot be created. Confirm both tenants have this "
+                    f"{'Landing_Page_Group_ID' if tabbed else 'Landing_Page_ID'}."
+                ),
+            )
+        if delivered and result.outcome is LookupOutcome.FOUND:
+            return Existence(
+                node_id=node.node_id,
+                state=LookupOutcome.FOUND,
+                dest_wid=result.wid,
+                dest_reference_id=result.reference_id,
+                prefer_update=True,
+                matched_by=(
+                    "Workday-delivered dashboard — Put updates the "
+                    "destination's existing copy"
+                ),
+            )
         if result.outcome is LookupOutcome.FOUND and not dashboard_has_worklets(result.data):
             # A dashboard that failed partway through a previous run leaves its
             # admin config in place but every tab empty. Without this it probes

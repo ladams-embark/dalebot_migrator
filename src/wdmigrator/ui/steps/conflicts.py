@@ -184,7 +184,11 @@ def _render_overrides(state: WizardState) -> None:
             "would otherwise probe as FOUND and skip forever; UPDATE has been "
             "verified live for exactly this case.",
         )
-    st.caption("Change create or skip in the table. Update is only auto-set for empty-shell dashboards.")
+    st.caption(
+        "Change create or skip in the table. Update is auto-set for "
+        "empty-shell dashboards and for Workday-delivered dashboards "
+        "(those already exist and cannot be created)."
+    )
     edited = st.data_editor(
         df,
         hide_index=True,

@@ -52,7 +52,7 @@ only module the UI imports. The pipeline:
 
 ### Migratable object kinds (in dependency order)
 Calculated fields → calculated measures → reports → prompt fields → prompt
-sets → custom dashboards (tabbed and untabbed). The order falls out of the DAG,
+sets → custom and Workday-delivered dashboards (tabbed and untabbed). The order falls out of the DAG,
 not hardcoded phases.
 
 Also, on the Time Tracking Implementation Service:
@@ -130,6 +130,8 @@ Policy Changes" — changes are not immediate.
 | `Get_Tenanted_Report_Definitions` / `Put_Tenanted_Report_Definition` | Read / Write | No exceptions block — fault-only errors |
 | `Get_Custom_Dashboards_with_Tabs` / `_without_Tabs` | Read | **Implementer account required** |
 | `Put_Custom_Dashboard_with_Tabs` / `_without_Tabs` | Write | **Implementer account required**. Has `Add_Only` attribute |
+| `Get_Workday_Delivered_Dashboards_with_Tabs` / `_without_Tabs` | Read | **Implementer account required**. Same service. Confirmed live 2026-09-04 on `commitconsulting_dpt1`: 88 tabbed + 16 untabbed. No `Name`; picker label is `Landing_Page_Group_ID` / `Landing_Page_ID` (e.g. `HOME`). |
+| `Put_Workday_Delivered_Dashboard_with_Tabs` / `_without_Tabs` | Write | **Implementer account required**. Data block only — required inner reference, no `Add_Only`, no top-level reference sibling. Cannot CREATE; Put updates the tenant's existing Workday-owned copy. |
 | `Get_Prompt_Sets` / `Put_Prompt_Set` | Both | Readable by plain ISU; Put is fault-only |
 | `Get_Prompt_Fields` / `Put_Prompt_Field` | Both | **Implementer account required** |
 | `Get_Time_Calculations` / `Put_Time_Calculation` | Both | On **Time_Tracking_Implementation_Service**. Implementer-only. No `Response_Group` |
@@ -145,7 +147,7 @@ granting fixes it. `discovery/inventory.py:requires_implementer` detects this.
 
 **Report identity**: `Custom_Report_ID` is returned but rejected as a lookup key. Reports must be matched by exact name (`Report_Name` criteria). Report names are not unique — duplicates resolve to UNKNOWN.
 
-**Dashboard identity**: Two unrelated object types (tabbed = `Custom_Landing_Page_Group`, untabbed = `Custom_Landing_Page`). Both must be swept. Dashboard business IDs work as lookup keys, unlike report IDs.
+**Dashboard identity**: Four flavours, two ownerships. Custom tabbed = `Custom_Landing_Page_Group`, custom untabbed = `Custom_Landing_Page`, delivered tabbed = `Landing_Page_Group`, delivered untabbed = `Landing_Page`. All four are swept. Custom and delivered business IDs work as lookup keys, unlike report IDs. Delivered Put cannot create — it updates the tenant's existing Workday-owned copy.
 
 **Prompt sets**: `Prompt_Set_Request_Criteria` is unusable. Must sweep all and read dependency edges from dashboard payloads.
 

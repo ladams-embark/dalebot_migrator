@@ -15,12 +15,17 @@ import pytest
 
 from wdmigrator.discovery.inventory import (
     DASHBOARD_FLAVOURS,
+    DELIVERED_DASHBOARD_FLAVOURS,
     AnalyticIndicatorSummary,
     DashboardSummary,
     GaugeRangeSummary,
     Index,
     PromptFieldSummary,
     PromptSetSummary,
+    _dashboard_summary,
+    dashboard_flavour_from_payload,
+    ids_of,
+    lookup_dashboard,
     requires_implementer,
 )
 from wdmigrator.migrate.ordering import (
@@ -212,21 +217,104 @@ def index(kind, items, summarise):
     return idx
 
 
+def delivered_untabbed_dashboard(wid="DDB1", landing_page_id="HOME"):
+    """Shaped from a live Get_Workday_Delivered_Dashboards_without_Tabs item
+    (`commitconsulting_dpt1`, 2026-09-04): no Name, empty Descriptor,
+    required inner reference, Worklets_Data at the top."""
+    reference = {
+        "Descriptor": None,
+        "ID": [
+            {"type": "WID", "_value_1": wid},
+            {"type": "Landing_Page_ID", "_value_1": landing_page_id},
+        ],
+    }
+    return {
+        "Workday_Delivered_Dashboard_without_Tabs_Reference": reference,
+        "Workday_Delivered_Dashboard_without_Tabs_Data": {
+            "Workday_Delivered_Dashboard_without_Tabs_Reference": reference,
+            "Description": "",
+            # Live Get (HOME, 2026-09-04): title/security live under
+            # Dashboard_Admin_Configuration_Data, not on the worklet itself.
+            "Worklets_Data": [
+                {
+                    "ID": "LANDING_PAGE_ADMIN_CONFIGURATION-16-171",
+                    "Order": "a",
+                    "Worklet__All__Reference": ref(
+                        WID="RPT1",
+                        Custom_Report_ID="Commit - Report Owner Terminated",
+                    ),
+                    "Landing_Page__All__Reference": ref(
+                        WID=wid, Landing_Page_ID=landing_page_id
+                    ),
+                    "Dashboard_Admin_Configuration_Data": [
+                        {
+                            "Required": False,
+                            "Workday-Delivered_Security_Group_Reference": [
+                                ref(
+                                    WID="WDSG1",
+                                    Workday_Security_Group_ID="implementers_wkdyGroup",
+                                )
+                            ],
+                            "Security_Group_Reference": [
+                                ref(
+                                    WID="TSG1",
+                                    Tenant_Security_Group_ID="Report_Administrator",
+                                )
+                            ],
+                            "Worklet_Size_Reference": ref(WID="SIZE1"),
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def delivered_tabbed_dashboard(wid="DDB2", landing_page_group_id="DSN_COMMAND_CENTER"):
+    reference = {
+        "Descriptor": None,
+        "ID": [
+            {"type": "WID", "_value_1": wid},
+            {"type": "Landing_Page_Group_ID", "_value_1": landing_page_group_id},
+        ],
+    }
+    return {
+        "Workday_Delivered_Dashboard_with_Tabs_Reference": reference,
+        "Workday_Delivered_Dashboard_with_Tabs_Data": {
+            "Workday_Delivered_Dashboard_with_Tabs_Reference": reference,
+            "Description": "",
+            "Content_Data": [
+                {
+                    "Tab_Name": "Overview",
+                    "Tab_Data": {
+                        "Dashboard_Admin_Configuration": [
+                            worklet_config("Commit - Report Owner Terminated", "RPT1"),
+                        ],
+                    },
+                }
+            ],
+        },
+    }
+
+
 def dashboard_index(*payloads):
     def summarise(wid, payload):
-        tabbed = DASHBOARD_FLAVOURS[True]["reference"] in payload
-        spec = DASHBOARD_FLAVOURS[tabbed]
+        spec = dashboard_flavour_from_payload(payload)
+        assert spec is not None
+        data = payload.get(spec["data"]) or {}
+        reference = payload.get(spec["reference"]) or {}
+        ids = ids_of(reference)
         return DashboardSummary(
             wid=wid,
-            reference_id=payload[spec["reference"]]["ID"][1]["_value_1"],
-            name=payload[spec["data"]]["Name"],
-            tabbed=tabbed,
+            reference_id=ids.get(spec["id_type"]),
+            name=data.get("Name") or reference.get("Descriptor") or ids.get(spec["id_type"]),
+            tabbed=spec["tabbed"],
+            delivered=spec["delivered"],
         )
 
     items = {}
     for payload in payloads:
-        tabbed = DASHBOARD_FLAVOURS[True]["reference"] in payload
-        spec = DASHBOARD_FLAVOURS[tabbed]
+        spec = dashboard_flavour_from_payload(payload)
         items[payload[spec["reference"]]["ID"][0]["_value_1"]] = payload
     return index("dashboard", items, summarise)
 
@@ -289,9 +377,7 @@ class TestExtractors:
 
 class TestClosure:
     def resolve(self, dashboard, **kwargs):
-        spec = DASHBOARD_FLAVOURS[
-            DASHBOARD_FLAVOURS[True]["reference"] in dashboard
-        ]
+        spec = dashboard_flavour_from_payload(dashboard)
         wid = dashboard[spec["reference"]]["ID"][0]["_value_1"]
         return resolve_closure(
             cf_index=empty_cf_index(),
@@ -350,18 +436,28 @@ class TestClosure:
         assert node.kind is NodeKind.DASHBOARD
         assert node.reference_id == "Cost Center Manager Dashboard"
 
+    def test_a_selected_delivered_dashboard_is_a_node(self):
+        closure = self.resolve(delivered_untabbed_dashboard())
+        node = closure.nodes[node_id_for(NodeKind.DASHBOARD, "DDB1")]
+        assert node.reference_id == "HOME"
+        assert node.name == "HOME"
+        assert dashboard_flavour_from_payload(node.payload)["delivered"] is True
+
 
 # ── Payload building ─────────────────────────────────────────────────────────
 
 
 def dashboard_node(payload, *, tabbed=True, wid="DB1"):
-    spec = DASHBOARD_FLAVOURS[tabbed]
+    spec = dashboard_flavour_from_payload(payload) or DASHBOARD_FLAVOURS[tabbed]
+    data = payload.get(spec["data"]) or {}
+    reference = payload.get(spec["reference"]) or {}
+    ids = ids_of(reference)
     return Node(
-        node_id=node_id_for(DASHBOARD_KINDS[tabbed], wid),
-        kind=DASHBOARD_KINDS[tabbed],
+        node_id=node_id_for(DASHBOARD_KINDS[spec["tabbed"]], wid),
+        kind=DASHBOARD_KINDS[spec["tabbed"]],
         source_wid=wid,
-        reference_id=payload[spec["reference"]]["ID"][1]["_value_1"],
-        name=payload[spec["data"]]["Name"],
+        reference_id=ids.get(spec["id_type"]),
+        name=data.get("Name") or reference.get("Descriptor") or ids.get(spec["id_type"]),
         payload=payload,
     )
 
@@ -424,6 +520,90 @@ class TestDashboardPayload:
         payload = tabbed_dashboard()
         build_dashboard_payload(dashboard_node(payload), {}, action=Action.CREATE)
         assert "Announcements_Data" in payload["Custom_Dashboard_with_Tabs_Data"]
+
+
+class TestDeliveredDashboardFlavour:
+    def test_flavour_is_read_from_the_payload_keys(self):
+        spec = dashboard_flavour_from_payload(delivered_untabbed_dashboard())
+        assert spec is DELIVERED_DASHBOARD_FLAVOURS[False]
+        spec = dashboard_flavour_from_payload(delivered_tabbed_dashboard())
+        assert spec is DELIVERED_DASHBOARD_FLAVOURS[True]
+        spec = dashboard_flavour_from_payload(tabbed_dashboard())
+        assert spec is DASHBOARD_FLAVOURS[True]
+
+    def test_summary_falls_back_to_the_landing_page_id(self):
+        """Live Get returns no Name and an empty Descriptor (2026-09-04)."""
+        item = delivered_untabbed_dashboard()
+        summary = _dashboard_summary(item, DELIVERED_DASHBOARD_FLAVOURS[False])
+        assert summary.delivered is True
+        assert summary.tabbed is False
+        assert summary.reference_id == "HOME"
+        assert summary.name == "HOME"
+
+    def test_nested_delivered_landing_page_is_still_passthrough(self):
+        data = {"Landing_Page__All__Reference": ref(WID="LP1", Landing_Page_ID="HOME")}
+        assert extract_dashboard_refs(data) == {}
+
+
+class TestDeliveredDashboardPayload:
+    def test_create_is_refused(self):
+        node = dashboard_node(delivered_untabbed_dashboard(), wid="DDB1")
+        with pytest.raises(WriteError, match="cannot be created"):
+            build_dashboard_payload(node, {}, action=Action.CREATE)
+
+    def test_update_is_data_only_with_an_inner_reference(self):
+        node = dashboard_node(delivered_untabbed_dashboard(), wid="DDB1")
+        payload = build_dashboard_payload(
+            node, {}, action=Action.UPDATE, dest_wid="DEST_DDB1"
+        )
+        assert set(payload) == {"Workday_Delivered_Dashboard_without_Tabs_Data"}
+        assert "Add_Only" not in payload
+        data = payload["Workday_Delivered_Dashboard_without_Tabs_Data"]
+        assert (
+            data["Workday_Delivered_Dashboard_without_Tabs_Reference"]["ID"][0][
+                "_value_1"
+            ]
+            == "DEST_DDB1"
+        )
+
+    def test_update_without_a_destination_identity_is_refused(self):
+        payload = delivered_untabbed_dashboard()
+        node = dashboard_node(payload, wid="DDB1")
+        node = Node(
+            node_id=node.node_id,
+            kind=node.kind,
+            source_wid=node.source_wid,
+            reference_id=None,
+            name=node.name,
+            payload=payload,
+        )
+        with pytest.raises(WriteError, match="without the destination"):
+            build_dashboard_payload(node, {}, action=Action.UPDATE)
+
+    def test_put_routes_to_the_delivered_operation(self):
+        node = dashboard_node(delivered_untabbed_dashboard(), wid="DDB1")
+        assert operation_for(node) == "Put_Workday_Delivered_Dashboard_without_Tabs"
+        node = dashboard_node(delivered_tabbed_dashboard(), wid="DDB2")
+        assert operation_for(node) == "Put_Workday_Delivered_Dashboard_with_Tabs"
+
+    def test_update_serializes_against_the_wsdl(self, offline_client):
+        """Put takes only the data block; zeep rejects Add_Only or a
+        top-level reference sibling on these two operations."""
+        node = dashboard_node(delivered_untabbed_dashboard(), wid="DDB1")
+        payload = build_dashboard_payload(
+            node, {}, action=Action.UPDATE, dest_wid="DEST_DDB1"
+        )
+        envelope = offline_client.create_message(
+            offline_client.service,
+            "Put_Workday_Delivered_Dashboard_without_Tabs",
+            **payload,
+        )
+        assert envelope is not None
+        from lxml import etree
+
+        xml = etree.tostring(envelope, encoding="unicode")
+        assert "Add_Only" not in xml
+        assert "Workday_Delivered_Dashboard_without_Tabs_Data" in xml
 
 
 class TestPromptSetPayload:
@@ -1315,3 +1495,44 @@ class TestWorkletReWriteDoesNotDuplicate:
         assert fault is not None
         assert "duplicate" in fault
         assert "Span of Control" in fault
+
+
+@pytest.mark.live
+class TestLiveDeliveredDashboardGet:
+    """Read-only. Never Puts. Skips if the account is not an implementer."""
+
+    def test_sweep_includes_workday_delivered_pages(self, live_source_connection):
+        from wdmigrator.discovery.inventory import (
+            IMPLEMENTER_REQUIRED_REMEDY,
+            iter_dashboard_index,
+        )
+
+        try:
+            final = list(iter_dashboard_index(live_source_connection))[-1]
+        except Exception as exc:
+            message = live_source_connection.redact(str(exc))
+            if requires_implementer(message):
+                pytest.skip(IMPLEMENTER_REQUIRED_REMEDY)
+            raise
+
+        delivered = [s for s in final.index.summaries.values() if s.delivered]
+        custom = [s for s in final.index.summaries.values() if not s.delivered]
+        assert len(custom) >= 50
+        assert len(delivered) >= 16
+        assert any(s.reference_id == "HOME" and not s.tabbed for s in delivered)
+        home = next(s for s in delivered if s.reference_id == "HOME")
+        assert home.name == "HOME"
+
+    def test_lookup_home_by_landing_page_id(self, live_source_connection):
+        from wdmigrator.discovery.inventory import IMPLEMENTER_REQUIRED_REMEDY
+
+        result = lookup_dashboard(
+            live_source_connection,
+            tabbed=False,
+            delivered=True,
+            reference_id="HOME",
+        )
+        if result.outcome is LookupOutcome.UNKNOWN and requires_implementer(result.fault):
+            pytest.skip(IMPLEMENTER_REQUIRED_REMEDY)
+        assert result.outcome is LookupOutcome.FOUND, result.fault
+        assert result.reference_id == "HOME"

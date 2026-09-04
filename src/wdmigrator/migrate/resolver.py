@@ -24,7 +24,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Iterable, Mapping
 
-from wdmigrator.discovery.inventory import DASHBOARD_FLAVOURS, Index, ids_of
+from wdmigrator.discovery.inventory import (
+    DASHBOARD_FLAVOURS,
+    Index,
+    dashboard_flavour,
+    dashboard_flavour_from_payload,
+    ids_of,
+)
 from wdmigrator.migrate.ordering import (
     extract_dashboard_refs,
     extract_measure_refs,
@@ -331,16 +337,18 @@ def _prompt_set_node(wid: str, payload: dict) -> Node:
 
 
 def _dashboard_node(wid: str, payload: dict, *, tabbed: bool, selected: bool) -> Node:
-    spec = DASHBOARD_FLAVOURS[tabbed]
+    spec = dashboard_flavour_from_payload(payload) or dashboard_flavour(tabbed=tabbed)
     data = payload.get(spec["data"]) or {}
     ids = ids_of(payload.get(spec["reference"]))
-    kind = DASHBOARD_KINDS[tabbed]
+    kind = DASHBOARD_KINDS[bool(spec["tabbed"])]
+    reference = payload.get(spec["reference"]) or {}
+    reference_id = ids.get(spec["id_type"])
     return Node(
         node_id=node_id_for(kind, wid),
         kind=kind,
         source_wid=wid,
-        reference_id=ids.get(spec["id_type"]),
-        name=data.get("Name"),
+        reference_id=reference_id,
+        name=data.get("Name") or reference.get("Descriptor") or reference_id,
         payload=payload,
         selected=selected,
     )
@@ -387,7 +395,12 @@ def _dependency_payload(node: Node) -> dict:
     it as one invents edges — including cycles — over bytes that never reach the
     destination. See :data:`WORKLET_BACKREF_FIELDS`.
     """
-    data = node.payload.get(_DATA_BLOCK[node.kind]) or {}
+    if node.kind in DASHBOARD_TABBED_BY_KIND:
+        spec = dashboard_flavour_from_payload(node.payload)
+        data_key = spec["data"] if spec else _DATA_BLOCK[node.kind]
+        data = node.payload.get(data_key) or {}
+    else:
+        data = node.payload.get(_DATA_BLOCK[node.kind]) or {}
     if node.kind is NodeKind.REPORT and any(f in data for f in WORKLET_BACKREF_FIELDS):
         return {k: v for k, v in data.items() if k not in WORKLET_BACKREF_FIELDS}
     return data
@@ -483,7 +496,8 @@ def resolve_closure(
         # Derived from the payload rather than trusted from the caller: the two
         # flavours are written by different operations, and getting it wrong
         # sends a create to the wrong one.
-        tabbed = DASHBOARD_FLAVOURS[True]["reference"] in payload
+        spec = dashboard_flavour_from_payload(payload)
+        tabbed = spec["tabbed"] if spec else DASHBOARD_FLAVOURS[True]["reference"] in payload
         node = _dashboard_node(wid, payload, tabbed=tabbed, selected=True)
         closure.nodes[node.node_id] = node
 
