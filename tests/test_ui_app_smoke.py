@@ -31,11 +31,11 @@ def test_connect_step_is_the_initial_step():
     assert "Connect" in headers
 
 
-def test_the_step_rail_is_five_visible_steps():
+def test_the_step_rail_is_six_visible_steps():
     at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
     at.run(timeout=15)
     rendered = " ".join(str(w.value) for w in at.markdown)
-    for title in ("Connect", "Select", "Plan", "Run", "Results"):
+    for title in ("Connect", "Scope", "Select", "Plan", "Run", "Results"):
         assert title in rendered
 
 
@@ -70,6 +70,10 @@ def _select_step_app(**state_kwargs):
     from wdmigrator.ui.state import STATE_KEY, WizardState
 
     at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    # Select no longer defaults kinds to reports — that default is what
+    # skipped the dashboard catalog. Tests that omit kinds are the report
+    # picker cases, so they still ask for reports explicitly here.
+    state_kwargs.setdefault("object_kinds", ["reports"])
     state = WizardState(step="select", **state_kwargs)
     state.source.connection = _StubConnection()
     state.dest.connection = _StubConnection()
@@ -78,31 +82,164 @@ def _select_step_app(**state_kwargs):
     return at
 
 
-def test_select_step_renders_with_the_default_object_kind():
+def _scope_step_app(**state_kwargs):
+    from wdmigrator.ui.state import STATE_KEY, WizardState
+
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    state = WizardState(step="scope", **state_kwargs)
+    state.source.connection = _StubConnection()
+    state.dest.connection = _StubConnection()
+    at.session_state[STATE_KEY] = state
+    at.run(timeout=20)
+    return at
+
+
+def test_select_step_renders_when_scope_chose_reports():
     at = _select_step_app()
     assert not at.exception
     assert "Select" in [h.value for h in at.header]
 
 
-def test_choosing_dashboards_renders_the_dashboard_section():
-    """The dashboard picker and its two extra indexes only appear when asked
-    for, so a user without an implementer account never sees a section they
-    cannot use."""
-    at = _select_step_app()
-    kinds = [w for w in at.multiselect if w.key == "object_kinds"]
-    assert kinds, "object kind chooser is missing"
-    kinds[0].set_value(["reports", "dashboards"]).run(timeout=20)
+def test_scope_step_does_not_build_indexes():
+    """The whole point of Scope: decide types before any sweep starts."""
+    at = _scope_step_app()
     assert not at.exception
-    assert any("Dashboard index" in str(w.value) for w in at.markdown)
+    assert "Scope" in [h.value for h in at.header]
+    assert not [b for b in at.button if b.key and "index" in b.key]
+    assert [c for c in at.checkbox if c.key == "scope_dashboards"], (
+        "Custom dashboards must be choosable before indexes are built"
+    )
+    next_buttons = [b for b in at.button if b.key == "nav_next"]
+    assert next_buttons
+    assert next_buttons[0].disabled, "Continue must stay gated until a type is ticked"
+
+
+def test_scope_ticking_dashboards_unlocks_continue_and_select_shows_the_picker():
+    """Approval path: custom dashboard from source to destination.
+
+    Scope commits the type with no index sweep. Continue lands on Select,
+    which must then show the dashboard picker — not a reports-only page.
+    """
+    at = _scope_step_app()
+    boxes = [c for c in at.checkbox if c.key == "scope_dashboards"]
+    assert boxes, "dashboard checkbox is missing on Scope"
+    boxes[0].check().run(timeout=20)
+    assert not at.exception
+    from wdmigrator.ui.state import STATE_KEY
+
+    state = at.session_state[STATE_KEY]
+    assert state.object_kinds == ["dashboards"]
+    next_buttons = [b for b in at.button if b.key == "nav_next"]
+    assert next_buttons and not next_buttons[0].disabled
+    next_buttons[0].click().run(timeout=20)
+    assert not at.exception
+    assert "Select" in [h.value for h in at.header]
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    assert "Dashboard index" in rendered
+    assert "Custom dashboards" in rendered
+    assert "Preparing indexes" not in rendered
+
+
+def test_choosing_dashboards_renders_the_dashboard_section():
+    """The dashboard picker and its extra indexes only appear when Scope
+    asked for dashboards, so a user without an implementer account never
+    sees a section they cannot use."""
+    at = _select_step_app(object_kinds=["dashboards"])
+    assert not at.exception
+    assert not [w for w in at.multiselect if w.key == "object_kinds"], (
+        "object kinds are chosen on Scope, not re-picked on Select"
+    )
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    assert "Dashboard index" in rendered
+    assert "Custom dashboards" in rendered
+
+
+def test_reports_only_select_does_not_show_the_dashboard_picker():
+    at = _select_step_app(object_kinds=["reports"])
+    assert not at.exception
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    assert "Dashboard index" not in rendered
+    assert "Custom dashboards" not in rendered
 
 
 def test_the_implementer_requirement_is_explained_rather_than_shown_as_an_error():
-    at = _select_step_app(implementer_required=True)
-    kinds = [w for w in at.multiselect if w.key == "object_kinds"]
-    kinds[0].set_value(["dashboards"]).run(timeout=20)
+    at = _select_step_app(object_kinds=["dashboards"], implementer_required=True)
     assert not at.exception
     rendered = " ".join(str(w.value) for w in at.markdown)
     assert "implementer account" in rendered
+
+
+def _empty_index(kind):
+    import time
+
+    from wdmigrator.api import Index
+
+    return Index(kind=kind, tenant="stub_tenant", fetched_at=time.time())
+
+
+def _dashboard_index(*names):
+    import time
+
+    from wdmigrator.api import DashboardSummary, Index
+
+    summaries, payloads = {}, {}
+    for i, name in enumerate(names):
+        wid = f"D{i}"
+        summaries[wid] = DashboardSummary(
+            wid=wid, reference_id=name, name=name, tabbed=True, worklet_count=1
+        )
+        payloads[wid] = {"name": name}
+    return Index(
+        kind="dashboard",
+        tenant="stub_tenant",
+        fetched_at=time.time(),
+        summaries=summaries,
+        payloads=payloads,
+    )
+
+
+def test_dashboard_scope_sweeps_dashboard_indexes_before_calculated_fields():
+    """A reports default used to skip these entirely. Dashboard catalogs are
+    cheap (one page) and must run first so the picker appears before the
+    ~25s calculated-field sweep."""
+    from wdmigrator.ui.steps.select import _source_specs
+
+    kinds = [s.kind for s in _source_specs(["dashboards"], _StubConnection())]
+    assert kinds[0] == "dashboard"
+    assert "prompt_set" in kinds
+    assert "prompt_field" in kinds
+    assert "calculated_field" in kinds
+    assert "report" not in kinds
+    assert kinds.index("dashboard") < kinds.index("calculated_field")
+
+
+def test_a_selected_dashboard_unlocks_continue_to_plan():
+    """End-to-end Select gate for the dashboard approval path: Scope already
+    chose dashboards, the catalog is present, one dashboard is picked, and
+    every resolve-required index is built — Continue to Plan is enabled.
+    """
+    index = _dashboard_index("Commit - HR Dashboard")
+    at = _select_step_app(
+        object_kinds=["dashboards"],
+        dashboard_index=index,
+        prompt_set_index=_empty_index("prompt_set"),
+        prompt_field_index=_empty_index("prompt_field"),
+        gauge_range_index=_empty_index("gauge_range"),
+        analytic_indicator_index=_empty_index("analytic_indicator"),
+        cf_index=_empty_index("calculated_field"),
+        selected_dashboards_added={"D0": index.payload("D0")},
+    )
+    assert not at.exception
+    from wdmigrator.ui.state import STATE_KEY
+    from wdmigrator.ui.steps import select as select_step
+
+    state = at.session_state[STATE_KEY]
+    assert set(state.selected_dashboards) == {"D0"}
+    assert select_step.gate(state) == []
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    assert "Commit - HR Dashboard" in rendered
+    next_buttons = [b for b in at.button if b.key == "nav_next"]
+    assert next_buttons and not next_buttons[0].disabled
 
 
 class TestConflictsRefusesToProbeUnmatched:
@@ -243,37 +380,14 @@ class TestReportSelectionSurvivesRefiltering:
         assert set(state.selected_reports) == {"W0", "W1"}
 
 
-def _dashboard_index(*names):
-    import time
-
-    from wdmigrator.api import DashboardSummary, Index
-
-    summaries, payloads = {}, {}
-    for i, name in enumerate(names):
-        wid = f"D{i}"
-        summaries[wid] = DashboardSummary(
-            wid=wid, reference_id=name, name=name, tabbed=True, worklet_count=1
-        )
-        payloads[wid] = {"name": name}
-    return Index(
-        kind="dashboard",
-        tenant="stub_tenant",
-        fetched_at=time.time(),
-        summaries=summaries,
-        payloads=payloads,
-    )
-
-
 class TestDashboardSelectionSurvivesRefiltering:
     """The dashboard picker had the identical defect to the report picker —
     its selection was rebuilt each rerun from the filtered table's row
     positions, so filtering discarded whatever had been picked before."""
 
     def _app(self, **kwargs):
-        at = _select_step_app(**kwargs)
-        kinds = [w for w in at.multiselect if w.key == "object_kinds"]
-        kinds[0].set_value(["dashboards"]).run(timeout=20)
-        return at
+        kwargs.setdefault("object_kinds", ["dashboards"])
+        return _select_step_app(**kwargs)
 
     def test_adding_banks_highlighted_rows_without_an_add_button(self):
         at = self._app(dashboard_index=_dashboard_index("Alpha", "Beta"))
