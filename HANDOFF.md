@@ -23,6 +23,8 @@ inside it is required. No `Add_Only`. Planner: FOUND → UPDATE
 dashboard becomes a node.
 
 No destination Put was sent. Dry-run serialization is the offline check.
+Offline suite: `791 passed, 17 deselected`. Live delivered Get: 2 passed
+(catalog sweep + `HOME` lookup).
 
 ---
 

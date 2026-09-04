@@ -599,7 +599,9 @@ class TestDeliveredDashboardPayload:
             **payload,
         )
         assert envelope is not None
-        xml = str(envelope)
+        from lxml import etree
+
+        xml = etree.tostring(envelope, encoding="unicode")
         assert "Add_Only" not in xml
         assert "Workday_Delivered_Dashboard_without_Tabs_Data" in xml
 
