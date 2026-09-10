@@ -364,7 +364,7 @@ def _pump_restore_reprobe(state: WizardState) -> None:
 
 def _pump_restore_execute(state: WizardState) -> None:
     job = state.restore_execute_job
-    pump(job, time_budget=WRITE_TIME_BUDGET, batch_size=1)
+    pump(job, time_budget=WRITE_TIME_BUDGET, batch_size=1, drain_skips=True)
     last = job.last_event
     render_job_progress(
         job,
