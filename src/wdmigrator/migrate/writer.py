@@ -43,7 +43,7 @@ from typing import Iterable, Iterator, Mapping
 from zeep.exceptions import Fault
 from zeep.helpers import serialize_object
 
-from wdmigrator.auth.client import Connection, Role
+from wdmigrator.auth.client import DEFAULT_VERSION, Connection, Role
 from wdmigrator.discovery.inventory import (
     DASHBOARD_FLAVOURS,
     dashboard_flavour,
@@ -365,6 +365,69 @@ _WORKLET_BACKREF_FIELDS = WORKLET_BACKREF_FIELDS
 #: their own dependency kind. That is more scope than "make dashboards work",
 #: and it is a clean follow-up if tags turn out to matter.
 _UNMIGRATABLE_REPORT_REFERENCES = ("Report_Tag_Reference",)
+
+
+def _parse_ws_api_version(value: str | None) -> tuple[int, ...] | None:
+    """``v47.0`` → ``(47, 0)``. ``None`` if the string is not a dotted version."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if text[:1] in "vV":
+        text = text[1:]
+    parts = text.split(".")
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def _clamp_web_service_api_version(
+    data: dict, *, max_version: str = DEFAULT_VERSION
+) -> None:
+    """Rewrite ``Web_Service_API_Version_Reference`` to a version this Put accepts.
+
+    Confirmed live 2026-09-10 migrating ``KGS - HealthJoy`` (kodiakgas_preview
+    → kodiakgas): the source report named ``Version=v47.0`` — with its WID and
+    with the business id alone — and ``Put_Tenanted_Report_Definition`` failed
+    with:
+
+        The entered information does not meet the restrictions defined for
+        this field. (Web_Service_API_Version_Reference).
+
+    ``Version=v46.0`` — :data:`~wdmigrator.auth.client.DEFAULT_VERSION`, the
+    highest Core_Implementation_Service version this client uses — was
+    accepted. The destination's own read-back then carried dest's WID for
+    v46.0, so the source WID was never going to resolve even if the version
+    number had been legal.
+
+    The field is optional (``minOccurs=0``), but dropping it on a RaaS-enabled
+    report (``Web_Service_Namespace_Suffix`` set) would leave the destination
+    to pick a default. Clamping keeps an explicit version, just one the
+    destination Put will honour. A source version *at or below* ``max_version``
+    is kept; only a newer one is rewritten. The sibling WID is always dropped
+    — version instances have a tenant-local WID; ``Version`` is the stable key.
+    """
+    ref = data.get("Web_Service_API_Version_Reference")
+    if not isinstance(ref, dict):
+        return
+    entries = ref.get("ID")
+    if not isinstance(entries, list):
+        return
+    source_version = next(
+        (
+            e.get("_value_1")
+            for e in entries
+            if isinstance(e, dict) and e.get("type") == "Version" and e.get("_value_1")
+        ),
+        None,
+    )
+    chosen = source_version or max_version
+    src_tuple = _parse_ws_api_version(chosen)
+    max_tuple = _parse_ws_api_version(max_version)
+    if src_tuple is None or (max_tuple is not None and src_tuple > max_tuple):
+        chosen = max_version
+    data["Web_Service_API_Version_Reference"] = {
+        "ID": [{"type": "Version", "_value_1": chosen}]
+    }
 
 
 #: References to objects created *inside* another object's write, whose
@@ -1089,6 +1152,10 @@ def build_report_payload(
     :func:`_strip_filter_instance_references` — and sharing and worklet
     placement are cleared by :func:`_strip_sharing_and_placement`. Report tags
     go too, on every report: see :data:`_UNMIGRATABLE_REPORT_REFERENCES`.
+    ``Web_Service_API_Version_Reference`` is clamped to
+    :data:`~wdmigrator.auth.client.DEFAULT_VERSION` when the source names a
+    newer version than this client Puts through — see
+    :func:`_clamp_web_service_api_version`.
     """
     data = node.payload.get("Tenanted_Report_Definition_Data")
     if not data:
@@ -1108,6 +1175,7 @@ def build_report_payload(
     # not been tagged identically by hand first.
     for key in _UNMIGRATABLE_REPORT_REFERENCES:
         remapped.pop(key, None)
+    _clamp_web_service_api_version(remapped)
     # Runs AFTER substitute_wids, so "unmapped" means what it says.
     _drop_stale_inline_wids(remapped, wid_map)
     # The mirror case: keep the WID, drop the tenant-scoped business id.
