@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from zeep.exceptions import Fault
 
-from wdmigrator.auth.client import Role
+from wdmigrator.auth.client import DEFAULT_VERSION, Role
 from wdmigrator.config.targets import target_from_parts
 from wdmigrator.discovery.inventory import CalculatedFieldSummary, Index, LookupOutcome
 from wdmigrator.migrate.planner import (
@@ -678,6 +678,69 @@ class TestFilterInstanceStripping:
         ]["Tenanted_Report_Filter_Data"]["Condition_Item_Data"][0]
         assert condition["Ignore_When_No_Target_Value"] is True
         assert "Filter_Instances_Reference" not in condition
+
+
+class TestWebServiceApiVersionClamp:
+    """A report's Web_Service_API_Version_Reference names the RaaS WWS version
+    the custom report is published at. Confirmed live 2026-09-10: putting
+    Version=v47.0 (with or without the source WID) through this client's
+    v46.0 Put_Tenanted_Report_Definition fails with "does not meet the
+    restrictions defined for this field"; Version=v46.0 is accepted."""
+
+    def _node(self, version, *, include_wid=True):
+        payload = report_payload("r1")
+        ids = []
+        if include_wid:
+            ids.append({"type": "WID", "_value_1": "SRC_WS_VERSION_WID"})
+        if version is not None:
+            ids.append({"type": "Version", "_value_1": version})
+        payload["Tenanted_Report_Definition_Data"][
+            "Web_Service_API_Version_Reference"
+        ] = {"ID": ids}
+        closure, _ = plan_for(reports={"r1": payload})
+        return closure.nodes["report:r1"]
+
+    def _version_ids(self, node):
+        payload = build_report_payload(node, {}, action=Action.CREATE)
+        ref = payload["Tenanted_Report_Definition_Data"][
+            "Web_Service_API_Version_Reference"
+        ]
+        return {e["type"]: e["_value_1"] for e in ref["ID"]}
+
+    def test_newer_version_is_clamped_to_the_client_default(self):
+        ids = self._version_ids(self._node("v47.0"))
+        assert ids == {"Version": DEFAULT_VERSION}
+
+    def test_source_wid_is_dropped_even_when_the_version_is_kept(self):
+        ids = self._version_ids(self._node("v42.0"))
+        assert ids == {"Version": "v42.0"}
+
+    def test_equal_to_the_client_default_is_kept(self):
+        ids = self._version_ids(self._node(DEFAULT_VERSION))
+        assert ids == {"Version": DEFAULT_VERSION}
+
+    def test_wid_only_reference_is_rewritten_to_the_client_default(self):
+        ids = self._version_ids(self._node(None, include_wid=True))
+        assert ids == {"Version": DEFAULT_VERSION}
+
+    def test_absent_reference_stays_absent(self):
+        payload = build_report_payload(
+            plan_for(reports={"r1": report_payload("r1")})[0].nodes["report:r1"],
+            {},
+            action=Action.CREATE,
+        )
+        assert "Web_Service_API_Version_Reference" not in payload[
+            "Tenanted_Report_Definition_Data"
+        ]
+
+    def test_source_payload_is_not_mutated(self):
+        node = self._node("v47.0")
+        build_report_payload(node, {}, action=Action.CREATE)
+        original = node.payload["Tenanted_Report_Definition_Data"][
+            "Web_Service_API_Version_Reference"
+        ]["ID"]
+        assert any(e.get("type") == "WID" for e in original)
+        assert any(e.get("_value_1") == "v47.0" for e in original)
 
 
 class TestSkippedObjects:
