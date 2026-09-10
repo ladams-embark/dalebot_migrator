@@ -1,10 +1,12 @@
 """Live execution — the only step that can write to a tenant.
 
-Composed into the Run step. ``batch_size=1``: at most one object is pulled
-from the generator per Streamlit rerun, regardless of how much of the pump
-time budget is left. Pause and Cancel are serviced between :func:`pump`
-calls, i.e. always between objects — a browser refresh or a click mid-run
-can never leave an object half-written. The engine re-checks
+Composed into the Run step. ``batch_size=1`` plus ``drain_skips``: at most
+one CREATE/UPDATE is pulled from the generator per Streamlit rerun.
+Consecutive SKIP / NOT_ATTEMPTED records — which never touch the
+destination — are drained in the same pump so a 430-skip plan does not
+spend a rerun per unused object. Pause and Cancel are serviced between
+:func:`pump` calls, i.e. always between *writes* — a browser refresh or a
+click mid-run can never leave an object half-written. The engine re-checks
 ``assert_write_allowed`` inside ``write_node`` before every single write,
 not just once here.
 """
@@ -712,7 +714,7 @@ def render(state: WizardState, *, heading: bool = True) -> None:
                 st.rerun()
 
         if not state.execute_paused and job.running:
-            pump(job, time_budget=WRITE_TIME_BUDGET, batch_size=1)
+            pump(job, time_budget=WRITE_TIME_BUDGET, batch_size=1, drain_skips=True)
 
         last = job.last_event
         fraction = last.fraction if last is not None else 0.0

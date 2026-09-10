@@ -69,11 +69,34 @@ WRITE_TIME_BUDGET = 0.8
 READ_TIME_BUDGET = 2.5
 
 
+def _is_write_attempt(event: Any) -> bool:
+    """True when this event is (or might be) a destination write.
+
+    Live execution uses ``batch_size=1`` so Pause/Cancel land between Puts.
+    SKIPPED and NOT_ATTEMPTED records never touch the network — SKIP returns
+    from ``write_node`` immediately, and NOT_ATTEMPTED is the remainder after
+    a halt — so they must not consume that budget. Events with no record
+    status (index sweeps, probes) are treated as write-like: one per batch,
+    same as today.
+    """
+    record = getattr(event, "record", None)
+    status = getattr(record, "status", None)
+    if status is not None:
+        value = status.value if hasattr(status, "value") else status
+        return value not in {"skipped", "not_attempted"}
+    action = getattr(record, "action", None)
+    if action is None:
+        return True
+    value = action.value if hasattr(action, "value") else action
+    return value in {"create", "update"}
+
+
 def pump(
     job: JobState,
     *,
     time_budget: float = WRITE_TIME_BUDGET,
     batch_size: int | None = None,
+    drain_skips: bool = False,
 ) -> None:
     """Advance ``job`` for up to ``time_budget`` seconds or ``batch_size`` items.
 
@@ -86,8 +109,15 @@ def pump(
 
     ``batch_size=1`` is the writer's contract for live execution: a refresh
     or cancel between reruns can never leave an object half-written, because
-    at most one item is pulled from the generator per rerun regardless of how
-    much of the time budget remains.
+    at most one *write* is pulled from the generator per rerun regardless of
+    how much of the time budget remains.
+
+    ``drain_skips`` is for that same live path. A HealthJoy-sized plan is
+    ~430 SKIP nodes in front of a handful of Puts. With ``batch_size=1``
+    alone each SKIP forced a full Streamlit rerun, so the run spent minutes
+    walking objects that never touch the destination. When this flag is set,
+    consecutive non-write records (SKIP, NOT_ATTEMPTED) are drained in this
+    call and only a CREATE/UPDATE counts against ``batch_size``.
     """
     if not job.running:
         return
@@ -110,6 +140,8 @@ def pump(
             job.done = True
             return
         job.events.append(event)
+        if drain_skips and not _is_write_attempt(event):
+            continue
         pulled += 1
 
 
