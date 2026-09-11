@@ -13,15 +13,21 @@ silently discard any downstream action overrides.
 
 from __future__ import annotations
 
+import re
+
 import streamlit as st
 
+from wdmigrator import __version__
 from wdmigrator.api import (
     Blocker,
     CycleError,
     PartialIndexError,
+    default_packages_dir,
     measure_loader_for,
+    package_from_closure,
     report_loader_for,
     resolve,
+    save_package,
     topological_sort,
 )
 from wdmigrator.ui import theme
@@ -83,6 +89,93 @@ def _compute(state: WizardState) -> None:
     state.closure = closure
     state.closure_error = None
     clear_downstream_of_closure(state)
+
+
+def _package_filename(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", name.strip()).strip("-").lower() + ".json"
+
+
+def _render_save_package(state: WizardState) -> None:
+    """Capture this closure as a package that can be replayed elsewhere.
+
+    Connect can load a stored package and skip the whole source half of the
+    wizard. Nothing in the product could produce one — ``save_package`` and
+    ``package_from_closure`` existed in the API with no caller anywhere, so
+    the only way to get a package was to write a script. The closure is
+    finished at exactly this point, which makes here the place to offer it.
+
+    Saving is source-side and offline: it writes a file, touches no tenant,
+    and none of the safety guards apply. Not to be confused with anything on
+    the Run step.
+    """
+    if state.package is not None:
+        return  # Already a package. Re-saving it would just copy the file.
+
+    with st.expander("Save this selection as a reusable package"):
+        st.caption(
+            "Writes the closure above — every payload, every dependency edge, "
+            "the migration order — to a file. Loading it on Connect replaces "
+            "the source tenant entirely, so the same bundle can be sent to "
+            "another destination later without re-selecting or re-resolving. "
+            "Writes a file only; no tenant is touched."
+        )
+        name = st.text_input(
+            "Package name",
+            key="pkg_save_name",
+            placeholder="admin-reports",
+            help="Also becomes the filename.",
+        )
+        description = st.text_area(
+            "What is in it, and who it is for",
+            key="pkg_save_description",
+            placeholder="The eight headcount reports and their calculated fields.",
+        )
+        if not st.button("Save package", key="pkg_save"):
+            return
+        if not name.strip():
+            theme.banner(
+                "danger",
+                "A package needs a name",
+                "It is how the package is identified on the Connect step, and "
+                "it becomes the filename.",
+            )
+            return
+
+        directory = default_packages_dir()
+        path = directory / _package_filename(name)
+        if path.exists():
+            # Overwriting silently would replace a bundle someone else may be
+            # relying on, with no way to tell from the picker that it changed.
+            theme.banner(
+                "danger",
+                f"`{path.name}` already exists",
+                "Packages are not versioned, so saving over one would replace "
+                "whatever it held with no record of the change.",
+                remedy="Use a different name.",
+            )
+            return
+
+        package = package_from_closure(
+            state.closure,
+            name=name.strip(),
+            description=description.strip(),
+            source_tenant=(
+                state.source.target.tenant if state.source.target is not None else ""
+            ),
+            source_services_host=(
+                state.source.target.services_host
+                if state.source.target is not None
+                else ""
+            ),
+            wdmigrator_version=__version__,
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        save_package(package, path)
+        theme.banner(
+            "success",
+            f"Saved {package.node_count} objects to `{path.name}`",
+            "It appears in the package picker on the Connect step from now on.",
+        )
 
 
 def render(state: WizardState, *, heading: bool = True) -> None:
@@ -192,6 +285,8 @@ def render(state: WizardState, *, heading: bool = True) -> None:
             use_container_width=True,
             hide_index=True,
         )
+
+    _render_save_package(state)
 
     st.caption("Changed the selection? Go back to Select.")
 
