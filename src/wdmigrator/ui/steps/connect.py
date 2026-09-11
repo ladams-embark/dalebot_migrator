@@ -39,11 +39,24 @@ from wdmigrator.ui.state import ConnectionState, WizardState, reset_downstream
 
 STEP_ID = "connect"
 
-# Common-case quick fill. The tenant ID itself isn't a credential (it's
-# already throughout this repo's docs and tests) — never extend this to
-# username/password, which must always be typed, never prefilled.
-_QUICK_FILL_TENANT = "commitconsulting_dpt1"
-_QUICK_FILL_SERVICES_HOST = "impl-services1.wd12.myworkday.com"
+#: Quick fill reads whatever tenant this operator put in ``.env`` for the side
+#: being filled. It used to name one specific tenant as a module constant,
+#: which shipped a prominent one-click button pointing the *write target* at
+#: this project's own implementation tenant for anybody who was not this
+#: project. Reading it per-side means the button can only ever offer the
+#: tenant the operator already configured, and it disappears entirely when
+#: they have not configured one.
+_ENV_PREFIX = {Role.SOURCE: "WD_SOURCE", Role.DESTINATION: "WD_DEST"}
+
+
+def _env_target(role: Role) -> tuple[str, str] | None:
+    """``(tenant, services_host)`` from ``.env`` for this side, if both are set."""
+    prefix = _ENV_PREFIX[role]
+    tenant = os.environ.get(f"{prefix}_TENANT", "").strip()
+    host = os.environ.get(f"{prefix}_SERVICES_HOST", "").strip()
+    if tenant and host:
+        return tenant, host
+    return None
 
 
 def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, label: str) -> None:
@@ -51,6 +64,8 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
     # failure's error text — which can echo back parts of the request — gets
     # redacted rather than risking a cleartext password in a traceback.
     install_redacting_log_filter(state.source.password, state.dest.password)
+
+    side.quick_filled_pending_test = False
 
     try:
         target = parse_tenant_url(side.target_raw)
@@ -173,9 +188,12 @@ def _quick_fill(
     role. Returns True if both username and password ended up populated —
     that's the caller's cue to auto-run the connection test.
     """
+    env_target = _env_target(role)
+    if env_target is None:
+        return False
+    tenant, host = env_target
     side.target_raw = (
-        f"https://{_QUICK_FILL_SERVICES_HOST}/ccx/service/"
-        f"{_QUICK_FILL_TENANT}/{DEFAULT_SERVICE_NAME}/{DEFAULT_VERSION}"
+        f"https://{host}/ccx/service/{tenant}/{DEFAULT_SERVICE_NAME}/{DEFAULT_VERSION}"
     )
     # See the same fix in _pump_discovery — a widget's session_state entry
     # overrides value= once the widget has been rendered once.
@@ -185,7 +203,7 @@ def _quick_fill(
     except TenantURLError:
         side.target = None
 
-    env_prefix = "WD_SOURCE" if role is Role.SOURCE else "WD_DEST"
+    env_prefix = _ENV_PREFIX[role]
     env_user = os.environ.get(f"{env_prefix}_ISU_USERNAME", "")
     env_pass = os.environ.get(f"{env_prefix}_ISU_PASSWORD", "")
     if env_user:
@@ -197,13 +215,22 @@ def _quick_fill(
     return bool(env_user and env_pass)
 
 
-def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
-    theme.section(
-        label,
-        eyebrow="Reads from" if role is Role.SOURCE else "Writes to",
-    )
+def _render_quick_fill(state: WizardState, side: ConnectionState, role: Role,
+                       label: str, key: str) -> None:
+    """The .env shortcut, if this side has one configured.
 
-    if st.button(f"Quick fill: {_QUICK_FILL_TENANT}", key=f"{key}_quick_fill"):
+    The source side fills and tests in one click — it is a read-only
+    connection, and getting to a verified source fast is the whole point.
+    The destination side fills but never tests itself: that is the tenant
+    this tool writes to, and pointing it somewhere should always be
+    something the user did on purpose and then confirmed with a second
+    click on Test.
+    """
+    env_target = _env_target(role)
+    if env_target is None:
+        return
+    tenant, _host = env_target
+    if st.button(f"Quick fill from .env: {tenant}", key=f"{key}_quick_fill"):
         creds_filled = _quick_fill(
             side,
             role,
@@ -211,9 +238,29 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
             user_widget_key=f"{key}_user",
             pass_widget_key=f"{key}_pass",
         )
-        if creds_filled:
+        if role is Role.SOURCE and creds_filled:
             _attempt_connect(state, side, role, label)
+        else:
+            side.quick_filled_pending_test = True
         st.rerun()
+
+    if role is Role.DESTINATION and side.quick_filled_pending_test:
+        theme.banner(
+            "warning",
+            f"Destination filled from .env: {tenant}",
+            "This is the tenant this tool writes to, and nothing has been "
+            "tested against it yet. Check it is the one you mean.",
+            remedy="Click Test destination connection when you are ready.",
+        )
+
+
+def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
+    theme.section(
+        label,
+        eyebrow="Reads from" if role is Role.SOURCE else "Writes to",
+    )
+
+    _render_quick_fill(state, side, role, label, key)
 
     with st.expander(
         "Find services host from tenant ID",

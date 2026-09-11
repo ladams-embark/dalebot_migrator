@@ -39,8 +39,43 @@ def test_the_step_rail_is_six_visible_steps():
         assert title in rendered
 
 
-def test_connect_does_not_prefill_credentials_but_keeps_quick_fill():
-    """Users always type credentials. Quick fill still exists for dpt1."""
+_ENV_KEYS = (
+    "WD_SOURCE_TENANT",
+    "WD_SOURCE_SERVICES_HOST",
+    "WD_SOURCE_ISU_USERNAME",
+    "WD_SOURCE_ISU_PASSWORD",
+    "WD_DEST_TENANT",
+    "WD_DEST_SERVICES_HOST",
+    "WD_DEST_ISU_USERNAME",
+    "WD_DEST_ISU_PASSWORD",
+)
+
+
+@pytest.fixture
+def no_env(monkeypatch):
+    """No tenant addressing in the environment.
+
+    ``ui/app.py`` calls ``load_dotenv`` at import, so a developer with a real
+    ``.env`` would otherwise see different Connect chrome than CI does. These
+    tests state which world they are in rather than inheriting one.
+    """
+    for key in _ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture
+def env_both_sides(monkeypatch):
+    monkeypatch.setenv("WD_SOURCE_TENANT", "env_source_tenant")
+    monkeypatch.setenv("WD_SOURCE_SERVICES_HOST", "impl-services1.wd12.myworkday.com")
+    monkeypatch.setenv("WD_DEST_TENANT", "env_dest_tenant")
+    monkeypatch.setenv("WD_DEST_SERVICES_HOST", "impl-services1.wd12.myworkday.com")
+    for key in ("WD_SOURCE_ISU_USERNAME", "WD_SOURCE_ISU_PASSWORD",
+                "WD_DEST_ISU_USERNAME", "WD_DEST_ISU_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_connect_does_not_prefill_credentials(no_env):
+    """Users always type credentials."""
     at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
     at.run(timeout=15)
     assert not at.exception
@@ -48,8 +83,48 @@ def test_connect_does_not_prefill_credentials_but_keeps_quick_fill():
     assert user_fields, "username fields are missing"
     for field in user_fields:
         assert not field.value
-    quick = [b for b in at.button if b.key in {"src_quick_fill", "dst_quick_fill"}]
-    assert len(quick) == 2
+
+
+def test_quick_fill_is_absent_when_no_tenant_is_configured(no_env):
+    """The button used to name one hardcoded tenant and was always shown.
+
+    With nothing in the environment there is no tenant it could honestly
+    offer, so it must not render at all.
+    """
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    at.run(timeout=15)
+    assert not at.exception
+    assert not [b for b in at.button if b.key in {"src_quick_fill", "dst_quick_fill"}]
+
+
+def test_quick_fill_offers_each_side_its_own_configured_tenant(env_both_sides):
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    at.run(timeout=15)
+    assert not at.exception
+    labels = {b.key: b.label for b in at.button if b.key in {"src_quick_fill", "dst_quick_fill"}}
+    assert set(labels) == {"src_quick_fill", "dst_quick_fill"}
+    assert "env_source_tenant" in labels["src_quick_fill"]
+    assert "env_dest_tenant" in labels["dst_quick_fill"]
+    # Never the other side's tenant: filling the write target with the
+    # source's address is exactly the confusion this replaced.
+    assert "env_dest_tenant" not in labels["src_quick_fill"]
+    assert "env_source_tenant" not in labels["dst_quick_fill"]
+
+
+def test_destination_quick_fill_fills_but_does_not_test(env_both_sides):
+    """Pointing the write target somewhere must stay a deliberate second click."""
+    from wdmigrator.ui.state import STATE_KEY
+
+    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    at.run(timeout=15)
+    [b for b in at.button if b.key == "dst_quick_fill"][0].click().run(timeout=15)
+    assert not at.exception
+    state = at.session_state[STATE_KEY]
+    assert state.dest.target is not None
+    assert state.dest.target.tenant == "env_dest_tenant"
+    assert not state.dest.verified, "quick fill must not authenticate the destination"
+    rendered = " ".join(str(w.value) for w in at.markdown)
+    assert "Destination filled from .env" in rendered
 
 
 class _StubTarget:

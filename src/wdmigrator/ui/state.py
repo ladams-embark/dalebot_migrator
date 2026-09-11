@@ -82,6 +82,11 @@ class ConnectionState:
     # generates, hiding the progress messages it exists to show.
     discovery_expanded: bool = False
 
+    #: Set when quick fill populated this side but did not test it — the
+    #: destination path, where filling the write target from a file should
+    #: not also authenticate against it. Cleared by any connection attempt.
+    quick_filled_pending_test: bool = False
+
     @property
     def verified(self) -> bool:
         return self.status is not None and self.status.ok and self.connection is not None
