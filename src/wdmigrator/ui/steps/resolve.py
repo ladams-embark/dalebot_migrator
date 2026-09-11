@@ -88,14 +88,23 @@ def _compute(state: WizardState) -> None:
 def render(state: WizardState, *, heading: bool = True) -> None:
     if heading:
         st.header("Resolve")
-    if state.package is not None:
-        st.caption("Using the closure from the loaded package.")
-    elif heading:
-        st.caption(
-            "Expands your selection into everything that must migrate with it, in "
-            "child-most-first order. Makes no tenant calls — the source index already "
-            "holds every calculated field, so this is an in-memory walk."
-        )
+    # The caption used to live behind ``if heading``, and Plan — the only
+    # place this is ever rendered in the product — passes heading=False. So
+    # the sentence explaining what this stage does was written, was correct,
+    # and never once reached a user. Always render it.
+    theme.section(
+        "1. Everything that has to come along",
+        (
+            "The objects captured in the package, in child-most-first order."
+            if state.package is not None
+            else "Your selection expanded into every object that has to migrate "
+                 "with it, in the order they must be written — children before "
+                 "the things that reference them. Makes no tenant calls: the "
+                 "source index already holds every calculated field, so this is "
+                 "an in-memory walk."
+        ),
+        eyebrow="Dependencies",
+    )
 
     # A package-loaded run has state.closure set at load time; Recompute is
     # hidden because there is nothing to recompute against.

@@ -39,6 +39,7 @@ from wdmigrator.api import (
     ReportSharing,
     TIME_TRACKING_KINDS,
     TIME_TRACKING_SERVICE_NAME,
+    describe_plan,
     evaluate_guards,
     iter_execute,
 )
@@ -70,6 +71,19 @@ _SHARING_HELP = {
 }
 
 STEP_ID = "confirm"
+
+
+def _outcome_sentence(state: WizardState) -> str:
+    """What this run does to the destination, in one sentence.
+
+    Counts by action and a plan hash answer "how many". They never answer
+    "what is about to happen to my tenant", which is the question somebody
+    deciding on their own actually has.
+    """
+    return describe_plan(
+        state.plan,
+        destination_tenant=state.dest.target.tenant if state.dest.target else None,
+    )
 
 
 def _plan_has_report_creates(state: WizardState) -> bool:
@@ -237,8 +251,13 @@ def render_plan_review(state: WizardState) -> None:
     if state.plan is None:
         return
 
-    dest = state.dest.target.tenant if state.dest.target else "?"
-    st.caption(f"{state.plan.writes_planned} write(s) planned to `{dest}`")
+    theme.section(
+        "3. What will be sent",
+        "The payloads this run would put on the wire, built and serialized "
+        "locally. Nothing here contacts the destination.",
+        eyebrow="Review before running",
+    )
+    st.markdown(_outcome_sentence(state))
     st.download_button(
         "Download plan (JSON)",
         data=_plan_export_bytes(state),

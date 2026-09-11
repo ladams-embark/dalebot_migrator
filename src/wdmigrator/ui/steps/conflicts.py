@@ -222,11 +222,17 @@ def _render_overrides(state: WizardState) -> None:
 def render(state: WizardState, *, heading: bool = True) -> None:
     if heading:
         st.header("Conflicts")
-        st.caption(
-            "Probes the destination tenant for every object in the resolved closure to "
-            "decide CREATE vs SKIP. This is real, targeted destination traffic — one Get "
-            "per object, not a bulk pull. It starts once destination matching is built."
-        )
+    # Same as ``resolve.render``: this explanation was behind ``if heading``
+    # and Plan passes heading=False, so the only screen that shows this stage
+    # never showed what it was doing.
+    theme.section(
+        "2. What the destination already has",
+        "Every object above is looked up in the destination tenant to decide "
+        "whether it has to be created or is already there and can be reused. "
+        "This is real destination traffic — one Get per object, not a bulk "
+        "pull — and it reads only; nothing is written on this step.",
+        eyebrow="Create or reuse",
+    )
 
     if state.closure is None:
         theme.banner("danger", "No resolved closure", remedy="Go back to Plan.")

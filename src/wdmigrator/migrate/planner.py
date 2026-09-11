@@ -810,6 +810,90 @@ def build_plan(
     return plan
 
 
+#: Singular/plural wording for every node kind, for prose rather than tables.
+#: "dashboard_tabbed" is a real distinction to the writer and a meaningless one
+#: to a reader, so both flavours read as "dashboard" here.
+_KIND_WORDS: dict[NodeKind, tuple[str, str]] = {
+    NodeKind.CALCULATED_FIELD: ("calculated field", "calculated fields"),
+    NodeKind.CALCULATED_MEASURE: ("calculated measure", "calculated measures"),
+    NodeKind.REPORT: ("report", "reports"),
+    NodeKind.PROMPT_SET: ("prompt set", "prompt sets"),
+    NodeKind.PROMPT_FIELD: ("prompt field", "prompt fields"),
+    NodeKind.GAUGE_RANGE: ("gauge range", "gauge ranges"),
+    NodeKind.ANALYTIC_INDICATOR: ("analytic indicator", "analytic indicators"),
+    NodeKind.DASHBOARD: ("dashboard", "dashboards"),
+    NodeKind.DASHBOARD_TABBED: ("dashboard", "dashboards"),
+    NodeKind.TIME_CALCULATION: ("time calculation", "time calculations"),
+    NodeKind.TIME_CALCULATION_GROUP: ("time calculation group", "time calculation groups"),
+    NodeKind.TIME_CALCULATION_TAG: ("time calculation tag", "time calculation tags"),
+}
+
+
+def _phrase(counts: Mapping[str, int]) -> str:
+    """``{"report": 3, "dashboard": 1}`` -> ``"3 reports and 1 dashboard"``."""
+    parts = [f"{n} {word}" for word, n in counts.items() if n]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _count_by_word(plan: "MigrationPlan", action: "Action") -> dict[str, int]:
+    """How many objects this action touches, keyed by the word for them.
+
+    Counted against the (singular, plural) pair rather than the kind, so the
+    two dashboard flavours — a real distinction to the writer, a meaningless
+    one to a reader — add up to "2 dashboards" instead of "1 dashboard" twice.
+    """
+    by_words: dict[tuple[str, str], int] = {}
+    for node in plan.ordered_nodes:
+        if plan.action_for(node) is not action:
+            continue
+        words = _KIND_WORDS.get(node.kind, (node.kind.value, node.kind.value))
+        by_words[words] = by_words.get(words, 0) + 1
+    return {
+        (singular if n == 1 else plural): n
+        for (singular, plural), n in by_words.items()
+    }
+
+
+def describe_plan(plan: "MigrationPlan", *, destination_tenant: str | None = None) -> str:
+    """One plain sentence saying what this run does to the destination.
+
+    Everywhere else the plan is shown as counts by action and a hash, which
+    answers "how many" but never "what is about to happen to my tenant". This
+    is the sentence somebody pastes into a change ticket, and the one a user
+    with nobody to ask needs in order to decide.
+    """
+    where = f" in `{destination_tenant}`" if destination_tenant else ""
+    created = _phrase(_count_by_word(plan, Action.CREATE))
+    updated = _phrase(_count_by_word(plan, Action.UPDATE))
+    skipped = sum(1 for a in plan.actions.values() if a is Action.SKIP)
+
+    clauses = []
+    if created:
+        clauses.append(f"create {created}")
+    if updated:
+        clauses.append(f"update {updated}")
+
+    if not clauses:
+        total = len(plan.ordered_nodes)
+        return (
+            f"Nothing will be written{where}: all {total} object(s) are already "
+            "there and will be reused unchanged."
+        )
+
+    sentence = "This run will " + " and ".join(clauses) + where + "."
+    if skipped:
+        sentence += (
+            f" {skipped} other object(s) already exist there and will be reused "
+            "unchanged."
+        )
+    sentence += " Nothing is deleted — this service has no delete operation."
+    return sentence
+
+
 def validate_plan(plan: MigrationPlan) -> list[Blocker]:
     """Everything wrong with this plan, all at once.
 

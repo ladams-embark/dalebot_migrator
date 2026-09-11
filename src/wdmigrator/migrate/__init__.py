@@ -37,6 +37,7 @@ from wdmigrator.migrate.planner import (
     default_action,
     iter_check_existence,
     probe_node,
+    describe_plan,
     validate_plan,
 )
 from wdmigrator.migrate.resolver import (
@@ -164,6 +165,7 @@ __all__ = [
     "summarise",
     "topological_sort",
     "unmapped_wids",
+    "describe_plan",
     "validate_plan",
     "write_node",
 ]
