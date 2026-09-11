@@ -406,45 +406,77 @@ def _render_resume(state: WizardState) -> None:
     """
     if state.selected_reports_added or state.selected_dashboards_added:
         return
-    summaries = session_store.list_sessions(
-        workspace.user_dir(session_store.SESSION_DIR)
-    )
-    if not summaries:
-        return
 
     theme.section(
         "Resume a saved session",
         "Brings back the tenants, usernames and object selection from a "
-        "previous session. Passwords and approvals are never saved. Only "
-        "sessions saved from this browser's workspace are listed — other "
-        "people using this app have their own.",
+        "previous session. Passwords and approvals are never saved.",
         eyebrow="Optional",
     )
-    options = {s.path.name: s for s in summaries}
-    choice = st.selectbox(
-        "Saved sessions",
-        options=list(options),
-        format_func=lambda n: options[n].label,
-        key="session_choice",
+
+    summaries = session_store.list_sessions(
+        workspace.user_dir(session_store.SESSION_DIR)
     )
-    if st.button("Resume this session", key="session_resume"):
+    if summaries:
+        st.caption(
+            "Saved on the server. Only sessions from this browser's workspace "
+            "are listed — other people using this app have their own. These "
+            "are lost if the app restarts."
+        )
+        options = {s.path.name: s for s in summaries}
+        choice = st.selectbox(
+            "Saved sessions",
+            options=list(options),
+            format_func=lambda n: options[n].label,
+            key="session_choice",
+        )
+        if st.button("Resume this session", key="session_resume"):
+            try:
+                data = session_store.load_session(options[choice].path)
+            except session_store.SessionError as exc:
+                theme.banner("danger", "Could not resume", str(exc))
+                return
+            _apply_resumed(state, data)
+
+    # The durable half. A hosted app's filesystem does not survive the
+    # container restarting — which happens on redeploy, on waking from idle,
+    # and on running out of memory — so the copy that actually keeps is the
+    # one the user downloaded to their own machine.
+    uploaded = st.file_uploader(
+        "Or upload a session file you downloaded earlier",
+        type=["json"],
+        key="session_upload",
+        help="The file from the Download button on the Select step.",
+    )
+    if uploaded is not None and st.button(
+        "Resume from this file", key="session_resume_upload"
+    ):
         try:
-            data = session_store.load_session(options[choice].path)
+            data = session_store.parse_session(uploaded.getvalue(), label=uploaded.name)
         except session_store.SessionError as exc:
             theme.banner("danger", "Could not resume", str(exc))
             return
-        notes = session_store.restore(state, data)
-        st.session_state["_resume_notes"] = notes
-        # The target and username fields are widget-backed; once rendered,
-        # session_state drives them and ``value=`` is ignored. Same fix as
-        # _pump_discovery and _quick_fill.
-        for key, side in (("src", state.source), ("dst", state.dest)):
-            st.session_state[f"{key}_target"] = side.target_raw
-            st.session_state[f"{key}_user"] = side.username
-        st.rerun()
+        _apply_resumed(state, data)
 
     for note in st.session_state.get("_resume_notes", []):
         st.caption(note)
+
+
+def _apply_resumed(state: WizardState, data: dict) -> None:
+    """Copy a validated session onto the wizard and rerun.
+
+    Shared by the on-disk picker and the uploader so the two cannot drift —
+    in particular so neither can skip seeding the widget-backed fields and
+    leave a resumed session showing empty tenant boxes.
+    """
+    st.session_state["_resume_notes"] = session_store.restore(state, data)
+    # The target and username fields are widget-backed; once rendered,
+    # session_state drives them and ``value=`` is ignored. Same fix as
+    # _pump_discovery and _quick_fill.
+    for key, side in (("src", state.source), ("dst", state.dest)):
+        st.session_state[f"{key}_target"] = side.target_raw
+        st.session_state[f"{key}_user"] = side.username
+    st.rerun()
 
 
 def _render_save_session(state: WizardState) -> None:

@@ -677,11 +677,29 @@ def _render_save_session(state: WizardState) -> None:
     )
     if not picked:
         return
+
+    # Two saves, because they fail in different ways. The server-side one is
+    # a click away and survives a browser reload. It does not survive the app
+    # restarting, which a hosted container does on every redeploy, on waking
+    # from idle, and on running out of memory — and it takes the whole
+    # out/ directory with it. The download is the copy that outlives all of
+    # that, because it is on the consultant's own machine.
+    st.download_button(
+        f"Download this session ({picked} object(s))",
+        data=session_store.serialise(state),
+        file_name=session_store.download_name(state),
+        mime="application/json",
+        key="session_download",
+        help="Keeps a copy on your machine. Re-upload it from the Connect "
+             "step. This is the copy that survives the app restarting.",
+    )
+
     if st.button(
         f"Save this session ({picked} object(s))",
         key="session_save_select",
         help="Writes the tenants, usernames and selection to out/sessions. "
-             "Passwords and approvals are never saved.",
+             "Passwords and approvals are never saved. Faster than the "
+             "download, but lost if the app restarts.",
     ):
         path = session_store.save_session(
             state, directory=workspace.user_dir(session_store.SESSION_DIR)

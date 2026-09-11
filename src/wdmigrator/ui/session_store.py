@@ -190,22 +190,57 @@ def _prune(folder: Path) -> None:
         stale.unlink(missing_ok=True)
 
 
+def parse_session(raw: bytes | str | dict, *, label: str = "This file") -> dict:
+    """Validate a session document from anywhere — a file, or an upload.
+
+    Split out from :func:`load_session` because a hosted app's filesystem does
+    not survive a container restart, so the durable copy of a session is the
+    one the user downloaded to their own machine and hands back through a file
+    uploader. That copy gets the same schema check as one read off disk; an
+    uploaded file is the least trustworthy input in the wizard.
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SessionError(f"{label} is not a session file: {exc}") from exc
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as exc:
+            raise SessionError(f"{label} is not readable JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise SessionError(f"{label} is not a session file.")
+
+    version = raw.get("$schema_version")
+    if version != SCHEMA_VERSION:
+        raise SessionError(
+            f"{label} was written by a different version of this tool "
+            f"(schema {version!r}, expected {SCHEMA_VERSION})."
+        )
+    return raw
+
+
+def serialise(state) -> str:
+    """A session as text, for handing to the browser as a download."""
+    return json.dumps(snapshot(state), indent=2, default=str)
+
+
+def download_name(state) -> str:
+    """Filename for the downloaded copy. Names both tenants, because the one
+    thing worth knowing before re-uploading one is where it points."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"wdmigrator-{_safe_stem(state)}-{stamp}.json"
+
+
 def load_session(path: str | Path) -> dict:
     """Read one session file. Raises :class:`SessionError` on anything odd."""
     p = Path(path)
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as exc:
         raise SessionError(f"Could not read {p.name}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise SessionError(f"{p.name} is not a session file.")
-    version = data.get("$schema_version")
-    if version != SCHEMA_VERSION:
-        raise SessionError(
-            f"{p.name} was written by a different version of this tool "
-            f"(schema {version!r}, expected {SCHEMA_VERSION})."
-        )
-    return data
+    return parse_session(raw, label=p.name)
 
 
 def list_sessions(directory: str | Path | None = None) -> list[SessionSummary]:
@@ -300,6 +335,9 @@ def restore(state, data: dict) -> list[str]:
 
 __all__ = [
     "KEEP_SESSIONS",
+    "download_name",
+    "parse_session",
+    "serialise",
     "SCHEMA_VERSION",
     "SESSION_DIR",
     "SessionError",
