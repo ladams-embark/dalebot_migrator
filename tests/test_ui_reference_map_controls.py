@@ -19,6 +19,8 @@ from streamlit.testing.v1 import AppTest
 from wdmigrator.api import ReferenceAction, ReferenceDecision
 from wdmigrator.config.targets import target_from_parts
 from wdmigrator.ui import reference_maps
+
+from conftest import TEST_WORKSPACE, pin_workspace
 from wdmigrator.ui.state import STATE_KEY, WizardState
 from wdmigrator.ui.steps import execute as execute_step
 
@@ -58,11 +60,11 @@ def _render(state, tmp_path, monkeypatch):
     """Render just the map controls — the surrounding step needs a live plan
     pipeline that has nothing to do with what is under test."""
     monkeypatch.setattr(reference_maps, "MAP_DIR", tmp_path)
-    at = AppTest.from_string(
+    at = pin_workspace(AppTest.from_string(
         "import streamlit as st\n"
         "from wdmigrator.ui.steps import execute\n"
         "execute._render_reference_map_controls(st.session_state['s'])\n"
-    )
+    ))
     at.session_state["s"] = state
     at.run(timeout=15)
     assert not at.exception, at.exception
@@ -70,7 +72,7 @@ def _render(state, tmp_path, monkeypatch):
 
 
 def _saved_map(tmp_path, **decisions):
-    reference_maps.save_map(decisions, dest_tenant=DEST, directory=tmp_path)
+    reference_maps.save_map(decisions, dest_tenant=DEST, directory=tmp_path / TEST_WORKSPACE)
 
 
 class TestReuse:
@@ -116,7 +118,8 @@ class TestReuse:
         assert "answers none of the references below" in captions
 
     def test_an_unreadable_map_warns_and_does_not_stop_the_table(self, tmp_path, monkeypatch):
-        (tmp_path / f"{DEST}.json").write_text("{not json", encoding="utf-8")
+        (tmp_path / TEST_WORKSPACE).mkdir(parents=True, exist_ok=True)
+        (tmp_path / TEST_WORKSPACE / f"{DEST}.json").write_text("{not json", encoding="utf-8")
         at = _render(_state(), tmp_path, monkeypatch)
         rendered = " ".join(str(m.value) for m in at.markdown)
         assert "could not be read" in rendered
@@ -142,7 +145,7 @@ class TestSave:
         at.button(key="refmap_save").click().run(timeout=15)
         assert not at.exception
 
-        loaded = reference_maps.load_map(DEST, directory=tmp_path)
+        loaded = reference_maps.load_map(DEST, directory=tmp_path / TEST_WORKSPACE)
         assert loaded.decisions["ORG_WID"].replacement_value == "DEST_TOP"
 
     def test_nothing_is_offered_when_the_destination_is_unknown(self, tmp_path, monkeypatch):

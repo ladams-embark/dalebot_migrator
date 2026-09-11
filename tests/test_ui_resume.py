@@ -23,6 +23,8 @@ from wdmigrator.ui import session_store
 from wdmigrator.ui.state import WizardState
 from wdmigrator.ui.steps import connect as connect_step
 
+from conftest import TEST_WORKSPACE, pin_workspace
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -106,7 +108,7 @@ class TestSourceTenantMismatch:
 def _connect_app(session_dir, **state_kwargs):
     from wdmigrator.ui.state import STATE_KEY
 
-    at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    at = pin_workspace(AppTest.from_file(str(ROOT / "streamlit_app.py")))
     at.session_state[STATE_KEY] = WizardState(step="connect", **state_kwargs)
     at.run(timeout=20)
     return at
@@ -127,7 +129,7 @@ class TestConnectStepUI:
         saved.source.target = target_from_parts("h.example.com", "src_tenant")
         saved.dest.target = target_from_parts("h.example.com", "dst_tenant")
         saved.selected_reports_added = {"W0": {}}
-        session_store.save_session(saved, directory=tmp_path)
+        session_store.save_session(saved, directory=tmp_path / TEST_WORKSPACE)
 
         at = _connect_app(tmp_path)
         assert not at.exception
@@ -138,7 +140,7 @@ class TestConnectStepUI:
         button that says "resume"."""
         saved = WizardState()
         saved.selected_reports_added = {"W0": {}}
-        session_store.save_session(saved, directory=tmp_path)
+        session_store.save_session(saved, directory=tmp_path / TEST_WORKSPACE)
 
         at = _connect_app(tmp_path, selected_reports_added={"W9": {}})
         assert not at.exception

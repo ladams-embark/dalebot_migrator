@@ -35,7 +35,7 @@ from wdmigrator.api import (
     lookup_report,
     lookup_report_by_name,
 )
-from wdmigrator.ui import session_store, theme
+from wdmigrator.ui import session_store, theme, workspace
 from wdmigrator.ui.indexes import (
     IndexSpec,
     bulk_build_indexes,
@@ -683,12 +683,21 @@ def _render_save_session(state: WizardState) -> None:
         help="Writes the tenants, usernames and selection to out/sessions. "
              "Passwords and approvals are never saved.",
     ):
-        path = session_store.save_session(state)
+        path = session_store.save_session(
+            state, directory=workspace.user_dir(session_store.SESSION_DIR)
+        )
         theme.banner(
             "success",
             "Session saved",
             f"Written to `{path}`. If this tab reloads, resume it from the "
             "Connect step.",
+            remedy=(
+                "Keep this tab's URL. Saved sessions are private to the "
+                f"workspace in the address bar (`{workspace.shared_link()}`), "
+                "so a link without it — or somebody else's link — will not "
+                "find this session."
+            ),
+            remedy_label="Before you close the tab",
         )
 
 

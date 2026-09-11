@@ -32,7 +32,7 @@ from wdmigrator.api import (
     iter_check_existence,
     iter_execute,
 )
-from wdmigrator.ui import reference_maps, theme
+from wdmigrator.ui import reference_maps, theme, workspace
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.indexes import _format_duration, destination_match_indexes
 from wdmigrator.ui.runner import READ_TIME_BUDGET, WRITE_TIME_BUDGET, pump, start_job
@@ -401,7 +401,9 @@ def _render_reference_map_controls(state: WizardState) -> None:
         return
 
     try:
-        saved = reference_maps.load_map(tenant)
+        saved = reference_maps.load_map(
+            tenant, directory=workspace.user_dir(reference_maps.MAP_DIR)
+        )
     except reference_maps.ReferenceMapError as exc:
         theme.banner(
             "warning",
@@ -423,7 +425,9 @@ def _render_reference_map_controls(state: WizardState) -> None:
                  f"for a different destination.",
         ):
             path = reference_maps.save_map(
-                state.reference_decisions, dest_tenant=tenant
+                state.reference_decisions,
+                dest_tenant=tenant,
+                directory=workspace.user_dir(reference_maps.MAP_DIR),
             )
             theme.banner(
                 "success",

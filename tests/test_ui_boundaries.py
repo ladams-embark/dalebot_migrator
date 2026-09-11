@@ -76,3 +76,40 @@ def test_no_deprecated_use_container_width(path: pathlib.Path):
         f"{path.relative_to(UI_ROOT)}: use_container_width is deprecated — "
         'use width="stretch" on buttons, or drop it on dataframes/editors'
     )
+
+
+#: Artifact directories that must never be written to unscoped, because the
+#: app is hosted and several consultants share one filesystem. Each holds
+#: something private to one person: their saved selections, the destination
+#: identifiers they looked up, their error reports.
+_SCOPED_DIRS = ("SESSION_DIR", "MAP_DIR", "ERROR_DIR")
+
+
+@pytest.mark.parametrize(
+    "path", _ui_module_files(), ids=lambda p: str(p.relative_to(UI_ROOT)).replace("\\", "/")
+)
+def test_private_artifact_dirs_are_scoped_per_workspace(path: pathlib.Path):
+    """Naming one of these constants is fine; passing it somewhere without
+    ``workspace.user_dir`` around it is not.
+
+    Unscoped, the resume picker listed every consultant's saved sessions —
+    each labelled with the tenants and usernames it came from — and pruning
+    counted files across all of them, so one person's saves deleted another's.
+    The failure is silent and only shows up when two people are using the app
+    at the same time, which is the case nobody tests by hand.
+    """
+    source = path.read_text(encoding="utf-8")
+    for constant in _SCOPED_DIRS:
+        # The module that defines a constant also names it as its own default,
+        # which is correct — those modules take an explicit ``directory`` and
+        # know nothing about browser sessions. Only callers are checked.
+        if f"\n{constant} = " in source:
+            continue
+        for line in source.splitlines():
+            if constant not in line or line.lstrip().startswith("#"):
+                continue
+            assert "user_dir" in line, (
+                f"{path.relative_to(UI_ROOT)}: passes {constant} without "
+                "workspace.user_dir() — a hosted app serves several "
+                f"consultants from one filesystem.\n    {line.strip()}"
+            )

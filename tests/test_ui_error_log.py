@@ -22,6 +22,8 @@ pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest
 
 from wdmigrator.ui import errors
+
+from conftest import TEST_WORKSPACE, pin_workspace
 from wdmigrator.ui.state import WizardState
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -152,7 +154,7 @@ class TestTheBannerPointsAtIt:
 
         monkeypatch.setattr(select_step, "render", _explode)
 
-        at = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+        at = pin_workspace(AppTest.from_file(str(ROOT / "streamlit_app.py")))
         at.session_state[STATE_KEY] = _state()
         at.run(timeout=20)
 
@@ -160,7 +162,7 @@ class TestTheBannerPointsAtIt:
         rendered = " ".join(str(m.value) for m in at.markdown)
         assert "Unexpected error in the Select step" in rendered
         assert PASSWORD not in rendered
-        written = list(tmp_path.glob("error-*.log"))
+        written = list((tmp_path / TEST_WORKSPACE).glob("error-*.log"))
         assert len(written) == 1
         assert written[0].name in rendered
         assert "safe to send on" in rendered

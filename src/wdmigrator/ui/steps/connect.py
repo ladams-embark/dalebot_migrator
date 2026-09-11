@@ -33,7 +33,7 @@ from wdmigrator.api import (
     verify_connection,
 )
 from wdmigrator.ui import secrets as secrets_ui
-from wdmigrator.ui import session_store, theme
+from wdmigrator.ui import session_store, theme, workspace
 from wdmigrator.ui.components import (
     render_capabilities,
     render_connection_status,
@@ -406,14 +406,18 @@ def _render_resume(state: WizardState) -> None:
     """
     if state.selected_reports_added or state.selected_dashboards_added:
         return
-    summaries = session_store.list_sessions()
+    summaries = session_store.list_sessions(
+        workspace.user_dir(session_store.SESSION_DIR)
+    )
     if not summaries:
         return
 
     theme.section(
         "Resume a saved session",
         "Brings back the tenants, usernames and object selection from a "
-        "previous session. Passwords and approvals are never saved.",
+        "previous session. Passwords and approvals are never saved. Only "
+        "sessions saved from this browser's workspace are listed — other "
+        "people using this app have their own.",
         eyebrow="Optional",
     )
     options = {s.path.name: s for s in summaries}
@@ -460,11 +464,19 @@ def _render_save_session(state: WizardState) -> None:
     ):
         return
     if st.button("Save this session", key="session_save_connect"):
-        path = session_store.save_session(state)
+        path = session_store.save_session(
+            state, directory=workspace.user_dir(session_store.SESSION_DIR)
+        )
         theme.banner(
             "success",
             "Session saved",
             f"Written to `{path}`. Resume it from this step after a reload.",
+            remedy=(
+                "Keep this tab's URL. Saved sessions are private to the "
+                f"workspace in the address bar (`{workspace.shared_link()}`), "
+                "so a link without it will not find this session."
+            ),
+            remedy_label="Before you close the tab",
         )
 
 

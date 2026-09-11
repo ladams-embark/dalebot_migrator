@@ -22,7 +22,7 @@ load_dotenv()
 import streamlit as st
 
 from wdmigrator.api import redact
-from wdmigrator.ui import components, errors, theme
+from wdmigrator.ui import components, errors, theme, workspace
 from wdmigrator.ui.state import STEP_ORDER, STEP_TITLES, WizardState, get_state
 from wdmigrator.ui.steps import connect, plan, results, run, scope, select
 
@@ -139,7 +139,11 @@ def main() -> None:
         secrets = (state.source.password, state.dest.password)
         message = redact(str(exc), secrets)
         log_path = errors.write_error_log(
-            exc, step=state.step, state=state, secrets=secrets
+            exc,
+            step=state.step,
+            state=state,
+            secrets=secrets,
+            directory=workspace.safe_user_dir(errors.ERROR_DIR),
         )
         theme.banner(
             "danger",
