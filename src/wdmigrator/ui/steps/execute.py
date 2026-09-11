@@ -568,7 +568,6 @@ def _render_reference_resolution(state: WizardState) -> None:
     edited = st.data_editor(
         pd.DataFrame(rows).drop(columns=["_wid", "_replace_required"]),
         hide_index=True,
-        use_container_width=True,
         disabled=["Object", "Where", "Identified as", "Required", "Also affects"],
         column_config={
             "Required": st.column_config.TextColumn(
@@ -794,16 +793,16 @@ def render(state: WizardState, *, heading: bool = True) -> None:
         col1, col2, _ = st.columns([1, 1, 4])
         with col1:
             if not state.execute_paused:
-                if st.button("Pause", key="execute_pause", use_container_width=True):
+                if st.button("Pause", key="execute_pause", width="stretch"):
                     state.execute_paused = True
                     st.rerun()
             else:
                 if st.button("Resume", key="execute_resume", type="primary",
-                             use_container_width=True):
+                             width="stretch"):
                     state.execute_paused = False
                     st.rerun()
         with col2:
-            if st.button("Cancel", key="execute_cancel", use_container_width=True):
+            if st.button("Cancel", key="execute_cancel", width="stretch"):
                 job.cancel()
                 st.rerun()
 
@@ -825,7 +824,7 @@ def render(state: WizardState, *, heading: bool = True) -> None:
                     {"name": p.node.name or p.node.node_id, "action": p.record.action.value, "status": p.record.status.value}
                     for p in job.events
                 ],
-                use_container_width=True, hide_index=True,
+                hide_index=True,
             )
 
         if job.error is not None:

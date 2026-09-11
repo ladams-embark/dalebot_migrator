@@ -161,7 +161,7 @@ def main() -> None:
 
     nav_cols = st.columns([1, 1, 6])
     with nav_cols[0]:
-        if current_index > 0 and st.button("Back", key="nav_back", use_container_width=True):
+        if current_index > 0 and st.button("Back", key="nav_back", width="stretch"):
             state.hold_step = True
             state.step = STEP_ORDER[current_index - 1]
             st.rerun()
@@ -173,7 +173,7 @@ def main() -> None:
                 key="nav_next",
                 disabled=bool(blockers),
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             ):
                 state.hold_step = False
                 state.step = STEP_ORDER[current_index + 1]

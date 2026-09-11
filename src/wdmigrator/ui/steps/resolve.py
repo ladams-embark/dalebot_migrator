@@ -282,7 +282,6 @@ def render(state: WizardState, *, heading: bool = True) -> None:
                 }
                 for i, n in enumerate(ordered)
             ],
-            use_container_width=True,
             hide_index=True,
         )
 

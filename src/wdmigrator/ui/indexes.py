@@ -383,7 +383,7 @@ def bulk_build_indexes(
                     f"{button_label} ({len(missing)} to build: {estimates})",
                     key=f"{job_attr}_start",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                 )
                 if can_auto or clicked:
                     start_specs = missing
@@ -392,7 +392,7 @@ def bulk_build_indexes(
             if built and st.button(
                 "Rebuild all",
                 key=f"{job_attr}_rebuild",
-                use_container_width=True,
+                width="stretch",
             ):
                 for spec in built:
                     setattr(state, spec.index_attr, None)
@@ -419,7 +419,7 @@ def bulk_build_indexes(
             detail = _progress_detail(last, getattr(state, specs_attr, None))
         render_job_progress(job, label=label, fraction=fraction, detail=detail)
     with col2:
-        if st.button("Cancel", key=f"{job_attr}_cancel", use_container_width=True):
+        if st.button("Cancel", key=f"{job_attr}_cancel", width="stretch"):
             job.cancel()
             return True
 

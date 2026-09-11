@@ -58,3 +58,21 @@ def test_ui_package_actually_has_files_to_check():
     # Guards against this test silently checking nothing if the ui package
     # ever moves or the glob stops matching real files.
     assert len(_ui_module_files()) >= 10
+
+
+@pytest.mark.parametrize(
+    "path", _ui_module_files(), ids=lambda p: str(p.relative_to(UI_ROOT)).replace("\\", "/")
+)
+def test_no_deprecated_use_container_width(path: pathlib.Path):
+    """Streamlit deprecated ``use_container_width`` and says it will remove it.
+
+    ``width="stretch"`` is the replacement on buttons; on dataframes and data
+    editors ``width`` already defaults to ``"stretch"``, so the argument just
+    goes. Twenty-eight call sites is enough that finding out by way of a
+    TypeError on a version bump, in an app whose next step writes to a tenant,
+    is not how anyone should learn about it.
+    """
+    assert "use_container_width" not in path.read_text(encoding="utf-8"), (
+        f"{path.relative_to(UI_ROOT)}: use_container_width is deprecated — "
+        'use width="stretch" on buttons, or drop it on dataframes/editors'
+    )

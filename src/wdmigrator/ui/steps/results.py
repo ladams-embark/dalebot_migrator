@@ -159,20 +159,20 @@ def render(state: WizardState) -> None:
         }
         for r in records
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, hide_index=True)
 
     col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
             "Download results (CSV)", data=_records_to_csv(records),
             file_name="migration_results.csv", mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
     with col2:
         st.download_button(
             "Download results (JSON)", data=_records_to_json(records),
             file_name="migration_results.json", mime="application/json",
-            use_container_width=True,
+            width="stretch",
         )
     wid_map = _wid_map_from(records)
     with col3:
@@ -181,7 +181,7 @@ def render(state: WizardState) -> None:
                 "Download WID map (JSON)",
                 data=json.dumps(wid_map, indent=2).encode("utf-8"),
                 file_name="wid_map.json", mime="application/json",
-                use_container_width=True,
+                width="stretch",
             )
 
     if state.run_log_path:
@@ -436,7 +436,7 @@ def _render_restore(state: WizardState) -> None:
             if r.action is Action.UPDATE or r.fault
         ]
         if touched:
-            st.dataframe(touched, use_container_width=True, hide_index=True)
+            st.dataframe(touched, hide_index=True)
         else:
             st.caption(
                 "No objects needed an UPDATE — either every row was left "
@@ -451,7 +451,6 @@ def _render_restore(state: WizardState) -> None:
     edited = st.data_editor(
         pd.DataFrame(rows).drop(columns=["_wid"]),
         hide_index=True,
-        use_container_width=True,
         disabled=["Object", "Element", "Source value", "Also on"],
         column_config={
             "Restore as (ID type)": st.column_config.TextColumn(
@@ -585,7 +584,6 @@ def _render_verify(state: WizardState) -> None:
                 }
                 for r in problems
             ],
-            use_container_width=True,
             hide_index=True,
         )
     else:

@@ -107,7 +107,7 @@ def _render_destination_indexes(state: WizardState) -> bool:
                 "Re-run now",
                 key="dest_index_rerun_now",
                 disabled=state.dest_index_job is not None,
-                use_container_width=True,
+                width="stretch",
             ):
                 for spec in specs:
                     setattr(state, spec.index_attr, None)
@@ -192,7 +192,6 @@ def _render_overrides(state: WizardState) -> None:
     edited = st.data_editor(
         df,
         hide_index=True,
-        use_container_width=True,
         disabled=["node_id", "kind", "name", "existence"],
         column_config={
             "action": st.column_config.SelectboxColumn(
@@ -309,7 +308,6 @@ def render(state: WizardState, *, heading: bool = True) -> None:
                     }
                     for e in matched
                 ],
-                use_container_width=True,
                 hide_index=True,
             )
     if unknown:

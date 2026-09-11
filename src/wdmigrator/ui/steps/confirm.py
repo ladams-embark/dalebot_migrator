@@ -290,7 +290,7 @@ def _render_dry_run_results(state: WizardState) -> None:
         }
         for r in state.dry_run_records
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, hide_index=True)
     with st.expander("Inspect a serialized envelope"):
         # Keyed by node_id, not by name. Report names are not unique in Workday
         # (7 of 999 sampled reports shared one), so a name-keyed lookup would

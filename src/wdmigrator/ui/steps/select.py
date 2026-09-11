@@ -204,7 +204,7 @@ def _render_selection(
                 if st.button(
                     "Remove",
                     key=f"{key_prefix}_rm_{wid}",
-                    use_container_width=True,
+                    width="stretch",
                     help=f"Drop this one. The other {len(wids) - 1} stay selected.",
                 ):
                     remove(wid)
@@ -296,7 +296,6 @@ def _render_calculated_fields(state: WizardState) -> None:
             )
             event = st.dataframe(
                 df,
-                use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="multi-row",
@@ -392,7 +391,6 @@ def _render_reports(state: WizardState) -> None:
             )
         event = st.dataframe(
             df,
-            use_container_width=True,
             hide_index=True,
             on_select="rerun",
             selection_mode="multi-row",
@@ -495,7 +493,6 @@ def _render_dashboards(state: WizardState) -> None:
 
     event = st.dataframe(
         df,
-        use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="multi-row",
@@ -573,7 +570,6 @@ def _render_time_calculations(state: WizardState) -> None:
     )
     picked = st.dataframe(
         df,
-        use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="multi-row",
@@ -634,7 +630,7 @@ def _render_package_summary(state: WizardState) -> None:
              "selected": n.selected, "wid": n.source_wid}
             for n in pkg.closure.nodes.values()
         ]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, hide_index=True)
 
 
 def _render_destination_matching(state: WizardState, *, auto_start: bool = False) -> bool:
