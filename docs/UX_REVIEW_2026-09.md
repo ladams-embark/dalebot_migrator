@@ -22,6 +22,11 @@ behind the user, and by nothing in the product.
 Findings are ordered by how much they cost a solo user, not by effort. Each
 names the file it lives in. Nothing here is a rewrite.
 
+> **Status: all thirteen findings are implemented.** See "What was built"
+> at the foot of this document for what each one turned into, and for the
+> two places where the suggestion here was wrong and the implementation
+> deliberately departs from it.
+
 ---
 
 ## Walkthrough: what a first-timer actually meets
@@ -385,3 +390,66 @@ file (12), and the smaller items in (13).
 None of this asks the engine to change. The gates, the guard re-checks, the
 generator contract and the dry-run-before-live rule are all doing their job —
 this is about the interface saying out loud what the engine already knows.
+
+---
+
+## What was built
+
+All thirteen are implemented. Two new engine-side pieces were needed after all
+— `probe_capabilities` in `discovery/inventory.py` and `describe_plan` in
+`migrate/planner.py` — both read-only and neither touching the guard.
+
+| # | What it became | Where |
+|---|---|---|
+| 1 | Session save/resume; inputs restored, approvals never | `ui/session_store.py`, `steps/connect.py`, `steps/select.py` |
+| 2 | "Before you start" panel; one-Get implementer probe at Connect; Scope disables the kinds it gates | `discovery/inventory.py`, `steps/connect.py`, `steps/scope.py` |
+| 3 | Per-pick Remove beside every selection, Clear kept for starting over | `steps/select.py` |
+| 4 | Stage captions moved out from behind `if heading:`, numbered 1–3 | `steps/resolve.py`, `steps/conflicts.py`, `steps/confirm.py` |
+| 5 | Rubric generated from the plan, above the attestation box | `steps/confirm.py` |
+| 6 | `Blocker.waiting`; neutral "Next:" instead of red "Fix:"; nav bar promotes the actionable one | `migrate/planner.py`, `ui/app.py`, `ui/components.py` |
+| 7 | Pickers above the fold, thirteen status rows into one line plus an expander | `steps/select.py`, `ui/indexes.py` |
+| 8 | Reference maps saved and reused per destination tenant; replacement help names the tenant | `ui/reference_maps.py`, `steps/execute.py` |
+| 9 | "Save this selection as a reusable package" on Plan | `steps/resolve.py` |
+| 10 | Quick fill reads `.env` per side; destination fills but never authenticates itself | `steps/connect.py` |
+| 11 | One-shot notice naming what a reset destroyed, and why it had to | `ui/state.py`, `ui/app.py` |
+| 12 | Redacted error report under `out/errors`, named in the banner | `ui/errors.py`, `ui/app.py` |
+| 13 | Outcome sentence, rollback worksheet, Scope sweep estimate, glossary on every step, `use_container_width` sweep, Scope help dedupe | various |
+
+### Where the implementation departs from the suggestion
+
+**Finding 8 does not show a human-readable descriptor beside each raw ID.**
+The review assumed one was available. It is not: a preflight reference block
+is `{"ID": [{"type": ..., "_value_1": ...}]}` and carries no descriptor, so
+the only way to produce a name would be a per-reference tenant lookup with no
+generic operation behind it. Inventing one would have been inventing Workday
+behaviour. The reusable reference map is what that finding turned into
+instead, and it is the larger half of the value anyway.
+
+**Finding 11 does not warn on Back.** Going back destroys nothing — a reset
+only fires when something upstream actually *changes*. Warning on Back would
+have been a false alarm on the common case of stepping back to look at
+something. The notice fires on the change instead, and stays silent for cheap
+losses like an index or a closure, which re-derive themselves; putting a
+banner in front of every pick on Select would have trained people to stop
+reading it.
+
+### Verified live
+
+Against `commitconsulting_dpt1` → `commitconsulting_dpt5`, both implementer
+accounts, nothing written:
+
+- The capability probe answers in ~0.16s per tenant and reports both as
+  implementers.
+- Full pipeline: 8,981 source calculated fields / 4,515 source reports /
+  8,776 destination calculated fields swept; closure resolved; destination
+  probed; plan built.
+- Cross-tenant matching found all 19 objects of a shared-content selection
+  already present — the case that produces unremovable duplicates when
+  matching is off.
+- A selection of three reports absent from the destination planned as three
+  CREATEs and dry-ran with no serialization faults, no destination WIDs, and
+  every record flagged dry-run.
+- The whole wizard driven through `AppTest` against both live tenants:
+  Connect → Scope → Select → Plan, including quick fill, the capability
+  badge, the sweep estimate, the catalog headline, session save and restore,
+  per-pick removal, and the package capture.
