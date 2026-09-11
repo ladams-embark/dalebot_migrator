@@ -32,7 +32,7 @@ from wdmigrator.api import (
     iter_check_existence,
     iter_execute,
 )
-from wdmigrator.ui import theme
+from wdmigrator.ui import reference_maps, theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.indexes import _format_duration, destination_match_indexes
 from wdmigrator.ui.runner import READ_TIME_BUDGET, WRITE_TIME_BUDGET, pump, start_job
@@ -380,6 +380,90 @@ def _pump_reprobe(state: WizardState) -> None:
     st.rerun()
 
 
+def _dest_tenant(state: WizardState) -> str:
+    return state.dest.target.tenant if state.dest.target is not None else ""
+
+
+def _render_reference_map_controls(state: WizardState) -> None:
+    """Reuse the answers given the last time this destination was migrated to.
+
+    Nothing here answers a question for the first time — the tool cannot, the
+    references point at tenant data. What it can do is stop asking the same
+    thirty-one questions on the second migration to the same tenant.
+
+    Loading is never automatic. Applying a map rewrites what gets written, so
+    it is a click, and it says how many rows it will answer before it answers
+    them. Applying also changes the plan hash, which invalidates any dry-run
+    review — deliberately, and the nav bar says so.
+    """
+    tenant = _dest_tenant(state)
+    if not tenant:
+        return
+
+    try:
+        saved = reference_maps.load_map(tenant)
+    except reference_maps.ReferenceMapError as exc:
+        theme.banner(
+            "warning",
+            "A saved reference map for this destination could not be read",
+            str(exc),
+            remedy="Answer the table below as normal; saving will replace it.",
+        )
+        saved = None
+
+    cols = st.columns([2, 2, 4])
+    with cols[0]:
+        if st.button(
+            "Save these answers",
+            key="refmap_save",
+            disabled=not state.reference_decisions,
+            help=f"Writes every decision below to out/reference-maps, keyed to "
+                 f"{tenant}. Replacement identifiers only mean anything in the "
+                 f"tenant they were looked up in, so the map is never offered "
+                 f"for a different destination.",
+        ):
+            path = reference_maps.save_map(
+                state.reference_decisions, dest_tenant=tenant
+            )
+            theme.banner(
+                "success",
+                f"Saved {len(state.reference_decisions)} decision(s)",
+                f"Written to `{path}`. The next migration to `{tenant}` will "
+                "offer to reuse them.",
+            )
+    with cols[1]:
+        usable = (
+            reference_maps.applicable(saved, state.blocking_references)
+            if saved is not None
+            else {}
+        )
+        if st.button(
+            f"Reuse saved answers ({len(usable)})",
+            key="refmap_apply",
+            disabled=not usable,
+            help=(
+                f"Saved {saved.saved_at[:10]} against {tenant}."
+                if saved is not None
+                else "No saved map for this destination yet."
+            ),
+        ):
+            state.reference_decisions.update(usable)
+            state.plan = build_plan(
+                state.closure,
+                state.plan.existence,
+                overrides=state.action_overrides,
+                reference_decisions=state.reference_decisions,
+            )
+            state.dry_run_plan_hash = state.plan.plan_hash()
+            st.rerun()
+
+    if saved is not None and not usable:
+        st.caption(
+            f"A saved map for `{tenant}` exists but answers none of the "
+            "references below — different objects are in scope this time."
+        )
+
+
 def _render_reference_resolution(state: WizardState) -> None:
     """One table for every unresolvable reference the run will hit.
 
@@ -430,6 +514,8 @@ def _render_reference_resolution(state: WizardState) -> None:
         )
         eyebrow = "Needs a decision"
     theme.section(title, detail, eyebrow=eyebrow)
+
+    _render_reference_map_controls(state)
 
     rows = _decision_rows(state)
 
@@ -494,13 +580,21 @@ def _render_reference_resolution(state: WizardState) -> None:
                 options=[a.value for a in ReferenceAction], required=True,
             ),
             "Replacement ID type": st.column_config.TextColumn(
-                help="Only used when the decision is 'replace' — e.g. "
-                     "Organization_Reference_ID."
+                help="Only used when the decision is 'replace'. Pre-filled "
+                     "with the same ID type the source used — an "
+                     "Organization_Reference_ID on the source is answered "
+                     "with an Organization_Reference_ID on the destination."
             ),
             "Replacement value": st.column_config.TextColumn(
-                help="The identifier in the DESTINATION tenant. There is no "
-                     "generic way for this tool to list candidates, so look it "
-                     "up in Workday."
+                help=(
+                    "The identifier of the equivalent object in "
+                    f"`{_dest_tenant(state) or 'the destination tenant'}` — "
+                    "not the source. These reference tenant data, so there is "
+                    "no list this tool can offer: find the object in that "
+                    "tenant and use its reference ID of the type in the "
+                    "previous column. Answers are reusable — save them once "
+                    "and the next migration to this destination reuses them."
+                )
             ),
         },
         key="reference_decision_table",
