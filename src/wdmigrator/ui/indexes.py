@@ -276,6 +276,14 @@ def _missing(state, specs: list[IndexSpec]) -> list[IndexSpec]:
     ]
 
 
+#: Public aliases. Select needs to know what is already on disk and what is
+#: still outstanding *before* it lays the page out — it puts the pickers above
+#: the sweep controls now, and a picker that renders before the disk cache is
+#: loaded says "index not built" about an index that is sitting right there.
+preload_cached_indexes = _load_cached
+pending_specs = _missing
+
+
 def _estimate_remaining_seconds(
     event: _StageEvent, queued_specs: list[IndexSpec] | None
 ) -> float:

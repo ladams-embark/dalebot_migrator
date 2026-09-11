@@ -36,7 +36,13 @@ from wdmigrator.api import (
     lookup_report_by_name,
 )
 from wdmigrator.ui import theme
-from wdmigrator.ui.indexes import IndexSpec, bulk_build_indexes, destination_index_specs
+from wdmigrator.ui.indexes import (
+    IndexSpec,
+    bulk_build_indexes,
+    destination_index_specs,
+    pending_specs,
+    preload_cached_indexes,
+)
 from wdmigrator.ui.state import OBJECT_KINDS, WizardState, reset_downstream
 
 STEP_ID = "select"
@@ -659,6 +665,37 @@ def _render_destination_matching(state: WizardState, *, auto_start: bool = False
     )
 
 
+def _catalog_headline(state: WizardState, specs: list[IndexSpec], *, running: bool) -> None:
+    """One line, above the pickers, standing in for thirteen status rows.
+
+    Select used to open with a status row per index — up to thirteen of them
+    across three sweep sections — before a single thing the user could click.
+    That reads as the app talking to itself. The rows still exist, in the
+    expander below the pickers, for when a sweep misbehaves; what belongs up
+    here is only whether the catalogs are usable yet.
+    """
+    built = [s for s in specs if getattr(state, s.index_attr) is not None]
+    skipped = [
+        s for s in specs if s.implementer_gated and state.implementer_required
+    ]
+    total = len(specs) - len(skipped)
+
+    if running:
+        st.caption(
+            f"Reading catalogs — {len(built)} of {total} ready. Start picking "
+            "now if what you want is already listed; Continue unlocks when "
+            "the rest land."
+        )
+    elif len(built) + len(skipped) >= len(specs):
+        st.caption(f"All {total} catalogs ready.")
+    else:
+        outstanding = total - len(built)
+        st.caption(
+            f"{outstanding} of {total} catalogs still to build — open "
+            "Catalog details below to start them."
+        )
+
+
 def _scope_caption(chosen: list[str]) -> str:
     labels = [OBJECT_KINDS[k] for k in chosen if k in OBJECT_KINDS]
     if not labels:
@@ -735,31 +772,63 @@ def render(state: WizardState) -> None:
 
     specs = _source_specs(chosen, connection)
     report_specs = _report_specs(connection) if "reports" in chosen else []
-    running = False
-    theme.section("Source indexes", eyebrow="Starts automatically")
-    running = bulk_build_indexes(
-        state,
-        specs,
-        job_attr="source_index_job",
-        button_label="Build source indexes",
-        auto_start=True,
-    ) or running
-    if report_specs:
-        theme.section("Report catalog", eyebrow="Background — does not block exact-name add")
+    dest_specs = (
+        _destination_specs(state.dest.connection)
+        if state.dest.connection is not None
+        else []
+    )
+    all_specs = specs + report_specs + dest_specs
+
+    # Read the disk caches before anything lays itself out. The pickers render
+    # above the sweep controls now, and ``bulk_build_indexes`` is what used to
+    # load the caches on its way past — running it second would make a picker
+    # claim its index was unbuilt while the cache sat on disk.
+    preload_cached_indexes(state, all_specs)
+    jobs_running = any(
+        getattr(state, attr) is not None
+        for attr in ("source_index_job", "report_index_job", "dest_index_job")
+    )
+
+    # Two reserved slots: the headline and the pickers are written last but
+    # appear first. Everything between here and there renders into the
+    # expander at the bottom of the page.
+    headline_slot = st.container()
+    picker_slot = st.container()
+
+    with st.expander(
+        "Catalog details",
+        expanded=bool(pending_specs(state, all_specs)) and not jobs_running,
+    ):
+        theme.section("Source indexes", eyebrow="Starts automatically")
         running = bulk_build_indexes(
             state,
-            report_specs,
-            job_attr="report_index_job",
-            button_label="Build report index",
+            specs,
+            job_attr="source_index_job",
+            button_label="Build source indexes",
             auto_start=True,
-        ) or running
-    running = _render_destination_matching(state, auto_start=True) or running
+        )
+        if report_specs:
+            theme.section(
+                "Report catalog", eyebrow="Background — does not block exact-name add"
+            )
+            running = bulk_build_indexes(
+                state,
+                report_specs,
+                job_attr="report_index_job",
+                button_label="Build report index",
+                auto_start=True,
+            ) or running
+        running = _render_destination_matching(state, auto_start=True) or running
 
-    st.divider()
-    # Pickers render while indexes are still sweeping: the dashboard catalog
-    # is the first source stage, so it can be selected before the calculated
-    # field sweep (~25s) finishes. Continue stays gated on the rest.
-    _render_pickers(state, chosen)
+    with headline_slot:
+        _catalog_headline(state, all_specs, running=running)
+    with picker_slot:
+        # Pickers render while indexes are still sweeping: the dashboard
+        # catalog is the first source stage, so it can be selected before the
+        # calculated field sweep (~25s) finishes. Continue stays gated on the
+        # rest.
+        _render_pickers(state, chosen)
+
     if running:
         st.rerun()
 
