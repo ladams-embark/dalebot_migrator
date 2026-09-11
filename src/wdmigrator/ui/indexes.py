@@ -40,13 +40,17 @@ from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.runner import READ_TIME_BUDGET, pump, start_job
 
-#: Measured live against commitconsulting_dpt1 (~9,650 fields / ~5,150 reports
-#: at Count=999). Shown up front so a first-time user knows what they're
-#: waiting on before clicking, not after. Everything not listed is a single
-#: page.
+#: Measured live against commitconsulting_dpt1 (8,981 fields / 4,515 reports).
+#: Shown up front so a first-time user knows what they're waiting on before
+#: clicking, not after. Everything not listed is a single page.
+#:
+#: The report figure covers 23 small pages rather than 6 large ones — see
+#: ``REPORT_PAGE_SIZE``. Small pages cost ~15% more time and a third of the
+#: peak memory, which is the right way round for a hosted app whose memory
+#: budget is shared with everyone else using it.
 BUILD_ESTIMATE = {
-    "calculated_field": "about 25 seconds",
-    "report": "about 2.5 minutes",
+    "calculated_field": "about 15 seconds",
+    "report": "about 80 seconds",
 }
 _DEFAULT_ESTIMATE = "a few seconds"
 
@@ -56,8 +60,8 @@ _DEFAULT_ESTIMATE = "a few seconds"
 #: instead (see :func:`_estimate_remaining_seconds`), so these numbers only
 #: ever matter for the *rest* of the queue.
 BUILD_ESTIMATE_SECONDS = {
-    "calculated_field": 25.0,
-    "report": 150.0,
+    "calculated_field": 15.0,
+    "report": 80.0,
 }
 _DEFAULT_ESTIMATE_SECONDS = 5.0
 

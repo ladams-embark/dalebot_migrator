@@ -44,6 +44,29 @@ from wdmigrator.discovery.payload_store import (
 #: confirmed working live. Do not raise this without re-testing.
 PAGE_SIZE = 999
 
+#: Reports are swept in much smaller pages than everything else, because a
+#: page is held whole in memory while zeep parses it and the payloads are
+#: ~33 KB each — an order of magnitude fatter than a calculated field.
+#:
+#: Measured live against ``commitconsulting_dpt1`` (4,515 reports), peak RSS
+#: for the full sweep:
+#:
+#: =========  =========  =======
+#: Page size  Peak RSS   Elapsed
+#: =========  =========  =======
+#: 999        863 MB     66s
+#: 200        290 MB     76s
+#: =========  =========  =======
+#:
+#: Three times the memory for 15% of the time is a bad trade anywhere, and a
+#: fatal one on a hosted container that throttles from ~690 MB and shares that
+#: budget with every other consultant using the app. The memory is transient —
+#: payloads stream to disk, so nothing accumulates across pages — but a
+#: transient spike is exactly what gets a container killed.
+#:
+#: Raising this is safe for correctness and unsafe for everything else.
+REPORT_PAGE_SIZE = 200
+
 #: Fault fragments that mean "this object does not exist here".
 #:
 #: Matched conservatively and case-insensitively. Everything not matching is
@@ -1591,14 +1614,16 @@ def iter_calculated_field_index(
 def iter_report_index(
     connection: Connection,
     *,
-    page_size: int = PAGE_SIZE,
+    page_size: int = REPORT_PAGE_SIZE,
     payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every report definition.
 
     Full data is required, not just references: a reference-only sweep returns
     ``{WID, Custom_Report_ID}`` with **no name**, which is useless for a picker.
-    That makes this the slower of the two sweeps (~6 pages / ~160s).
+    That makes this the slower of the two sweeps. Swept in small pages
+    (:data:`REPORT_PAGE_SIZE`) to cap peak memory: ~23 pages / ~76s
+    against commitconsulting_dpt1.
     """
     return _iter_index(
         connection,

@@ -143,7 +143,7 @@ granting fixes it. `discovery/inventory.py:requires_implementer` detects this.
 
 ### Key API behaviors
 
-**Pagination**: `Response_Filter.Count` accepts 999. Full CF index ≈ 10 pages / 25s. Full report index ≈ 6 pages / 158s.
+**Pagination**: `Response_Filter.Count` accepts 999, and calculated fields use it (full CF index ≈ 10 pages / 14s). **Reports are swept at Count=200** (`REPORT_PAGE_SIZE`): a report payload is ~33 KB and a whole page is held in memory while zeep parses it, so Count=999 peaks at 863 MB against 290 MB at Count=200, for 15% less elapsed time. Full report index ≈ 23 pages / 76s.
 
 **Report identity**: `Custom_Report_ID` is returned but rejected as a lookup key. Reports must be matched by exact name (`Report_Name` criteria). Report names are not unique — duplicates resolve to UNKNOWN.
 

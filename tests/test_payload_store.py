@@ -316,3 +316,42 @@ def test_cross_tenant_matching_works_off_a_store(tmp_path):
 def time_now():
     import time
     return time.time()
+
+
+# ── page size ────────────────────────────────────────────────────────────────
+
+
+class TestReportsAreSweptInSmallPages:
+    """A page is held whole in memory while zeep parses it, and a report
+    payload is ~33 KB — an order of magnitude fatter than a calculated field.
+
+    Measured live on commitconsulting_dpt1 (4,515 reports): Count=999 peaks at
+    863 MB and takes 66s; Count=200 peaks at 290 MB and takes 76s. Three times
+    the memory for 15% of the time is a bad trade anywhere and a fatal one on a
+    container that throttles from ~690 MB and shares that budget with everyone
+    else using the app.
+    """
+
+    def test_the_report_page_size_is_well_under_the_general_one(self):
+        from wdmigrator.discovery.inventory import PAGE_SIZE, REPORT_PAGE_SIZE
+
+        assert REPORT_PAGE_SIZE < PAGE_SIZE / 2
+
+    def test_the_report_sweep_asks_for_it(self):
+        from wdmigrator.discovery.inventory import REPORT_PAGE_SIZE, iter_report_index
+
+        connection = FakeConnection(pages=[{
+            "Response_Results": {"Total_Results": 1, "Total_Pages": 1, "Page": 1},
+            "Response_Data": {"Report_Definition": []},
+        }])
+        list(iter_report_index(connection))
+        assert connection.calls[0]["Response_Filter"]["Count"] == REPORT_PAGE_SIZE
+
+    def test_other_sweeps_still_use_the_large_page(self):
+        """Calculated fields are small; paying 10x the round trips for them
+        would be cost without benefit."""
+        from wdmigrator.discovery.inventory import PAGE_SIZE
+
+        connection = FakeConnection(pages=[_page([])])
+        list(iter_calculated_field_index(connection))
+        assert connection.calls[0]["Response_Filter"]["Count"] == PAGE_SIZE
