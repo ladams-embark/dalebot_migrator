@@ -33,7 +33,7 @@ from wdmigrator.api import (
     verify_connection,
 )
 from wdmigrator.ui import secrets as secrets_ui
-from wdmigrator.ui import theme
+from wdmigrator.ui import session_store, theme
 from wdmigrator.ui.components import (
     render_capabilities,
     render_connection_status,
@@ -112,6 +112,22 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
             "This side now points at a different tenant or user, so the selections, "
             "closure, and plan built from the old one were cleared.",
         )
+
+    if status.ok and role is Role.SOURCE and state.restored_source_tenant:
+        # A resumed session brought a selection of source WIDs with it. They
+        # only mean anything in the tenant they were picked from.
+        if target.tenant != state.restored_source_tenant:
+            was = state.restored_source_tenant
+            reset_downstream(state, from_step="select")
+            theme.banner(
+                "warning",
+                "Resumed selection discarded",
+                f"That session was saved against `{was}` and this source is "
+                f"`{target.tenant}`. The object IDs in it do not refer to "
+                "anything here, so the selection was cleared.",
+                remedy="Pick objects again from this tenant's catalog on Select.",
+            )
+        state.restored_source_tenant = ""
 
     side.status = status
     if status.ok:
@@ -381,6 +397,77 @@ def _render_package_loader(state: WizardState) -> None:
         st.rerun()
 
 
+def _render_resume(state: WizardState) -> None:
+    """Pick up a saved session.
+
+    Only offered on Connect, and only when nothing has been picked yet:
+    restoring over a selection someone is in the middle of making would be a
+    destructive act behind a button labelled "resume".
+    """
+    if state.selected_reports_added or state.selected_dashboards_added:
+        return
+    summaries = session_store.list_sessions()
+    if not summaries:
+        return
+
+    theme.section(
+        "Resume a saved session",
+        "Brings back the tenants, usernames and object selection from a "
+        "previous session. Passwords and approvals are never saved.",
+        eyebrow="Optional",
+    )
+    options = {s.path.name: s for s in summaries}
+    choice = st.selectbox(
+        "Saved sessions",
+        options=list(options),
+        format_func=lambda n: options[n].label,
+        key="session_choice",
+    )
+    if st.button("Resume this session", key="session_resume"):
+        try:
+            data = session_store.load_session(options[choice].path)
+        except session_store.SessionError as exc:
+            theme.banner("danger", "Could not resume", str(exc))
+            return
+        notes = session_store.restore(state, data)
+        st.session_state["_resume_notes"] = notes
+        # The target and username fields are widget-backed; once rendered,
+        # session_state drives them and ``value=`` is ignored. Same fix as
+        # _pump_discovery and _quick_fill.
+        for key, side in (("src", state.source), ("dst", state.dest)):
+            st.session_state[f"{key}_target"] = side.target_raw
+            st.session_state[f"{key}_user"] = side.username
+        st.rerun()
+
+    for note in st.session_state.get("_resume_notes", []):
+        st.caption(note)
+
+
+def _render_save_session(state: WizardState) -> None:
+    """Save from Connect too, not only from Plan.
+
+    The expensive thing to lose is the selection, and by the time someone is
+    on Connect again they may have already lost it. This is here for the
+    other direction: save before closing the tab.
+    """
+    if not any(
+        (
+            state.selected_reports_added,
+            state.selected_dashboards_added,
+            state.selected_field_wids,
+            state.selected_time_calculation_wids,
+        )
+    ):
+        return
+    if st.button("Save this session", key="session_save_connect"):
+        path = session_store.save_session(state)
+        theme.banner(
+            "success",
+            "Session saved",
+            f"Written to `{path}`. Resume it from this step after a reload.",
+        )
+
+
 def _render_before_you_start() -> None:
     """What has to be true before any of this works.
 
@@ -436,6 +523,8 @@ def render(state: WizardState) -> None:
     # destination) reads first; the package loader is the alternative for
     # someone who does not need or have a live source.
     st.divider()
+    _render_resume(state)
+    _render_save_session(state)
     _render_package_loader(state)
 
 

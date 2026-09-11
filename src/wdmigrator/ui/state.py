@@ -267,6 +267,13 @@ class WizardState:
     #: Set after a live run log is written under ``out/`` so a rerun does not
     #: create a second file for the same records.
     run_log_path: str = ""
+    #: Source tenant a resumed session was captured against, held until the
+    #: source actually connects. A restored selection is a list of WIDs, and
+    #: WIDs mean nothing in a tenant they did not come from — connecting to a
+    #: different source than the session was saved against has to throw the
+    #: selection away rather than carry it somewhere it does not apply.
+    #: Cleared by the first successful source connection either way.
+    restored_source_tenant: str = ""
 
 
 def hydrate_wizard_state(state: WizardState) -> None:

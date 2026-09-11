@@ -35,7 +35,7 @@ from wdmigrator.api import (
     lookup_report,
     lookup_report_by_name,
 )
-from wdmigrator.ui import theme
+from wdmigrator.ui import session_store, theme
 from wdmigrator.ui.indexes import (
     IndexSpec,
     bulk_build_indexes,
@@ -665,6 +665,37 @@ def _render_destination_matching(state: WizardState, *, auto_start: bool = False
     )
 
 
+def _render_save_session(state: WizardState) -> None:
+    """Save the selection to disk, where a browser reload cannot reach it.
+
+    This step is where the unrecoverable work happens: a selection of thirty
+    reports assembled across half a dozen searches lives only in
+    ``st.session_state``, which is scoped to a websocket connection. Closing
+    the tab loses it. Nothing else in the wizard costs as much to redo.
+    """
+    picked = (
+        len(state.selected_reports_added)
+        + len(state.selected_dashboards_added)
+        + len(state.selected_field_wids)
+        + len(state.selected_time_calculation_wids)
+    )
+    if not picked:
+        return
+    if st.button(
+        f"Save this session ({picked} object(s))",
+        key="session_save_select",
+        help="Writes the tenants, usernames and selection to out/sessions. "
+             "Passwords and approvals are never saved.",
+    ):
+        path = session_store.save_session(state)
+        theme.banner(
+            "success",
+            "Session saved",
+            f"Written to `{path}`. If this tab reloads, resume it from the "
+            "Connect step.",
+        )
+
+
 def _catalog_headline(state: WizardState, specs: list[IndexSpec], *, running: bool) -> None:
     """One line, above the pickers, standing in for thirteen status rows.
 
@@ -822,6 +853,7 @@ def render(state: WizardState) -> None:
 
     with headline_slot:
         _catalog_headline(state, all_specs, running=running)
+        _render_save_session(state)
     with picker_slot:
         # Pickers render while indexes are still sweeping: the dashboard
         # catalog is the first source stage, so it can be selected before the
