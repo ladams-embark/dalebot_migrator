@@ -22,7 +22,7 @@ load_dotenv()
 import streamlit as st
 
 from wdmigrator.api import redact
-from wdmigrator.ui import components, theme
+from wdmigrator.ui import components, errors, theme
 from wdmigrator.ui.state import STEP_ORDER, STEP_TITLES, WizardState, get_state
 from wdmigrator.ui.steps import connect, plan, results, run, scope, select
 
@@ -124,8 +124,23 @@ def main() -> None:
         # A zeep fault can carry the request envelope, which can carry a
         # WS-Security password in cleartext. Never let a raw traceback reach
         # the page — this is the most likely credential-leak path in the app.
-        message = redact(str(exc), (state.source.password, state.dest.password))
-        theme.banner("danger", f"Unexpected error in the {STEP_TITLES[state.step]} step", message)
+        secrets = (state.source.password, state.dest.password)
+        message = redact(str(exc), secrets)
+        log_path = errors.write_error_log(
+            exc, step=state.step, state=state, secrets=secrets
+        )
+        theme.banner(
+            "danger",
+            f"Unexpected error in the {STEP_TITLES[state.step]} step",
+            message,
+            remedy=(
+                f"The full traceback is in `{log_path}` — passwords stripped, "
+                "safe to send on."
+                if log_path
+                else "Retry the step, or go back and re-test the connection."
+            ),
+            remedy_label="Next",
+        )
         return
 
     st.divider()
