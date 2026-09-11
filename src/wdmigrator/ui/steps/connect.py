@@ -29,11 +29,16 @@ from wdmigrator.api import (
     list_packages,
     load_package,
     parse_tenant_url,
+    probe_capabilities,
     verify_connection,
 )
 from wdmigrator.ui import secrets as secrets_ui
 from wdmigrator.ui import theme
-from wdmigrator.ui.components import render_connection_status, render_target_card
+from wdmigrator.ui.components import (
+    render_capabilities,
+    render_connection_status,
+    render_target_card,
+)
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import ConnectionState, WizardState, reset_downstream
 
@@ -112,8 +117,12 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
     if status.ok:
         side.connection = connection
         side.verified_fingerprint = status.fingerprint
+        # One extra Get, ~0.2s, read-only. Answers the question that would
+        # otherwise surface as a failed sweep on Select.
+        side.capabilities = probe_capabilities(connection)
     else:
         side.connection = None
+        side.capabilities = None
 
 
 def _run_discovery(side: ConnectionState) -> None:
@@ -299,6 +308,7 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
 
     render_target_card(label, side.target)
     render_connection_status(side.status)
+    render_capabilities(side.capabilities)
 
 
 def _render_package_loader(state: WizardState) -> None:
@@ -371,8 +381,41 @@ def _render_package_loader(state: WizardState) -> None:
         st.rerun()
 
 
+def _render_before_you_start() -> None:
+    """What has to be true before any of this works.
+
+    All four of these are in CLAUDE.md and were in no part of the product.
+    Three of them are only discovered by failing: the implementer gate on
+    Select after a sweep, the Put grant on Run after a failed write, and the
+    pending-security-change delay never — it reads as an intermittent
+    permissions bug. The host trap returns HTTP 500, which reads like an
+    outage rather than a typo.
+    """
+    with st.expander("Before you start — what you need", expanded=False):
+        theme.checklist(
+            [
+                "An Integration System User on BOTH tenants with Get and Put on "
+                "Configuration Set: Custom Reports and Fields.",
+                "After any security change in Workday, run 'Activate Pending "
+                "Security Policy Changes' — grants are not live until you do, "
+                "and until then this reads as an intermittent permission error.",
+                "Dashboards, prompt sets, prompt fields and time calculations "
+                "additionally need an implementer account. That is an account "
+                "type, not a domain grant — no security configuration changes "
+                "it. The connection test below reports which you have.",
+                "Use the services host (impl-services1.wd12…), not the browser "
+                "host (impl.wd12…). A mismatched host and tenant returns HTTP "
+                "500, which looks like an outage rather than a typo.",
+                "Implementation or Sandbox tenants only. Nothing this tool "
+                "writes can be undone by it — the web service has no delete "
+                "operation.",
+            ]
+        )
+
+
 def render(state: WizardState) -> None:
     st.header("Connect")
+    _render_before_you_start()
     col1, col2 = st.columns(2)
     with col1:
         _render_side(state, state.source, Role.SOURCE, "Source", "src")

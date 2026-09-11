@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from wdmigrator.api import Blocker, ConnectionStatus, TenantTarget
+from wdmigrator.api import Blocker, Capabilities, ConnectionStatus, TenantTarget
 from wdmigrator.ui import theme
 from wdmigrator.ui.runner import JobState
 
@@ -42,6 +42,38 @@ def render_connection_status(status: ConnectionStatus | None) -> None:
         theme.banner("success", "Connected", status.detail)
     else:
         theme.banner("danger", "Connection failed", status.detail)
+
+
+def render_capabilities(capabilities: Capabilities | None) -> None:
+    """What this account can reach, said at connection time.
+
+    The implementer requirement is an account-type gate, not a domain grant —
+    no security configuration inside Workday moves it. Left undiscovered it
+    surfaces on Select as a failed sweep, three steps and a full index build
+    after the point where the user could have done something about it.
+    """
+    if capabilities is None:
+        return
+    if capabilities.implementer is True:
+        theme.banner("success", "Implementer account", capabilities.detail)
+        return
+    if capabilities.implementer is False:
+        theme.banner(
+            "warning",
+            "Standard Integration System User",
+            capabilities.detail,
+            remedy="Connect with an implementer account if you need dashboards, "
+                   "prompt sets, prompt fields or time calculations.",
+        )
+        return
+    theme.banner(
+        "neutral",
+        "Could not check account type",
+        capabilities.detail,
+        remedy="Dashboard-shaped objects may or may not work — the Select step "
+               "will say for certain.",
+        remedy_label="Next",
+    )
 
 
 def render_blocker(blocker: Blocker) -> None:

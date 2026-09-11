@@ -42,6 +42,45 @@ _KIND_HELP = {
     ),
 }
 
+#: Kinds whose Get and Put operations are gated on the account *type* being an
+#: implementer. No domain grant substitutes, so a standard ISU can tick these
+#: and get nowhere. Connect probes for this; here is where the answer is spent.
+_IMPLEMENTER_KINDS = ("dashboards", "time_calculations")
+
+
+def _implementer_verdict(state: WizardState) -> tuple[bool, str]:
+    """``(available, explanation)`` for the implementer-gated kinds.
+
+    Both sides matter: the source has to read the object and the destination
+    has to write it, and either one failing wastes the whole run. An unprobed
+    or inconclusive side is *not* treated as a refusal — an outage is not an
+    entitlement finding — but it is said out loud.
+    """
+    denied = [
+        name
+        for name, side in (("Source", state.source), ("Destination", state.dest))
+        if side.capabilities is not None and side.capabilities.implementer is False
+    ]
+    if denied:
+        return False, (
+            f"{' and '.join(denied)} is not an implementer account. "
+            "Dashboards and time calculations cannot be read or written with "
+            "it, and no security domain grant changes that — it needs a "
+            "different account. Reports and calculated fields still work."
+        )
+
+    unknown = [
+        name
+        for name, side in (("Source", state.source), ("Destination", state.dest))
+        if side.capabilities is None or side.capabilities.implementer is None
+    ]
+    if unknown:
+        return True, (
+            f"{' and '.join(unknown)} could not be checked for implementer "
+            "access, so these may fail later on."
+        )
+    return True, ""
+
 
 def render(state: WizardState) -> None:
     st.header("Scope")
@@ -59,20 +98,33 @@ def render(state: WizardState) -> None:
         eyebrow="Before indexes",
     )
 
+    implementer_ok, implementer_note = _implementer_verdict(state)
+    if implementer_note:
+        theme.banner(
+            "danger" if not implementer_ok else "warning",
+            "Dashboards and time calculations are unavailable"
+            if not implementer_ok
+            else "Dashboards and time calculations are unverified",
+            implementer_note,
+        )
+
     # Checkboxes rather than a multiselect: each kind has a consequence
     # (implementer account, a 2.5-minute report sweep) that a collapsed
     # chip list would hide. Empty default is deliberate — the previous
     # reports default is what skipped the dashboard workflow.
     chosen: list[str] = []
     for key, label in OBJECT_KINDS.items():
+        gated = key in _IMPLEMENTER_KINDS and not implementer_ok
         checked = st.checkbox(
             label,
-            value=key in state.object_kinds,
+            value=key in state.object_kinds and not gated,
             key=f"scope_{key}",
-            help=_KIND_HELP[key],
+            disabled=gated,
         )
+        # Caption rather than the ``help`` tooltip: the consequence of ticking
+        # a box should not be behind a hover on a page this short.
         st.caption(_KIND_HELP[key])
-        if checked:
+        if checked and not gated:
             chosen.append(key)
 
     if list(chosen) != list(state.object_kinds):
@@ -85,6 +137,25 @@ def render(state: WizardState) -> None:
 def gate(state: WizardState) -> list[Blocker]:
     if state.package is not None:
         return []
+
+    implementer_ok, implementer_note = _implementer_verdict(state)
+    if not implementer_ok:
+        blocked = [
+            OBJECT_KINDS[key] for key in _IMPLEMENTER_KINDS if key in state.object_kinds
+        ]
+        if blocked:
+            return [
+                Blocker(
+                    node_id=None,
+                    title=f"{' and '.join(blocked)} need an implementer account",
+                    detail=implementer_note,
+                    remedy=(
+                        "Go back to Connect and sign in with an implementer "
+                        "account, or untick these types."
+                    ),
+                )
+            ]
+
     if state.object_kinds:
         return []
     return [

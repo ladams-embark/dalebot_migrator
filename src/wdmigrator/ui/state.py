@@ -23,6 +23,7 @@ from typing import Optional
 import streamlit as st
 
 from wdmigrator.api import (
+    Capabilities,
     Closure,
     Connection,
     ConnectionStatus,
@@ -70,6 +71,14 @@ class ConnectionState:
     connection: Optional[Connection] = None
     status: Optional[ConnectionStatus] = None
     verified_fingerprint: str = ""
+
+    #: What this account can actually reach, probed right after the
+    #: connection test. The implementer gate is an account-type gate rather
+    #: than a domain grant, so it cannot be fixed from inside Workday's
+    #: security config — finding out at Connect instead of three steps and a
+    #: full index sweep later is the difference between a five-second answer
+    #: and a wasted setup.
+    capabilities: Optional[Capabilities] = None
 
     # Endpoint discovery ("I only know the tenant ID") — separate from
     # target_raw/target above since discovery works from a bare tenant ID,

@@ -215,6 +215,71 @@ def requires_implementer(fault: str | None) -> bool:
     return IMPLEMENTER_REQUIRED_FRAGMENT in (fault or "").lower()
 
 
+@dataclass(frozen=True)
+class Capabilities:
+    """What an authenticated account can actually reach.
+
+    Authentication succeeding says nothing about whether the account can read
+    a dashboard: that is an account *type* gate, not a domain grant, and no
+    amount of security configuration moves it. Discovered late it costs a
+    user three steps and a full index sweep before the Select page tells them
+    their connection cannot do the thing they picked on Scope. This is the
+    same question asked at connection time, for the price of one Get.
+    """
+
+    #: True/False when the probe answered; None when it failed for some other
+    #: reason and we genuinely do not know. Never collapse None to False — an
+    #: outage is not an entitlement finding.
+    implementer: bool | None
+    detail: str
+
+    @property
+    def known(self) -> bool:
+        return self.implementer is not None
+
+    @property
+    def label(self) -> str:
+        if self.implementer is True:
+            return "Implementer"
+        if self.implementer is False:
+            return "Standard ISU"
+        return "Capabilities unknown"
+
+
+def probe_capabilities(connection: Connection) -> Capabilities:
+    """Ask the destination-agnostic question: is this an implementer account?
+
+    One ``Get_Custom_Dashboards_without_Tabs`` for a single row. Read-only,
+    one page, and the cheapest operation that is gated on account type rather
+    than on domain security.
+    """
+    spec = dashboard_flavour(tabbed=False)
+    try:
+        connection.limiter.wait()
+        getattr(connection.service, spec["get"])(
+            Response_Filter={"Page": 1, "Count": 1},
+            Response_Group={"Include_Reference": True},
+        )
+    except Exception as exc:  # noqa: BLE001 - classified, never blindly swallowed
+        message = connection.redact(str(exc))
+        if requires_implementer(message):
+            return Capabilities(
+                implementer=False,
+                detail=(
+                    "This account cannot read dashboards. Reports, calculated "
+                    "fields and measures are unaffected."
+                ),
+            )
+        return Capabilities(
+            implementer=None,
+            detail=f"Could not determine: {message[:200]}",
+        )
+    return Capabilities(
+        implementer=True,
+        detail="Dashboards, prompt sets, prompt fields and time calculations are readable.",
+    )
+
+
 #: Payload keys that carry worklet configurations at any level of the dashboard
 #: tree. Untabbed dashboards use ``Content_Data`` at the top; tabbed dashboards
 #: bury ``Worklets_Data`` inside each tab. Whichever appears with a non-empty
