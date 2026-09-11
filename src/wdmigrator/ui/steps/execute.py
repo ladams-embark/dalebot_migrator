@@ -813,7 +813,16 @@ def render(state: WizardState, *, heading: bool = True) -> None:
 
 def gate(state: WizardState) -> list[Blocker]:
     if state.execute_job is not None:
-        return [Blocker(None, "Execution in progress", "Wait for the run to finish, or cancel it.", "")]
+        return [
+            Blocker(
+                None,
+                "Execution in progress",
+                "Objects are being written to the destination one at a time.",
+                "Results opens on its own when the run finishes. Pause or Cancel "
+                "above to stop between objects.",
+                waiting=True,
+            )
+        ]
     if not state.execute_records:
         return [Blocker(None, "Not executed yet", "Live execution has not been run.", "Click Start live execution above.")]
     return []

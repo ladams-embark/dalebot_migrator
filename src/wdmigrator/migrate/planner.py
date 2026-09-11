@@ -165,6 +165,13 @@ class Blocker:
     title: str
     detail: str
     remedy: str
+    #: True when nothing is wrong and nobody has to do anything — the step is
+    #: simply not finished yet (an index sweep in flight, a probe running).
+    #: Rendered in a neutral tone rather than as a red "Fix:", because a
+    #: blocker that clears itself in twenty-five seconds and a blocker that
+    #: needs a human cannot look identical without the red ones ceasing to
+    #: mean anything. Never set this for something the user must act on.
+    waiting: bool = False
 
 
 @dataclass

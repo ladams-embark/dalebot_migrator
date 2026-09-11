@@ -700,11 +700,23 @@ def render(state: WizardState) -> None:
         st.rerun()
 
 
+def _sweeping(state: WizardState) -> bool:
+    """Whether the source sweep that fills these indexes is actually in flight.
+
+    This is the difference between "not built yet, sit tight" and "not built,
+    and nothing is going to build it" — a cancelled or failed job clears
+    ``source_index_job`` while leaving the indexes absent, and that case has
+    to keep reading as a real blocker with a rebuild remedy.
+    """
+    return state.source_index_job is not None
+
+
 def gate(state: WizardState) -> list[Blocker]:
     blockers = []
     # Package is the source: selection is baked in, indexes are irrelevant.
     if state.package is not None:
         return blockers
+    waiting = _sweeping(state)
     if not state.object_kinds:
         blockers.append(
             Blocker(
@@ -762,8 +774,13 @@ def gate(state: WizardState) -> list[Blocker]:
                             "index is absent, so the gap surfaces as a live "
                             "write failure rather than a blocker here."
                         ),
-                        remedy="Enable Time calculations above — the tag and group "
-                               "indexes start with the source sweep.",
+                        remedy=(
+                            "Waiting for the source sweep to reach it."
+                            if waiting
+                            else "Rebuild the source indexes above — the tag and "
+                                 "group sweeps run with them."
+                        ),
+                        waiting=waiting,
                     )
                 )
     if state.selected_dashboards and state.prompt_set_index is None:
@@ -777,7 +794,12 @@ def gate(state: WizardState) -> list[Blocker]:
                     "on demand — the request criteria Workday exposes for them do "
                     "not filter — so the index is the only way to resolve them."
                 ),
-                remedy="Wait for the prompt set index (a few seconds), or rebuild it above.",
+                remedy=(
+                    "Waiting for the prompt set sweep (a few seconds)."
+                    if waiting
+                    else "Rebuild the source indexes above."
+                ),
+                waiting=waiting,
             )
         )
     if state.selected_dashboards and state.prompt_field_index is None:
@@ -792,7 +814,12 @@ def gate(state: WizardState) -> list[Blocker]:
                     "the dependency never enters the closure and the prompt set "
                     "fails against the live tenant instead of here."
                 ),
-                remedy="Wait for the prompt field index (a few seconds), or rebuild it above.",
+                remedy=(
+                    "Waiting for the prompt field sweep (a few seconds)."
+                    if waiting
+                    else "Rebuild the source indexes above."
+                ),
+                waiting=waiting,
             )
         )
     # Both are dependencies of *reports*, and a dashboard drags its worklet
@@ -825,20 +852,38 @@ def gate(state: WizardState) -> list[Blocker]:
                             "the index is absent, so the gap surfaces as a live "
                             "write failure rather than a blocker here."
                         ),
-                        remedy="Wait for it above (a few seconds), or rebuild.",
+                        remedy=(
+                            "Waiting for the source sweep to reach it "
+                            "(a few seconds)."
+                            if waiting
+                            else "Rebuild the source indexes above."
+                        ),
+                        waiting=waiting,
                     )
                 )
     if state.cf_index is None:
+        # The old copy said "even if you only selected reports" whatever the
+        # user had actually picked, which on the dashboard path read as the
+        # app having lost track of their answer. Name what they chose.
+        chosen_labels = [OBJECT_KINDS[k] for k in state.object_kinds if k in OBJECT_KINDS]
+        picked = (
+            chosen_labels[0].lower() if len(chosen_labels) == 1 else "these object types"
+        )
         blockers.append(
             Blocker(
                 node_id=None,
                 title="Calculated field index not built",
                 detail=(
-                    "Resolving dependencies needs the complete source calculated-field "
-                    "index, even if you only selected reports — every WID a report "
-                    "references has to be classified against it."
+                    "Resolving dependencies needs the complete source "
+                    f"calculated-field index, even when you only selected {picked} — "
+                    "every WID inside them has to be classified against it."
                 ),
-                remedy="Wait for the calculated field index above (~25s), or rebuild it.",
+                remedy=(
+                    "Waiting for the calculated field sweep (about 25s)."
+                    if waiting
+                    else "Rebuild the source indexes above."
+                ),
+                waiting=waiting,
             )
         )
     return blockers

@@ -332,26 +332,46 @@ def gate(state: WizardState) -> list[Blocker]:
         # Belt and braces with the disabled button: this is the check that
         # holds if the plan was carried in from anywhere else, and it is the
         # difference between reusing a shared object and duplicating it.
+        sweeping = state.dest_index_job is not None
         return [
             Blocker(
                 node_id=None,
-                title="Destination not swept for cross-tenant matching",
+                title=(
+                    "Reading the destination catalog"
+                    if sweeping
+                    else "Destination not swept for cross-tenant matching"
+                ),
                 detail=(
                     "Business IDs do not identify an object across tenants. Without "
                     "the destination calculated-field and calculated-measure "
                     "indexes, every object whose ID differs is reported absent and "
                     "planned as a CREATE."
                 ),
-                remedy="Wait for both destination indexes above, or click Build destination indexes.",
+                remedy=(
+                    "Waiting for both destination indexes (about 25s)."
+                    if sweeping
+                    else "Click Build destination indexes above."
+                ),
+                waiting=sweeping,
             )
         ]
     if state.plan is None:
+        probing = state.existence_job is not None
         return [
             Blocker(
                 node_id=None,
-                title="Destination not yet checked",
+                title=(
+                    "Checking the destination"
+                    if probing
+                    else "Destination not yet checked"
+                ),
                 detail="Run the existence check against the destination before continuing.",
-                remedy="Build destination indexes, then run Check existence.",
+                remedy=(
+                    "The probe is running — Continue unlocks when it finishes."
+                    if probing
+                    else "Build destination indexes, then run Check existence."
+                ),
+                waiting=probing,
             )
         ]
     return validate_plan(state.plan)

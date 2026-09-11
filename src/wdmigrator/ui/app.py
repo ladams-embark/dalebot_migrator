@@ -52,6 +52,18 @@ _STEP_HINT = {
 }
 
 
+def prioritise_blockers(blockers):
+    """Actionable blockers before merely-unfinished ones.
+
+    Only the first is shown inline; the rest go behind an expander. Without
+    this, which blocker gets promoted is down to the order a gate happened to
+    append them in, so a user could be shown "waiting for an index sweep"
+    while the thing actually holding them up — an empty selection — sat
+    collapsed underneath it.
+    """
+    return sorted(blockers, key=lambda b: b.waiting)
+
+
 def _unlocked_through(state: WizardState) -> int:
     """Index of the furthest step whose gate is currently satisfied, walking
     forward from Connect and stopping at the first one that isn't."""
@@ -145,8 +157,8 @@ def main() -> None:
                 st.rerun()
 
     if blockers and current_index < len(STEP_ORDER) - 1:
-        first, *rest = blockers
-        theme.banner("warning", first.title, first.detail, remedy=first.remedy or None)
+        first, *rest = prioritise_blockers(blockers)
+        components.render_blocker(first)
         if rest:
             with st.expander(f"{len(rest)} more before continuing", expanded=False):
                 components.render_blockers(rest)

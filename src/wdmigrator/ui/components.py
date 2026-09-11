@@ -44,6 +44,30 @@ def render_connection_status(status: ConnectionStatus | None) -> None:
         theme.banner("danger", "Connection failed", status.detail)
 
 
+def render_blocker(blocker: Blocker) -> None:
+    """One blocker, in the tone its ``waiting`` flag asks for.
+
+    A sweep that finishes on its own and a permission the user has to go and
+    fix are both "you cannot continue yet", but only one of them is a
+    problem. Rendering them identically is what trains people to ignore the
+    red ones.
+    """
+    if blocker.waiting:
+        theme.banner(
+            "neutral",
+            blocker.title,
+            blocker.detail,
+            remedy=blocker.remedy or None,
+            where=blocker.node_id or None,
+            remedy_label="Next",
+        )
+        return
+    theme.banner(
+        "danger", blocker.title, blocker.detail,
+        remedy=blocker.remedy or None, where=blocker.node_id or None,
+    )
+
+
 def render_blockers(blockers: list[Blocker], *, empty_message: str = "No blockers.") -> None:
     """Render engine ``Blocker``s. The single renderer for these — the wizard's
     Next button, the Conflicts validation panel, and the app-level gate all
@@ -52,7 +76,7 @@ def render_blockers(blockers: list[Blocker], *, empty_message: str = "No blocker
         theme.banner("success", empty_message)
         return
     for b in blockers:
-        theme.banner("danger", b.title, b.detail, remedy=b.remedy or None, where=b.node_id or None)
+        render_blocker(b)
 
 
 def render_job_progress(
