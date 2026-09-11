@@ -38,6 +38,7 @@ from wdmigrator.api import (
     NodeKind,
     ReportSharing,
     TIME_TRACKING_KINDS,
+    WriteStatus,
     TIME_TRACKING_SERVICE_NAME,
     describe_plan,
     evaluate_guards,
@@ -207,6 +208,73 @@ def _plan_export_bytes(state: WizardState) -> bytes:
     return json.dumps(payload, indent=2).encode("utf-8")
 
 
+def _dry_run_review_points(state: WizardState) -> list[str]:
+    """The specific things worth looking at before ticking the review box.
+
+    Everything here is already computed and already on screen somewhere; what
+    was missing was anyone saying which of it matters. With a colleague
+    present this is the "check those two cross-tenant matches" conversation.
+    Alone, an unqualified "I have reviewed this" is a box between the user and
+    an irreversible write, and it gets ticked.
+    """
+    plan = state.plan
+    dest = state.dest.target.tenant if state.dest.target else "the destination"
+    counts = plan.counts()
+    points: list[str] = []
+
+    creates = counts.get(Action.CREATE.value, 0)
+    if creates:
+        points.append(
+            f"{creates} object(s) will be created in {dest}. If you expected any "
+            "of them to be there already, the destination may have been "
+            "refreshed — re-check existence rather than creating a second copy."
+        )
+
+    updates = counts.get(Action.UPDATE.value, 0)
+    if updates:
+        points.append(
+            f"{updates} object(s) will be overwritten in place with UPDATE, not "
+            "created alongside. Confirm you mean to change what is already there."
+        )
+
+    matched = [e for e in plan.existence.values() if e.matched_by]
+    if matched:
+        points.append(
+            f"{len(matched)} object(s) were matched to {dest} on shape rather than "
+            "on business ID — a weaker claim than an ID match. Each one will be "
+            "reused and everything referencing it rewritten to point at it, so "
+            "confirm they really are the same objects."
+        )
+
+    unknown = plan.unknown_nodes()
+    if unknown:
+        points.append(
+            f"{len(unknown)} object(s) came back with an unknown destination "
+            "state. These block the run on purpose — find out why before going "
+            "any further."
+        )
+
+    failed = [r for r in state.dry_run_records if r.status is WriteStatus.FAILED]
+    if failed:
+        points.append(
+            f"{len(failed)} object(s) could not even be serialized: "
+            + ", ".join(sorted({r.name or r.node_id for r in failed})[:3])
+            + ". A live run would fail on these too."
+        )
+
+    if _plan_has_report_creates(state):
+        points.append(
+            f"Every report created will be owned by {DEFAULT_REPORT_OWNER_USERNAME} "
+            f"on {dest} and will land as “{_SHARING_LABELS[state.report_sharing]}”."
+        )
+
+    points.append(
+        "Open at least one serialized envelope below and check it against what "
+        "you expect Workday to receive."
+    )
+    return points
+
+
 def _render_dry_run_results(state: WizardState) -> None:
     theme.banner(
         "info",
@@ -238,6 +306,9 @@ def _render_dry_run_results(state: WizardState) -> None:
                 key="dry_run_envelope_choice",
             )
             st.code(by_node[choice].envelope or "(no envelope)", language="xml")
+
+    theme.section("Before you tick the box", eyebrow="What to check")
+    theme.checklist(_dry_run_review_points(state))
 
     state.dry_run_reviewed = st.checkbox(
         "I have reviewed this dry run's output.",
