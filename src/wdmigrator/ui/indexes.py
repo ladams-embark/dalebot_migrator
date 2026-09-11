@@ -147,7 +147,7 @@ def age_label(seconds: float) -> str:
     return f"{int(hours / 24)}d ago"
 
 
-def _format_duration(seconds: float) -> str:
+def format_duration(seconds: float) -> str:
     """Render a countdown the way a user actually wants to read it.
 
     Coarse on purpose — a "remaining" estimate built from one in-flight page's
@@ -170,6 +170,10 @@ def _format_duration(seconds: float) -> str:
         return f"about {max(1, int(minutes + 0.5))} min"
     hours = minutes / 60
     return f"about {hours:.1f}h"
+
+
+#: Kept for the callers that predate Scope needing this. Same function.
+_format_duration = format_duration
 
 
 @dataclass

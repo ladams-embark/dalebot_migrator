@@ -64,6 +64,18 @@ def prioritise_blockers(blockers):
     return sorted(blockers, key=lambda b: b.waiting)
 
 
+def _render_back_only(state: WizardState) -> None:
+    """The escape hatch for a step that could not render at all."""
+    index = STEP_ORDER.index(state.step)
+    if index == 0:
+        return
+    st.divider()
+    if st.button(f"Back to {STEP_TITLES[STEP_ORDER[index - 1]].lower()}", key="nav_back_error"):
+        state.hold_step = True
+        state.step = STEP_ORDER[index - 1]
+        st.rerun()
+
+
 def _unlocked_through(state: WizardState) -> int:
     """Index of the furthest step whose gate is currently satisfied, walking
     forward from Connect and stopping at the first one that isn't."""
@@ -141,6 +153,12 @@ def main() -> None:
             ),
             remedy_label="Next",
         )
+        # The step body is what failed, so Continue would be meaningless — but
+        # returning here used to take the whole nav bar with it, leaving the
+        # user on a dead page with no way back to the step whose input caused
+        # this. Back, at least, always works.
+        _render_back_only(state)
+        components.render_glossary()
         return
 
     st.divider()
@@ -185,3 +203,8 @@ def main() -> None:
         if rest:
             with st.expander(f"{len(rest)} more before continuing", expanded=False):
                 components.render_blockers(rest)
+
+    # Last thing on every step. The wizard's copy uses WID, ISU, implementer,
+    # closure and worklet as though everyone knows them, and a user working
+    # alone has nobody to lean over and ask.
+    components.render_glossary()

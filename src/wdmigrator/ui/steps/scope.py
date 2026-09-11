@@ -13,6 +13,11 @@ import streamlit as st
 
 from wdmigrator.api import Blocker
 from wdmigrator.ui import theme
+from wdmigrator.ui.indexes import (
+    BUILD_ESTIMATE_SECONDS,
+    _DEFAULT_ESTIMATE_SECONDS,
+    format_duration,
+)
 from wdmigrator.ui.state import OBJECT_KINDS, WizardState, reset_downstream
 
 STEP_ID = "scope"
@@ -82,6 +87,53 @@ def _implementer_verdict(state: WizardState) -> tuple[bool, str]:
     return True, ""
 
 
+def _sweep_kinds(chosen: list[str]) -> list[str]:
+    """Every index Select will sweep for this scope, source and destination.
+
+    Mirrors ``select._source_specs`` / ``_destination_specs``. Duplicated
+    rather than derived from them because those need a live ``Connection`` to
+    build a spec, and Scope deliberately has not touched a tenant yet.
+    """
+    kinds = ["calculated_field"]  # Always swept: resolution classifies against it.
+    if "reports" in chosen:
+        kinds.append("report")
+    if "dashboards" in chosen:
+        kinds += ["dashboard", "prompt_set", "prompt_field"]
+    if "time_calculations" in chosen:
+        kinds += ["time_calculation", "time_calculation_group", "time_calculation_tag"]
+    if "reports" in chosen or "dashboards" in chosen:
+        kinds += ["gauge_range", "analytic_indicator"]
+    # Both destination sweeps run on Select too — cross-tenant matching needs
+    # them before Plan can probe anything, so they are part of the wait.
+    return kinds + ["calculated_field", "calculated_measure"]
+
+
+def _sweep_seconds(chosen: list[str]) -> float:
+    """Figures come from :data:`wdmigrator.ui.indexes.BUILD_ESTIMATE_SECONDS`,
+    measured live, so this and Select's countdown cannot drift apart."""
+    return sum(
+        BUILD_ESTIMATE_SECONDS.get(kind, _DEFAULT_ESTIMATE_SECONDS)
+        for kind in _sweep_kinds(chosen)
+    )
+
+
+def _sweep_estimate(chosen: list[str]) -> str:
+    """How long the next step will spend reading before anything is pickable.
+
+    Scope's whole argument for existing is that the sweeps are expensive
+    enough to be worth choosing before starting. It was asking for the choice
+    without ever saying what it cost. The report catalog alone is ~2.5
+    minutes against a tenant with ~5,150 reports — long enough that a user
+    with no number in front of them reasonably concludes the app has hung.
+    """
+    return (
+        f"Roughly {format_duration(_sweep_seconds(chosen))} of catalog "
+        "reading on the next step before everything is pickable — both "
+        "tenants, cached to disk afterwards. You can start picking sooner "
+        "than that."
+    )
+
+
 def render(state: WizardState) -> None:
     st.header("Scope")
     if state.package is not None:
@@ -132,6 +184,9 @@ def render(state: WizardState) -> None:
         # or a half-built index from a previous pass.
         reset_downstream(state, from_step="select")
         state.object_kinds = list(chosen)
+
+    if chosen:
+        st.caption(_sweep_estimate(chosen))
 
 
 def gate(state: WizardState) -> list[Blocker]:

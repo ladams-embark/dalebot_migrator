@@ -111,6 +111,94 @@ def render_blockers(blockers: list[Blocker], *, empty_message: str = "No blocker
         render_blocker(b)
 
 
+#: Terms the wizard uses as though everyone knows them. Most are Workday's
+#: own vocabulary and the rest are this tool's; either way the user meeting
+#: them for the first time is doing so on a page that is about to write to a
+#: tenant. Ordered roughly by when they first appear in the flow.
+_GLOSSARY = [
+    (
+        "Tenant",
+        "One Workday environment — Implementation, Sandbox, Production. This "
+        "tool reads from a source tenant and writes to a destination tenant, "
+        "and they must be different ones for a live run.",
+    ),
+    (
+        "Services host vs browser host",
+        "Every tenant has two hostnames. The one in your browser's address "
+        "bar (impl.wd12…) is not the one the API lives on "
+        "(impl-services1.wd12…). Using the browser host returns HTTP 500, "
+        "which looks like an outage rather than a typo.",
+    ),
+    (
+        "ISU",
+        "Integration System User — the service account this tool signs in as. "
+        "Needs Get and Put on the Configuration Set: Custom Reports and "
+        "Fields security configuration, on both tenants.",
+    ),
+    (
+        "Implementer account",
+        "A category of Workday account, not a permission. Dashboards, prompt "
+        "sets, prompt fields and time calculations can only be read or "
+        "written by one, and no security domain grant substitutes.",
+    ),
+    (
+        "WID",
+        "Workday ID — the internal identifier for an object. WIDs are "
+        "tenant-local: a calculated field written to the destination gets a "
+        "new one, which is why every reference to it has to be rewritten "
+        "afterwards. That rewriting is most of what this tool does.",
+    ),
+    (
+        "Business ID / reference ID",
+        "A human-assigned identifier such as Calculated_Field_Reference_ID, "
+        "unlike a WID. Business IDs are usually the same on both tenants, so "
+        "they are left alone rather than remapped.",
+    ),
+    (
+        "Dependency closure",
+        "Your selection plus everything it needs to work — the calculated "
+        "fields a report uses, the fields those fields use, and so on. Built "
+        "on the Plan step, in memory, with no tenant calls.",
+    ),
+    (
+        "CREATE / SKIP / UPDATE",
+        "What will happen to each object. SKIP means the destination already "
+        "has it and it will be reused unchanged. CREATE means it does not and "
+        "one will be made. UPDATE overwrites an existing object and is used "
+        "sparingly.",
+    ),
+    (
+        "Dry run",
+        "The whole migration with every write suppressed. It builds the exact "
+        "payloads that would be sent and reports what each would do, without "
+        "sending any of them.",
+    ),
+    (
+        "Worklet",
+        "One tile on a dashboard. A dashboard names its reports as worklets, "
+        "and each of those reports has to name the dashboard back — which is "
+        "why dashboards are written twice, once empty and once complete.",
+    ),
+    (
+        "Prompt set",
+        "The set of runtime prompts a dashboard offers. It has to exist in "
+        "the destination before a dashboard referencing it can be written.",
+    ),
+]
+
+
+def render_glossary() -> None:
+    """The vocabulary, in one collapsed place on every step.
+
+    Every one of these terms appears in the wizard's own copy without
+    explanation, and the copy cannot stop to define them without becoming
+    unreadable. A user working alone has nobody to lean over and ask.
+    """
+    with st.expander("Glossary — what the words on this page mean"):
+        for term, meaning in _GLOSSARY:
+            st.markdown(f"**{term}** — {meaning}")
+
+
 def render_job_progress(
     job: JobState | None, *, label: str, fraction: float = 0.0, detail: str | None = None
 ) -> None:
