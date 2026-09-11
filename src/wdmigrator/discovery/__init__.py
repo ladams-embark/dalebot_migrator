@@ -5,6 +5,11 @@ criteria at all, and report search is exact-match — so discovery means buildin
 a local index and searching that. See `inventory.py` for the details.
 """
 
+from wdmigrator.discovery.payload_store import (
+    PayloadStore,
+    PayloadUnavailable,
+    store_path_for,
+)
 from wdmigrator.discovery.inventory import (
     ALL_DASHBOARD_FLAVOURS,
     DASHBOARD_FLAVOURS,
@@ -71,6 +76,9 @@ from wdmigrator.discovery.inventory import (
 )
 
 __all__ = [
+    "PayloadStore",
+    "PayloadUnavailable",
+    "store_path_for",
     "ALL_DASHBOARD_FLAVOURS",
     "DASHBOARD_FLAVOURS",
     "DELIVERED_DASHBOARD_FLAVOURS",

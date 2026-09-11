@@ -25,6 +25,7 @@ import streamlit as st
 from wdmigrator.api import (
     Connection,
     IndexProgress,
+    PayloadStore,
     cache_path,
     calculated_field_match_index,
     calculated_measure_match_index,
@@ -33,6 +34,7 @@ from wdmigrator.api import (
     load_index,
     requires_implementer,
     save_index,
+    store_path_for,
 )
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
@@ -225,7 +227,14 @@ def _chained_build(state, specs: list[IndexSpec]) -> Iterator[_StageEvent]:
         if spec.implementer_gated and state.implementer_required:
             continue
         try:
-            for progress in spec.iterator_fn(spec.connection):
+            # Payloads stream straight to disk. Holding them in memory costs
+            # 585 MB for a single report index, which is most of a hosted
+            # app's entire budget — and that budget is shared with every other
+            # consultant using it, including any of them mid-write.
+            store = PayloadStore.create(
+                store_path_for(cache_path(spec.connection, spec.kind))
+            )
+            for progress in spec.iterator_fn(spec.connection, payload_store=store):
                 yield _StageEvent(
                     stage=stage,
                     total_stages=total,
