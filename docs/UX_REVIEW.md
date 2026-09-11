@@ -1,5 +1,8 @@
 # UX and build review — 2026-08-05
 
+> Superseded in part by `docs/UX_REVIEW_2026-09.md`, which re-walks the flow as
+> it stands after the Scope step landed and notes which items below are closed.
+
 Review of the wizard as it stands after the Commit rebrand, covering the whole
 `Connect → Select → Resolve → Conflicts → Confirm → Execute → Results` flow and
 the engine behind it.

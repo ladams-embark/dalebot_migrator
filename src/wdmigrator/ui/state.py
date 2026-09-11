@@ -23,6 +23,7 @@ from typing import Optional
 import streamlit as st
 
 from wdmigrator.api import (
+    Capabilities,
     Closure,
     Connection,
     ConnectionStatus,
@@ -71,6 +72,14 @@ class ConnectionState:
     status: Optional[ConnectionStatus] = None
     verified_fingerprint: str = ""
 
+    #: What this account can actually reach, probed right after the
+    #: connection test. The implementer gate is an account-type gate rather
+    #: than a domain grant, so it cannot be fixed from inside Workday's
+    #: security config — finding out at Connect instead of three steps and a
+    #: full index sweep later is the difference between a five-second answer
+    #: and a wasted setup.
+    capabilities: Optional[Capabilities] = None
+
     # Endpoint discovery ("I only know the tenant ID") — separate from
     # target_raw/target above since discovery works from a bare tenant ID,
     # not a URL, and needs its own in-progress job state.
@@ -81,6 +90,11 @@ class ConnectionState:
     # discovery's own progress collapses on the very reruns that pump
     # generates, hiding the progress messages it exists to show.
     discovery_expanded: bool = False
+
+    #: Set when quick fill populated this side but did not test it — the
+    #: destination path, where filling the write target from a file should
+    #: not also authenticate against it. Cleared by any connection attempt.
+    quick_filled_pending_test: bool = False
 
     @property
     def verified(self) -> bool:
@@ -253,6 +267,19 @@ class WizardState:
     #: Set after a live run log is written under ``out/`` so a rerun does not
     #: create a second file for the same records.
     run_log_path: str = ""
+    #: Source tenant a resumed session was captured against, held until the
+    #: source actually connects. A restored selection is a list of WIDs, and
+    #: WIDs mean nothing in a tenant they did not come from — connecting to a
+    #: different source than the session was saved against has to throw the
+    #: selection away rather than carry it somewhere it does not apply.
+    #: Cleared by the first successful source connection either way.
+    restored_source_tenant: str = ""
+    #: One-shot notice describing what :func:`reset_downstream` just threw
+    #: away. Rendered and cleared by the nav bar on the next render. Changing
+    #: something upstream *should* invalidate a reviewed dry run — the point
+    #: of the review is that it was of this exact plan — but doing it without
+    #: saying so leaves the user believing an approval they no longer have.
+    discarded_notice: str = ""
 
 
 def hydrate_wizard_state(state: WizardState) -> None:
@@ -283,6 +310,50 @@ def get_state() -> WizardState:
     return state
 
 
+def _describe_discard(state: WizardState, idx: int) -> str:
+    """What this reset is about to destroy that the user would want back.
+
+    Deliberately silent about the cheap things. Indexes rebuild themselves
+    and a closure re-resolves in memory; naming those would put a banner in
+    front of every single pick on Select and train people to ignore it. Only
+    work that has to be redone by hand, or agreement that has to be given
+    again, is worth interrupting for.
+    """
+    lost: list[str] = []
+    if idx <= STEP_ORDER.index("select"):
+        picked = (
+            len(state.selected_reports_added)
+            + len(state.selected_dashboards_added)
+            + len(state.selected_field_wids)
+            + len(state.selected_time_calculation_wids)
+        )
+        if picked:
+            lost.append(f"the selection of {picked} object(s)")
+        if state.reference_decisions:
+            lost.append(f"{len(state.reference_decisions)} reference decision(s)")
+    if idx <= STEP_ORDER.index("plan"):
+        if state.dry_run_records:
+            lost.append("the dry run")
+        if state.dry_run_reviewed:
+            lost.append("your confirmation that you had reviewed it")
+        if state.action_overrides:
+            lost.append(f"{len(state.action_overrides)} CREATE/SKIP override(s)")
+        if state.confirmed_tenant_name or state.irreversible_ack or state.warnings_acknowledged:
+            lost.append("the Run step acknowledgements")
+    if not lost:
+        return ""
+    if len(lost) == 1:
+        listed = lost[0]
+    else:
+        listed = ", ".join(lost[:-1]) + " and " + lost[-1]
+    return (
+        f"That change cleared {listed}. "
+        "A reviewed dry run is a review of one exact plan, so it cannot "
+        "carry over to a different one — the review has to be redone before "
+        "a live run will unlock."
+    )
+
+
 def reset_downstream(state: WizardState, *, from_step: str) -> None:
     """Wipe everything computed at or after ``from_step``.
 
@@ -291,6 +362,9 @@ def reset_downstream(state: WizardState, *, from_step: str) -> None:
     is called explicitly at those points instead.
     """
     idx = STEP_ORDER.index(from_step)
+    notice = _describe_discard(state, idx)
+    if notice:
+        state.discarded_notice = notice
 
     if idx <= STEP_ORDER.index("scope"):
         state.object_kinds = []

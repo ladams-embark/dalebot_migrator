@@ -29,21 +29,39 @@ from wdmigrator.api import (
     list_packages,
     load_package,
     parse_tenant_url,
+    probe_capabilities,
     verify_connection,
 )
 from wdmigrator.ui import secrets as secrets_ui
-from wdmigrator.ui import theme
-from wdmigrator.ui.components import render_connection_status, render_target_card
+from wdmigrator.ui import session_store, theme, workspace
+from wdmigrator.ui.components import (
+    render_capabilities,
+    render_connection_status,
+    render_target_card,
+)
 from wdmigrator.ui.runner import pump, start_job
 from wdmigrator.ui.state import ConnectionState, WizardState, reset_downstream
 
 STEP_ID = "connect"
 
-# Common-case quick fill. The tenant ID itself isn't a credential (it's
-# already throughout this repo's docs and tests) — never extend this to
-# username/password, which must always be typed, never prefilled.
-_QUICK_FILL_TENANT = "commitconsulting_dpt1"
-_QUICK_FILL_SERVICES_HOST = "impl-services1.wd12.myworkday.com"
+#: Quick fill reads whatever tenant this operator put in ``.env`` for the side
+#: being filled. It used to name one specific tenant as a module constant,
+#: which shipped a prominent one-click button pointing the *write target* at
+#: this project's own implementation tenant for anybody who was not this
+#: project. Reading it per-side means the button can only ever offer the
+#: tenant the operator already configured, and it disappears entirely when
+#: they have not configured one.
+_ENV_PREFIX = {Role.SOURCE: "WD_SOURCE", Role.DESTINATION: "WD_DEST"}
+
+
+def _env_target(role: Role) -> tuple[str, str] | None:
+    """``(tenant, services_host)`` from ``.env`` for this side, if both are set."""
+    prefix = _ENV_PREFIX[role]
+    tenant = os.environ.get(f"{prefix}_TENANT", "").strip()
+    host = os.environ.get(f"{prefix}_SERVICES_HOST", "").strip()
+    if tenant and host:
+        return tenant, host
+    return None
 
 
 def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, label: str) -> None:
@@ -51,6 +69,8 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
     # failure's error text — which can echo back parts of the request — gets
     # redacted rather than risking a cleartext password in a traceback.
     install_redacting_log_filter(state.source.password, state.dest.password)
+
+    side.quick_filled_pending_test = False
 
     try:
         target = parse_tenant_url(side.target_raw)
@@ -93,12 +113,32 @@ def _attempt_connect(state: WizardState, side: ConnectionState, role: Role, labe
             "closure, and plan built from the old one were cleared.",
         )
 
+    if status.ok and role is Role.SOURCE and state.restored_source_tenant:
+        # A resumed session brought a selection of source WIDs with it. They
+        # only mean anything in the tenant they were picked from.
+        if target.tenant != state.restored_source_tenant:
+            was = state.restored_source_tenant
+            reset_downstream(state, from_step="select")
+            theme.banner(
+                "warning",
+                "Resumed selection discarded",
+                f"That session was saved against `{was}` and this source is "
+                f"`{target.tenant}`. The object IDs in it do not refer to "
+                "anything here, so the selection was cleared.",
+                remedy="Pick objects again from this tenant's catalog on Select.",
+            )
+        state.restored_source_tenant = ""
+
     side.status = status
     if status.ok:
         side.connection = connection
         side.verified_fingerprint = status.fingerprint
+        # One extra Get, ~0.2s, read-only. Answers the question that would
+        # otherwise surface as a failed sweep on Select.
+        side.capabilities = probe_capabilities(connection)
     else:
         side.connection = None
+        side.capabilities = None
 
 
 def _run_discovery(side: ConnectionState) -> None:
@@ -173,9 +213,12 @@ def _quick_fill(
     role. Returns True if both username and password ended up populated —
     that's the caller's cue to auto-run the connection test.
     """
+    env_target = _env_target(role)
+    if env_target is None:
+        return False
+    tenant, host = env_target
     side.target_raw = (
-        f"https://{_QUICK_FILL_SERVICES_HOST}/ccx/service/"
-        f"{_QUICK_FILL_TENANT}/{DEFAULT_SERVICE_NAME}/{DEFAULT_VERSION}"
+        f"https://{host}/ccx/service/{tenant}/{DEFAULT_SERVICE_NAME}/{DEFAULT_VERSION}"
     )
     # See the same fix in _pump_discovery — a widget's session_state entry
     # overrides value= once the widget has been rendered once.
@@ -185,7 +228,7 @@ def _quick_fill(
     except TenantURLError:
         side.target = None
 
-    env_prefix = "WD_SOURCE" if role is Role.SOURCE else "WD_DEST"
+    env_prefix = _ENV_PREFIX[role]
     env_user = os.environ.get(f"{env_prefix}_ISU_USERNAME", "")
     env_pass = os.environ.get(f"{env_prefix}_ISU_PASSWORD", "")
     if env_user:
@@ -197,13 +240,22 @@ def _quick_fill(
     return bool(env_user and env_pass)
 
 
-def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
-    theme.section(
-        label,
-        eyebrow="Reads from" if role is Role.SOURCE else "Writes to",
-    )
+def _render_quick_fill(state: WizardState, side: ConnectionState, role: Role,
+                       label: str, key: str) -> None:
+    """The .env shortcut, if this side has one configured.
 
-    if st.button(f"Quick fill: {_QUICK_FILL_TENANT}", key=f"{key}_quick_fill"):
+    The source side fills and tests in one click — it is a read-only
+    connection, and getting to a verified source fast is the whole point.
+    The destination side fills but never tests itself: that is the tenant
+    this tool writes to, and pointing it somewhere should always be
+    something the user did on purpose and then confirmed with a second
+    click on Test.
+    """
+    env_target = _env_target(role)
+    if env_target is None:
+        return
+    tenant, _host = env_target
+    if st.button(f"Quick fill from .env: {tenant}", key=f"{key}_quick_fill"):
         creds_filled = _quick_fill(
             side,
             role,
@@ -211,9 +263,29 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
             user_widget_key=f"{key}_user",
             pass_widget_key=f"{key}_pass",
         )
-        if creds_filled:
+        if role is Role.SOURCE and creds_filled:
             _attempt_connect(state, side, role, label)
+        else:
+            side.quick_filled_pending_test = True
         st.rerun()
+
+    if role is Role.DESTINATION and side.quick_filled_pending_test:
+        theme.banner(
+            "warning",
+            f"Destination filled from .env: {tenant}",
+            "This is the tenant this tool writes to, and nothing has been "
+            "tested against it yet. Check it is the one you mean.",
+            remedy="Click Test destination connection when you are ready.",
+        )
+
+
+def _render_side(state: WizardState, side: ConnectionState, role: Role, label: str, key: str) -> None:
+    theme.section(
+        label,
+        eyebrow="Reads from" if role is Role.SOURCE else "Writes to",
+    )
+
+    _render_quick_fill(state, side, role, label, key)
 
     with st.expander(
         "Find services host from tenant ID",
@@ -252,6 +324,7 @@ def _render_side(state: WizardState, side: ConnectionState, role: Role, label: s
 
     render_target_card(label, side.target)
     render_connection_status(side.status)
+    render_capabilities(side.capabilities)
 
 
 def _render_package_loader(state: WizardState) -> None:
@@ -324,8 +397,156 @@ def _render_package_loader(state: WizardState) -> None:
         st.rerun()
 
 
+def _render_resume(state: WizardState) -> None:
+    """Pick up a saved session.
+
+    Only offered on Connect, and only when nothing has been picked yet:
+    restoring over a selection someone is in the middle of making would be a
+    destructive act behind a button labelled "resume".
+    """
+    if state.selected_reports_added or state.selected_dashboards_added:
+        return
+
+    theme.section(
+        "Resume a saved session",
+        "Brings back the tenants, usernames and object selection from a "
+        "previous session. Passwords and approvals are never saved.",
+        eyebrow="Optional",
+    )
+
+    summaries = session_store.list_sessions(
+        workspace.user_dir(session_store.SESSION_DIR)
+    )
+    if summaries:
+        st.caption(
+            "Saved on the server. Only sessions from this browser's workspace "
+            "are listed — other people using this app have their own. These "
+            "are lost if the app restarts."
+        )
+        options = {s.path.name: s for s in summaries}
+        choice = st.selectbox(
+            "Saved sessions",
+            options=list(options),
+            format_func=lambda n: options[n].label,
+            key="session_choice",
+        )
+        if st.button("Resume this session", key="session_resume"):
+            try:
+                data = session_store.load_session(options[choice].path)
+            except session_store.SessionError as exc:
+                theme.banner("danger", "Could not resume", str(exc))
+                return
+            _apply_resumed(state, data)
+
+    # The durable half. A hosted app's filesystem does not survive the
+    # container restarting — which happens on redeploy, on waking from idle,
+    # and on running out of memory — so the copy that actually keeps is the
+    # one the user downloaded to their own machine.
+    uploaded = st.file_uploader(
+        "Or upload a session file you downloaded earlier",
+        type=["json"],
+        key="session_upload",
+        help="The file from the Download button on the Select step.",
+    )
+    if uploaded is not None and st.button(
+        "Resume from this file", key="session_resume_upload"
+    ):
+        try:
+            data = session_store.parse_session(uploaded.getvalue(), label=uploaded.name)
+        except session_store.SessionError as exc:
+            theme.banner("danger", "Could not resume", str(exc))
+            return
+        _apply_resumed(state, data)
+
+    for note in st.session_state.get("_resume_notes", []):
+        st.caption(note)
+
+
+def _apply_resumed(state: WizardState, data: dict) -> None:
+    """Copy a validated session onto the wizard and rerun.
+
+    Shared by the on-disk picker and the uploader so the two cannot drift —
+    in particular so neither can skip seeding the widget-backed fields and
+    leave a resumed session showing empty tenant boxes.
+    """
+    st.session_state["_resume_notes"] = session_store.restore(state, data)
+    # The target and username fields are widget-backed; once rendered,
+    # session_state drives them and ``value=`` is ignored. Same fix as
+    # _pump_discovery and _quick_fill.
+    for key, side in (("src", state.source), ("dst", state.dest)):
+        st.session_state[f"{key}_target"] = side.target_raw
+        st.session_state[f"{key}_user"] = side.username
+    st.rerun()
+
+
+def _render_save_session(state: WizardState) -> None:
+    """Save from Connect too, not only from Plan.
+
+    The expensive thing to lose is the selection, and by the time someone is
+    on Connect again they may have already lost it. This is here for the
+    other direction: save before closing the tab.
+    """
+    if not any(
+        (
+            state.selected_reports_added,
+            state.selected_dashboards_added,
+            state.selected_field_wids,
+            state.selected_time_calculation_wids,
+        )
+    ):
+        return
+    if st.button("Save this session", key="session_save_connect"):
+        path = session_store.save_session(
+            state, directory=workspace.user_dir(session_store.SESSION_DIR)
+        )
+        theme.banner(
+            "success",
+            "Session saved",
+            f"Written to `{path}`. Resume it from this step after a reload.",
+            remedy=(
+                "Keep this tab's URL. Saved sessions are private to the "
+                f"workspace in the address bar (`{workspace.shared_link()}`), "
+                "so a link without it will not find this session."
+            ),
+            remedy_label="Before you close the tab",
+        )
+
+
+def _render_before_you_start() -> None:
+    """What has to be true before any of this works.
+
+    All four of these are in CLAUDE.md and were in no part of the product.
+    Three of them are only discovered by failing: the implementer gate on
+    Select after a sweep, the Put grant on Run after a failed write, and the
+    pending-security-change delay never — it reads as an intermittent
+    permissions bug. The host trap returns HTTP 500, which reads like an
+    outage rather than a typo.
+    """
+    with st.expander("Before you start — what you need", expanded=False):
+        theme.checklist(
+            [
+                "An Integration System User on BOTH tenants with Get and Put on "
+                "Configuration Set: Custom Reports and Fields.",
+                "After any security change in Workday, run 'Activate Pending "
+                "Security Policy Changes' — grants are not live until you do, "
+                "and until then this reads as an intermittent permission error.",
+                "Dashboards, prompt sets, prompt fields and time calculations "
+                "additionally need an implementer account. That is an account "
+                "type, not a domain grant — no security configuration changes "
+                "it. The connection test below reports which you have.",
+                "Use the services host (impl-services1.wd12…), not the browser "
+                "host (impl.wd12…). A mismatched host and tenant returns HTTP "
+                "500, which looks like an outage rather than a typo.",
+                "Implementation or Sandbox tenants only. Nothing this tool "
+                "writes can be undone by it — the web service has no delete "
+                "operation.",
+            ]
+        )
+
+
 def render(state: WizardState) -> None:
     st.header("Connect")
+    _render_before_you_start()
     col1, col2 = st.columns(2)
     with col1:
         _render_side(state, state.source, Role.SOURCE, "Source", "src")
@@ -346,6 +567,8 @@ def render(state: WizardState) -> None:
     # destination) reads first; the package loader is the alternative for
     # someone who does not need or have a live source.
     st.divider()
+    _render_resume(state)
+    _render_save_session(state)
     _render_package_loader(state)
 
 

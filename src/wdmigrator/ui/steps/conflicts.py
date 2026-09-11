@@ -107,7 +107,7 @@ def _render_destination_indexes(state: WizardState) -> bool:
                 "Re-run now",
                 key="dest_index_rerun_now",
                 disabled=state.dest_index_job is not None,
-                use_container_width=True,
+                width="stretch",
             ):
                 for spec in specs:
                     setattr(state, spec.index_attr, None)
@@ -192,7 +192,6 @@ def _render_overrides(state: WizardState) -> None:
     edited = st.data_editor(
         df,
         hide_index=True,
-        use_container_width=True,
         disabled=["node_id", "kind", "name", "existence"],
         column_config={
             "action": st.column_config.SelectboxColumn(
@@ -222,11 +221,17 @@ def _render_overrides(state: WizardState) -> None:
 def render(state: WizardState, *, heading: bool = True) -> None:
     if heading:
         st.header("Conflicts")
-        st.caption(
-            "Probes the destination tenant for every object in the resolved closure to "
-            "decide CREATE vs SKIP. This is real, targeted destination traffic — one Get "
-            "per object, not a bulk pull. It starts once destination matching is built."
-        )
+    # Same as ``resolve.render``: this explanation was behind ``if heading``
+    # and Plan passes heading=False, so the only screen that shows this stage
+    # never showed what it was doing.
+    theme.section(
+        "2. What the destination already has",
+        "Every object above is looked up in the destination tenant to decide "
+        "whether it has to be created or is already there and can be reused. "
+        "This is real destination traffic — one Get per object, not a bulk "
+        "pull — and it reads only; nothing is written on this step.",
+        eyebrow="Create or reuse",
+    )
 
     if state.closure is None:
         theme.banner("danger", "No resolved closure", remedy="Go back to Plan.")
@@ -303,7 +308,6 @@ def render(state: WizardState, *, heading: bool = True) -> None:
                     }
                     for e in matched
                 ],
-                use_container_width=True,
                 hide_index=True,
             )
     if unknown:
@@ -332,26 +336,46 @@ def gate(state: WizardState) -> list[Blocker]:
         # Belt and braces with the disabled button: this is the check that
         # holds if the plan was carried in from anywhere else, and it is the
         # difference between reusing a shared object and duplicating it.
+        sweeping = state.dest_index_job is not None
         return [
             Blocker(
                 node_id=None,
-                title="Destination not swept for cross-tenant matching",
+                title=(
+                    "Reading the destination catalog"
+                    if sweeping
+                    else "Destination not swept for cross-tenant matching"
+                ),
                 detail=(
                     "Business IDs do not identify an object across tenants. Without "
                     "the destination calculated-field and calculated-measure "
                     "indexes, every object whose ID differs is reported absent and "
                     "planned as a CREATE."
                 ),
-                remedy="Wait for both destination indexes above, or click Build destination indexes.",
+                remedy=(
+                    "Waiting for both destination indexes (about 25s)."
+                    if sweeping
+                    else "Click Build destination indexes above."
+                ),
+                waiting=sweeping,
             )
         ]
     if state.plan is None:
+        probing = state.existence_job is not None
         return [
             Blocker(
                 node_id=None,
-                title="Destination not yet checked",
+                title=(
+                    "Checking the destination"
+                    if probing
+                    else "Destination not yet checked"
+                ),
                 detail="Run the existence check against the destination before continuing.",
-                remedy="Build destination indexes, then run Check existence.",
+                remedy=(
+                    "The probe is running — Continue unlocks when it finishes."
+                    if probing
+                    else "Build destination indexes, then run Check existence."
+                ),
+                waiting=probing,
             )
         ]
     return validate_plan(state.plan)

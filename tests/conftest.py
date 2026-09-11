@@ -134,3 +134,30 @@ def live_source_connection(live_source_target, live_source_credentials):
     from wdmigrator.auth import Role, make_client
 
     return make_client(live_source_target, live_source_credentials, role=Role.SOURCE)
+
+
+# ── Hosted-app workspace isolation ───────────────────────────────────────────
+
+#: Every UI artifact directory is scoped per browser session (see
+#: ``wdmigrator.ui.workspace``), because a hosted app serves several
+#: consultants from one filesystem. The id normally comes from the URL and is
+#: random on first visit; tests pin it so they can look in the right folder.
+TEST_WORKSPACE = "testws"
+
+
+def pin_workspace(at):
+    """Give an ``AppTest`` a deterministic workspace id.
+
+    Exercises the real mechanism rather than bypassing it — the id is read
+    back out of the query string, which is how it survives a browser reload.
+    """
+    at.query_params["w"] = TEST_WORKSPACE
+    return at
+
+
+@pytest.fixture
+def workspace_dir(tmp_path):
+    """The folder a pinned-workspace app will actually read and write."""
+    path = tmp_path / TEST_WORKSPACE
+    path.mkdir(parents=True, exist_ok=True)
+    return path

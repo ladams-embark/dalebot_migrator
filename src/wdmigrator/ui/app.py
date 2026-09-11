@@ -22,7 +22,7 @@ load_dotenv()
 import streamlit as st
 
 from wdmigrator.api import redact
-from wdmigrator.ui import components, theme
+from wdmigrator.ui import components, errors, theme, workspace
 from wdmigrator.ui.state import STEP_ORDER, STEP_TITLES, WizardState, get_state
 from wdmigrator.ui.steps import connect, plan, results, run, scope, select
 
@@ -50,6 +50,30 @@ _STEP_HINT = {
     "run": "Type the destination tenant name, tick the box, then Start. Writes cannot be undone.",
     "results": "Download the log, or start a new migration.",
 }
+
+
+def prioritise_blockers(blockers):
+    """Actionable blockers before merely-unfinished ones.
+
+    Only the first is shown inline; the rest go behind an expander. Without
+    this, which blocker gets promoted is down to the order a gate happened to
+    append them in, so a user could be shown "waiting for an index sweep"
+    while the thing actually holding them up — an empty selection — sat
+    collapsed underneath it.
+    """
+    return sorted(blockers, key=lambda b: b.waiting)
+
+
+def _render_back_only(state: WizardState) -> None:
+    """The escape hatch for a step that could not render at all."""
+    index = STEP_ORDER.index(state.step)
+    if index == 0:
+        return
+    st.divider()
+    if st.button(f"Back to {STEP_TITLES[STEP_ORDER[index - 1]].lower()}", key="nav_back_error"):
+        state.hold_step = True
+        state.step = STEP_ORDER[index - 1]
+        st.rerun()
 
 
 def _unlocked_through(state: WizardState) -> int:
@@ -95,6 +119,14 @@ def main() -> None:
     )
     theme.stepper(state.step, STEP_ORDER, STEP_TITLES, _unlocked_through(state))
     st.caption(_STEP_HINT[state.step])
+
+    # One-shot. Shown on the render *after* the change that caused it, which
+    # is the first render the user actually sees — the reset itself happens
+    # inside a callback that ends in st.rerun().
+    if state.discarded_notice:
+        theme.banner("warning", "Downstream work was cleared", state.discarded_notice)
+        state.discarded_notice = ""
+
     st.divider()
 
     module = _STEPS[state.step]
@@ -104,8 +136,33 @@ def main() -> None:
         # A zeep fault can carry the request envelope, which can carry a
         # WS-Security password in cleartext. Never let a raw traceback reach
         # the page — this is the most likely credential-leak path in the app.
-        message = redact(str(exc), (state.source.password, state.dest.password))
-        theme.banner("danger", f"Unexpected error in the {STEP_TITLES[state.step]} step", message)
+        secrets = (state.source.password, state.dest.password)
+        message = redact(str(exc), secrets)
+        log_path = errors.write_error_log(
+            exc,
+            step=state.step,
+            state=state,
+            secrets=secrets,
+            directory=workspace.safe_user_dir(errors.ERROR_DIR),
+        )
+        theme.banner(
+            "danger",
+            f"Unexpected error in the {STEP_TITLES[state.step]} step",
+            message,
+            remedy=(
+                f"The full traceback is in `{log_path}` — passwords stripped, "
+                "safe to send on."
+                if log_path
+                else "Retry the step, or go back and re-test the connection."
+            ),
+            remedy_label="Next",
+        )
+        # The step body is what failed, so Continue would be meaningless — but
+        # returning here used to take the whole nav bar with it, leaving the
+        # user on a dead page with no way back to the step whose input caused
+        # this. Back, at least, always works.
+        _render_back_only(state)
+        components.render_glossary()
         return
 
     st.divider()
@@ -126,7 +183,7 @@ def main() -> None:
 
     nav_cols = st.columns([1, 1, 6])
     with nav_cols[0]:
-        if current_index > 0 and st.button("Back", key="nav_back", use_container_width=True):
+        if current_index > 0 and st.button("Back", key="nav_back", width="stretch"):
             state.hold_step = True
             state.step = STEP_ORDER[current_index - 1]
             st.rerun()
@@ -138,15 +195,20 @@ def main() -> None:
                 key="nav_next",
                 disabled=bool(blockers),
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             ):
                 state.hold_step = False
                 state.step = STEP_ORDER[current_index + 1]
                 st.rerun()
 
     if blockers and current_index < len(STEP_ORDER) - 1:
-        first, *rest = blockers
-        theme.banner("warning", first.title, first.detail, remedy=first.remedy or None)
+        first, *rest = prioritise_blockers(blockers)
+        components.render_blocker(first)
         if rest:
             with st.expander(f"{len(rest)} more before continuing", expanded=False):
                 components.render_blockers(rest)
+
+    # Last thing on every step. The wizard's copy uses WID, ISU, implementer,
+    # closure and worklet as though everyone knows them, and a user working
+    # alone has nobody to lean over and ask.
+    components.render_glossary()

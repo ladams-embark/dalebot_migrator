@@ -34,10 +34,38 @@ from typing import Any, Callable, Iterator, Mapping
 from zeep.helpers import serialize_object
 
 from wdmigrator.auth.client import Connection
+from wdmigrator.discovery.payload_store import (
+    PayloadStore,
+    PayloadUnavailable,
+    store_path_for,
+)
 
 #: Max rows per page. The WSDL types Count as a 3-digit decimal, and 999 is
 #: confirmed working live. Do not raise this without re-testing.
 PAGE_SIZE = 999
+
+#: Reports are swept in much smaller pages than everything else, because a
+#: page is held whole in memory while zeep parses it and the payloads are
+#: ~33 KB each — an order of magnitude fatter than a calculated field.
+#:
+#: Measured live against ``commitconsulting_dpt1`` (4,515 reports), peak RSS
+#: for the full sweep:
+#:
+#: =========  =========  =======
+#: Page size  Peak RSS   Elapsed
+#: =========  =========  =======
+#: 999        863 MB     66s
+#: 200        290 MB     76s
+#: =========  =========  =======
+#:
+#: Three times the memory for 15% of the time is a bad trade anywhere, and a
+#: fatal one on a hosted container that throttles from ~690 MB and shares that
+#: budget with every other consultant using the app. The memory is transient —
+#: payloads stream to disk, so nothing accumulates across pages — but a
+#: transient spike is exactly what gets a container killed.
+#:
+#: Raising this is safe for correctness and unsafe for everything else.
+REPORT_PAGE_SIZE = 200
 
 #: Fault fragments that mean "this object does not exist here".
 #:
@@ -215,6 +243,71 @@ def requires_implementer(fault: str | None) -> bool:
     return IMPLEMENTER_REQUIRED_FRAGMENT in (fault or "").lower()
 
 
+@dataclass(frozen=True)
+class Capabilities:
+    """What an authenticated account can actually reach.
+
+    Authentication succeeding says nothing about whether the account can read
+    a dashboard: that is an account *type* gate, not a domain grant, and no
+    amount of security configuration moves it. Discovered late it costs a
+    user three steps and a full index sweep before the Select page tells them
+    their connection cannot do the thing they picked on Scope. This is the
+    same question asked at connection time, for the price of one Get.
+    """
+
+    #: True/False when the probe answered; None when it failed for some other
+    #: reason and we genuinely do not know. Never collapse None to False — an
+    #: outage is not an entitlement finding.
+    implementer: bool | None
+    detail: str
+
+    @property
+    def known(self) -> bool:
+        return self.implementer is not None
+
+    @property
+    def label(self) -> str:
+        if self.implementer is True:
+            return "Implementer"
+        if self.implementer is False:
+            return "Standard ISU"
+        return "Capabilities unknown"
+
+
+def probe_capabilities(connection: Connection) -> Capabilities:
+    """Ask the destination-agnostic question: is this an implementer account?
+
+    One ``Get_Custom_Dashboards_without_Tabs`` for a single row. Read-only,
+    one page, and the cheapest operation that is gated on account type rather
+    than on domain security.
+    """
+    spec = dashboard_flavour(tabbed=False)
+    try:
+        connection.limiter.wait()
+        getattr(connection.service, spec["get"])(
+            Response_Filter={"Page": 1, "Count": 1},
+            Response_Group={"Include_Reference": True},
+        )
+    except Exception as exc:  # noqa: BLE001 - classified, never blindly swallowed
+        message = connection.redact(str(exc))
+        if requires_implementer(message):
+            return Capabilities(
+                implementer=False,
+                detail=(
+                    "This account cannot read dashboards. Reports, calculated "
+                    "fields and measures are unaffected."
+                ),
+            )
+        return Capabilities(
+            implementer=None,
+            detail=f"Could not determine: {message[:200]}",
+        )
+    return Capabilities(
+        implementer=True,
+        detail="Dashboards, prompt sets, prompt fields and time calculations are readable.",
+    )
+
+
 #: Payload keys that carry worklet configurations at any level of the dashboard
 #: tree. Untabbed dashboards use ``Content_Data`` at the top; tabbed dashboards
 #: bury ``Worklets_Data`` inside each tab. Whichever appears with a non-empty
@@ -366,10 +459,18 @@ class PromptSetSummary:
 
 @dataclass
 class Index:
-    """An in-memory index of one object kind for one tenant.
+    """An index of one object kind for one tenant.
 
-    Holds both slim summaries (for pickers) and full payloads (for dependency
-    walking), because at 34 MB there is no reason to make the resolver refetch.
+    Summaries drive the pickers and are always in memory — they are small
+    (1.2 MB for 4,515 reports). Payloads are what dependency resolution walks,
+    and they are not small: the same index carries 148 MB of them, which is
+    why they normally live in a :class:`~wdmigrator.discovery.payload_store.
+    PayloadStore` on disk and are fetched per WID.
+
+    ``payloads`` remains as an in-memory override for indexes built without a
+    store — every test that constructs one by hand, and any caller that has
+    not opted into disk backing. When both are present the in-memory entry
+    wins, so a hand-built index is never second-guessed by a file.
     """
 
     kind: str
@@ -377,6 +478,10 @@ class Index:
     fetched_at: float
     summaries: dict[str, Any] = field(default_factory=dict)
     payloads: dict[str, dict] = field(default_factory=dict)
+    #: Set when payloads were streamed to disk rather than accumulated.
+    store: PayloadStore | None = None
+    #: Write buffer for the store, flushed a page at a time. Never read back.
+    _pending: list = field(default_factory=list, repr=False)
 
     def __len__(self) -> int:
         return len(self.summaries)
@@ -385,7 +490,61 @@ class Index:
         return wid in self.summaries
 
     def payload(self, wid: str) -> dict | None:
-        return self.payloads.get(wid)
+        """The full payload for one WID, or None if this index has no such object.
+
+        Raises :class:`PayloadUnavailable` when the index *does* list the
+        object but the store cannot produce it. That asymmetry is deliberate:
+        callers read ``None`` as "not in this index, look elsewhere", and the
+        resolver turns it into an unresolved-dependency finding the user is
+        asked to act on. A damaged cache answering ``None`` would manufacture
+        those findings and quietly drop objects from a closure that still
+        looked complete.
+        """
+        if wid in self.payloads:
+            return self.payloads[wid]
+        if self.store is None:
+            return None
+        if wid not in self.summaries:
+            return None
+        found = self.store.get(wid)
+        if found is None:
+            raise PayloadUnavailable(
+                f"{self.kind} {wid} is listed in the {self.tenant} index but its "
+                f"payload is missing from {self.store.path.name}. The cache is "
+                f"incomplete — rebuild this index before planning a migration."
+            )
+        return found
+
+    def iter_payloads(self) -> Iterator[tuple[str, dict]]:
+        """Every payload this index holds, streamed.
+
+        For the cross-tenant match builders, which are the only callers that
+        need all of them. Going through the store's own scan keeps that to one
+        sequential read instead of one lookup per object.
+        """
+        if self.store is not None:
+            yield from self.store.items()
+            return
+        yield from self.payloads.items()
+
+    def add_payload(self, wid: str, payload: dict) -> None:
+        """Stash one payload wherever this index keeps them.
+
+        Buffered when a store is attached — see :meth:`flush_payloads`. Sweeps
+        call this per object and flush per page, so a 999-object page costs one
+        transaction rather than 999.
+        """
+        if self.store is None:
+            self.payloads[wid] = payload
+            return
+        self._pending.append((wid, payload))
+
+    def flush_payloads(self) -> None:
+        """Commit whatever :meth:`add_payload` has buffered. No-op without a store."""
+        if self.store is None or not self._pending:
+            return
+        self.store.put_many(self._pending)
+        self._pending.clear()
 
     def by_reference_id(self) -> dict[str, Any]:
         return {
@@ -544,11 +703,13 @@ def calculated_field_match_index(index: "Index") -> CalculatedFieldMatchIndex:
     alias_of: dict[str, str] = {}
     shape_of: dict[str, tuple[str, str, str]] = {}
     reference_id_of: dict[str, str] = {}
-    for wid in index.summaries:
-        summary_reference_id = getattr(index.summaries[wid], "reference_id", None)
+    # Streamed rather than looked up per WID: this touches every object in the
+    # index — 8,981 on the destination tenant — and one sequential pass over
+    # the payload store beats 8,981 individual reads of it.
+    for wid, payload in index.iter_payloads():
+        summary_reference_id = getattr(index.summaries.get(wid), "reference_id", None)
         if summary_reference_id:
             reference_id_of[wid] = str(summary_reference_id)
-        payload = index.payload(wid)
         shape = calculated_field_shape(payload)
         if shape is not None:
             by_shape.setdefault(shape, []).append(wid)
@@ -608,8 +769,8 @@ def calculated_measure_match_index(index: "Index") -> dict[tuple[str, str], list
     whichever the sweep saw first.
     """
     shapes: dict[tuple[str, str], list[str]] = {}
-    for wid in index.summaries:
-        shape = calculated_measure_shape(index.payload(wid))
+    for wid, payload in index.iter_payloads():
+        shape = calculated_measure_shape(payload)
         if shape is not None:
             shapes.setdefault(shape, []).append(wid)
     return shapes
@@ -1369,10 +1530,21 @@ def _iter_index(
     summarise: Callable[[dict], Any],
     page_size: int,
     response_group: dict | None = None,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
-    """Shared pagination driver for both object kinds."""
+    """Shared pagination driver for both object kinds.
+
+    With ``payload_store`` set, payloads go to disk a page at a time and never
+    accumulate in memory. Without it they accumulate as before, which is what
+    every offline test wants and what a caller with no cache directory gets.
+    """
     started = time.monotonic()
-    index = Index(kind=kind, tenant=connection.target.tenant, fetched_at=time.time())
+    index = Index(
+        kind=kind,
+        tenant=connection.target.tenant,
+        fetched_at=time.time(),
+        store=payload_store,
+    )
     operation = getattr(connection.service, operation_name)
 
     page = 1
@@ -1398,7 +1570,8 @@ def _iter_index(
             if summary is None:
                 continue
             index.summaries[summary.wid] = summary
-            index.payloads[summary.wid] = item
+            index.add_payload(summary.wid, item)
+        index.flush_payloads()
 
         elapsed = time.monotonic() - started
         final = page >= total_pages
@@ -1417,7 +1590,10 @@ def _iter_index(
 
 
 def iter_calculated_field_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every calculated field. ~10 pages / ~20s / ~34 MB on the test tenant."""
     return _iter_index(
@@ -1431,17 +1607,23 @@ def iter_calculated_field_index(
         collection_key="Calculated_Field",
         summarise=_calculated_field_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
 def iter_report_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = REPORT_PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every report definition.
 
     Full data is required, not just references: a reference-only sweep returns
     ``{WID, Custom_Report_ID}`` with **no name**, which is useless for a picker.
-    That makes this the slower of the two sweeps (~6 pages / ~160s).
+    That makes this the slower of the two sweeps. Swept in small pages
+    (:data:`REPORT_PAGE_SIZE`) to cap peak memory: ~23 pages / ~76s
+    against commitconsulting_dpt1.
     """
     return _iter_index(
         connection,
@@ -1454,6 +1636,7 @@ def iter_report_index(
         collection_key="Tenanted_Report_Definition",
         summarise=_report_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
@@ -1615,7 +1798,10 @@ def _prompt_set_summary(item: dict) -> PromptSetSummary | None:
 
 
 def iter_dashboard_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every dashboard — custom and Workday-delivered, both flavours.
 
@@ -1634,7 +1820,12 @@ def iter_dashboard_index(
     dashboard Gets; ``wd-implementer`` reads all four.
     """
     started = time.monotonic()
-    index = Index(kind="dashboard", tenant=connection.target.tenant, fetched_at=time.time())
+    index = Index(
+        kind="dashboard",
+        tenant=connection.target.tenant,
+        fetched_at=time.time(),
+        store=payload_store,
+    )
 
     # Totals are only known after the first call of each flavour, so the
     # progress fraction is against the running sum rather than a figure known
@@ -1659,7 +1850,8 @@ def iter_dashboard_index(
                 if summary is None:
                     continue
                 index.summaries[summary.wid] = summary
-                index.payloads[summary.wid] = item
+                index.add_payload(summary.wid, item)
+            index.flush_payloads()
 
             last_flavour = position == len(ALL_DASHBOARD_FLAVOURS) - 1
             final = page >= total_pages and last_flavour
@@ -1678,7 +1870,10 @@ def iter_dashboard_index(
 
 
 def iter_calculated_measure_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every calculated measure. One page, 47-55 items on these tenants.
 
@@ -1707,11 +1902,15 @@ def iter_calculated_measure_index(
         collection_key="Calculated_Measure",
         summarise=_calculated_measure_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
 def iter_analytic_indicator_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every analytic indicator. One page: 339 on dpt1, 318 on dpt5.
 
@@ -1734,11 +1933,15 @@ def iter_analytic_indicator_index(
         collection_key="Analytic_Indicator",
         summarise=_analytic_indicator_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
 def iter_gauge_range_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every gauge range (custom analytic range). One page: 14 on dpt1,
     10 on dpt5.
@@ -1759,11 +1962,15 @@ def iter_gauge_range_index(
         collection_key="Gauge_Range",
         summarise=_gauge_range_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
 def iter_time_calculation_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every Time Calculation. One page: 162 on dpt1.
 
@@ -1785,11 +1992,15 @@ def iter_time_calculation_index(
         collection_key="Time_Calculation",
         summarise=_time_calculation_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
 def iter_time_calculation_group_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every Time Calculation Group. One page: 56 on dpt1.
 
@@ -1815,11 +2026,15 @@ def iter_time_calculation_group_index(
         collection_key="Time_Calculation_Group",
         summarise=_time_calculation_group_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
 def iter_time_calculation_tag_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every Time Calculation Tag. One page: 100 on dpt1.
 
@@ -1844,11 +2059,15 @@ def iter_time_calculation_tag_index(
         collection_key="Time_Calculation_Tag",
         summarise=_time_calculation_tag_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
 def iter_prompt_field_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every prompt field (tenanted external parameter). One page.
 
@@ -1873,11 +2092,15 @@ def iter_prompt_field_index(
         collection_key="Prompt_Field",
         summarise=_prompt_field_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
 def iter_prompt_set_index(
-    connection: Connection, *, page_size: int = PAGE_SIZE
+    connection: Connection,
+    *,
+    page_size: int = PAGE_SIZE,
+    payload_store: PayloadStore | None = None,
 ) -> Iterator[IndexProgress]:
     """Sweep every prompt set. One page, ~57 items on the test tenant.
 
@@ -1904,6 +2127,7 @@ def iter_prompt_set_index(
         collection_key="Prompt_Set",
         summarise=_prompt_set_summary,
         page_size=page_size,
+        payload_store=payload_store,
     )
 
 
@@ -1947,13 +2171,20 @@ def save_index(index: Index, path: Path) -> Path:
     sees the previous complete file or the new one — never a torn write.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    index.flush_payloads()
     document = {
         "kind": index.kind,
         "tenant": index.tenant,
         "fetched_at": index.fetched_at,
         "summaries": {w: asdict(s) for w, s in index.summaries.items()},
-        "payloads": index.payloads,
     }
+    if index.store is not None:
+        # Payloads are already on disk beside this file. Naming the store
+        # rather than deriving it means the pair cannot drift apart if the
+        # derivation rule ever changes under an existing cache.
+        document["payload_store"] = index.store.path.name
+    else:
+        document["payloads"] = index.payloads
     # Suffix with pid so two concurrent writers get distinct temp files rather
     # than one clobbering the other's temp before either rename lands.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -1985,6 +2216,12 @@ def load_index(
 
     The tenant check matters: a cache keyed to the wrong tenant would silently
     classify the wrong objects as already-existing.
+
+    Reads both cache shapes. Current files name a payload store alongside them
+    and stay around 1 MB; files written before payloads moved to disk carry
+    them inline and are loaded as-is, which is heavy but correct. Those get
+    replaced by the small form the next time the index is rebuilt, so nobody
+    has to throw away a cache to pick up the change.
     """
     if not path.is_file():
         return None
@@ -2001,6 +2238,18 @@ def load_index(
     if max_age_seconds is not None and (time.time() - fetched_at) > max_age_seconds:
         return None
 
+    store = None
+    store_name = document.get("payload_store")
+    if store_name:
+        candidate = PayloadStore(path.parent / str(store_name))
+        # A named-but-absent store means the summary file outlived its
+        # payloads. Refusing the cache sends the caller to a rebuild, which is
+        # right: handing back an index whose every payload lookup raises would
+        # push the failure to the middle of dependency resolution instead.
+        if not candidate.exists():
+            return None
+        store = candidate
+
     summary_type = _SUMMARY_TYPES.get(document.get("kind"), ReportSummary)
     return Index(
         kind=document.get("kind", ""),
@@ -2011,4 +2260,5 @@ def load_index(
             for wid, fields in (document.get("summaries") or {}).items()
         },
         payloads=document.get("payloads") or {},
+        store=store,
     )

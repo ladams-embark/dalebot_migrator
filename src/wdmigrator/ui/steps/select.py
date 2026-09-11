@@ -35,8 +35,14 @@ from wdmigrator.api import (
     lookup_report,
     lookup_report_by_name,
 )
-from wdmigrator.ui import theme
-from wdmigrator.ui.indexes import IndexSpec, bulk_build_indexes, destination_index_specs
+from wdmigrator.ui import session_store, theme, workspace
+from wdmigrator.ui.indexes import (
+    IndexSpec,
+    bulk_build_indexes,
+    destination_index_specs,
+    pending_specs,
+    preload_cached_indexes,
+)
 from wdmigrator.ui.state import OBJECT_KINDS, WizardState, reset_downstream
 
 STEP_ID = "select"
@@ -167,6 +173,49 @@ def _report_specs(connection) -> list[IndexSpec]:
     ]
 
 
+def _render_selection(
+    state: WizardState,
+    *,
+    wids,
+    label_for,
+    noun: str,
+    key_prefix: str,
+    remove,
+    clear,
+) -> None:
+    """The running list of what is picked, with a way to drop one of them.
+
+    Selections bank additively — that is what stopped them vanishing when the
+    filter changed, and it has to stay — but for a long time the only inverse
+    was a Clear that dropped every pick of that kind. Noticing the seventh of
+    twelve reports was the wrong one then meant redoing all twelve. Each row
+    gets its own Remove; Clear stays for starting over deliberately.
+    """
+    wids = list(wids)
+    if not wids:
+        return
+    theme.figures([(f"{noun.capitalize()} selected", len(wids))])
+    with st.expander(f"Selected {noun} ({len(wids)})"):
+        for wid in wids:
+            row = st.columns([8, 1])
+            with row[0]:
+                st.write(label_for(wid))
+            with row[1]:
+                if st.button(
+                    "Remove",
+                    key=f"{key_prefix}_rm_{wid}",
+                    width="stretch",
+                    help=f"Drop this one. The other {len(wids) - 1} stay selected.",
+                ):
+                    remove(wid)
+                    reset_downstream(state, from_step="plan")
+                    st.rerun()
+    if st.button(f"Clear all {noun}", key=f"{key_prefix}_clear"):
+        clear()
+        reset_downstream(state, from_step="plan")
+        st.rerun()
+
+
 def _bank_payloads(rows, df, store: dict, payload_for) -> int:
     """Copy newly highlighted rows into a wid-to-payload map. Add-only."""
     added = 0
@@ -247,7 +296,6 @@ def _render_calculated_fields(state: WizardState) -> None:
             )
             event = st.dataframe(
                 df,
-                use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="multi-row",
@@ -258,12 +306,19 @@ def _render_calculated_fields(state: WizardState) -> None:
                 reset_downstream(state, from_step="plan")
                 st.rerun()
 
-    if state.selected_field_wids:
-        theme.figures([("Fields selected", len(state.selected_field_wids))])
-        if st.button("Clear calculated field selections", key="cf_clear"):
-            state.selected_field_wids.clear()
-            reset_downstream(state, from_step="plan")
-            st.rerun()
+    def _field_label(wid: str) -> str:
+        summary = state.cf_index.summaries.get(wid) if state.cf_index else None
+        return getattr(summary, "name", None) or wid
+
+    _render_selection(
+        state,
+        wids=sorted(state.selected_field_wids),
+        label_for=_field_label,
+        noun="calculated fields",
+        key_prefix="cf",
+        remove=state.selected_field_wids.discard,
+        clear=state.selected_field_wids.clear,
+    )
 
 
 def _render_reports(state: WizardState) -> None:
@@ -336,7 +391,6 @@ def _render_reports(state: WizardState) -> None:
             )
         event = st.dataframe(
             df,
-            use_container_width=True,
             hide_index=True,
             on_select="rerun",
             selection_mode="multi-row",
@@ -362,21 +416,28 @@ def _render_reports(state: WizardState) -> None:
 
     state.selected_reports = dict(state.selected_reports_added)
 
-    if state.selected_reports:
-        theme.figures([("Reports selected", len(state.selected_reports))])
-        # Added reports are no longer visible as highlighted table rows once the
-        # filter moves on, so they are listed by name. Picking the wrong report
-        # cannot be undone in the destination, which makes "what exactly is in
-        # my selection" worth showing rather than just counting.
-        with st.expander(f"Selected reports ({len(state.selected_reports)})"):
-            for wid, payload in state.selected_reports.items():
-                data = payload.get("Tenanted_Report_Definition_Data") or {}
-                st.write(f"- {data.get('Name') or wid}")
-        if st.button("Clear report selections", key="report_clear"):
-            state.selected_reports_added = {}
-            state.selected_reports = {}
-            reset_downstream(state, from_step="plan")
-            st.rerun()
+    # Added reports are no longer visible as highlighted table rows once the
+    # filter moves on, so they are listed by name. Picking the wrong report
+    # cannot be undone in the destination, which makes "what exactly is in my
+    # selection" worth showing rather than just counting.
+    def _report_label(wid: str) -> str:
+        payload = state.selected_reports.get(wid) or {}
+        data = payload.get("Tenanted_Report_Definition_Data") or {}
+        return data.get("Name") or wid
+
+    def _clear_reports() -> None:
+        state.selected_reports_added = {}
+        state.selected_reports = {}
+
+    _render_selection(
+        state,
+        wids=list(state.selected_reports),
+        label_for=_report_label,
+        noun="reports",
+        key_prefix="report",
+        remove=lambda wid: state.selected_reports_added.pop(wid, None),
+        clear=_clear_reports,
+    )
 
 
 def _render_dashboards(state: WizardState) -> None:
@@ -432,7 +493,6 @@ def _render_dashboards(state: WizardState) -> None:
 
     event = st.dataframe(
         df,
-        use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="multi-row",
@@ -448,17 +508,23 @@ def _render_dashboards(state: WizardState) -> None:
 
     state.selected_dashboards = dict(state.selected_dashboards_added)
 
-    if state.selected_dashboards:
-        theme.figures([("Dashboards selected", len(state.selected_dashboards))])
-        with st.expander(f"Selected dashboards ({len(state.selected_dashboards)})"):
-            for wid, payload in state.selected_dashboards.items():
-                summary = state.dashboard_index.summaries.get(wid)
-                st.write(f"- {getattr(summary, 'name', None) or wid}")
-        if st.button("Clear dashboard selections", key="dashboard_clear"):
-            state.selected_dashboards_added = {}
-            state.selected_dashboards = {}
-            reset_downstream(state, from_step="plan")
-            st.rerun()
+    def _dashboard_label(wid: str) -> str:
+        summary = state.dashboard_index.summaries.get(wid)
+        return getattr(summary, "name", None) or wid
+
+    def _clear_dashboards() -> None:
+        state.selected_dashboards_added = {}
+        state.selected_dashboards = {}
+
+    _render_selection(
+        state,
+        wids=list(state.selected_dashboards),
+        label_for=_dashboard_label,
+        noun="dashboards",
+        key_prefix="dashboard",
+        remove=lambda wid: state.selected_dashboards_added.pop(wid, None),
+        clear=_clear_dashboards,
+    )
 
 
 def _render_time_calculations(state: WizardState) -> None:
@@ -504,7 +570,6 @@ def _render_time_calculations(state: WizardState) -> None:
     )
     picked = st.dataframe(
         df,
-        use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="multi-row",
@@ -517,20 +582,21 @@ def _render_time_calculations(state: WizardState) -> None:
         reset_downstream(state, from_step="plan")
         st.rerun()
 
-    if state.selected_time_calculation_wids:
-        theme.figures(
-            [("Time calculations selected", len(state.selected_time_calculation_wids))]
-        )
-        with st.expander(
-            f"Selected time calculations ({len(state.selected_time_calculation_wids)})"
-        ):
-            for wid in sorted(state.selected_time_calculation_wids):
-                s = state.time_calculation_index.summaries.get(wid)
-                st.write(f"• {s.name if s else wid} — {s.reference_id if s else ''}")
-        if st.button("Clear selections", key="tc_clear"):
-            state.selected_time_calculation_wids = set()
-            reset_downstream(state, from_step="plan")
-            st.rerun()
+    def _tc_label(wid: str) -> str:
+        s = state.time_calculation_index.summaries.get(wid)
+        if s is None:
+            return wid
+        return f"{s.name or wid} — {s.reference_id or ''}".rstrip(" —")
+
+    _render_selection(
+        state,
+        wids=sorted(state.selected_time_calculation_wids),
+        label_for=_tc_label,
+        noun="time calculations",
+        key_prefix="tc",
+        remove=state.selected_time_calculation_wids.discard,
+        clear=state.selected_time_calculation_wids.clear,
+    )
 
 
 def _render_package_summary(state: WizardState) -> None:
@@ -564,7 +630,7 @@ def _render_package_summary(state: WizardState) -> None:
              "selected": n.selected, "wid": n.source_wid}
             for n in pkg.closure.nodes.values()
         ]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, hide_index=True)
 
 
 def _render_destination_matching(state: WizardState, *, auto_start: bool = False) -> bool:
@@ -593,6 +659,95 @@ def _render_destination_matching(state: WizardState, *, auto_start: bool = False
         button_label="Build destination indexes",
         auto_start=auto_start,
     )
+
+
+def _render_save_session(state: WizardState) -> None:
+    """Save the selection to disk, where a browser reload cannot reach it.
+
+    This step is where the unrecoverable work happens: a selection of thirty
+    reports assembled across half a dozen searches lives only in
+    ``st.session_state``, which is scoped to a websocket connection. Closing
+    the tab loses it. Nothing else in the wizard costs as much to redo.
+    """
+    picked = (
+        len(state.selected_reports_added)
+        + len(state.selected_dashboards_added)
+        + len(state.selected_field_wids)
+        + len(state.selected_time_calculation_wids)
+    )
+    if not picked:
+        return
+
+    # Two saves, because they fail in different ways. The server-side one is
+    # a click away and survives a browser reload. It does not survive the app
+    # restarting, which a hosted container does on every redeploy, on waking
+    # from idle, and on running out of memory — and it takes the whole
+    # out/ directory with it. The download is the copy that outlives all of
+    # that, because it is on the consultant's own machine.
+    st.download_button(
+        f"Download this session ({picked} object(s))",
+        data=session_store.serialise(state),
+        file_name=session_store.download_name(state),
+        mime="application/json",
+        key="session_download",
+        help="Keeps a copy on your machine. Re-upload it from the Connect "
+             "step. This is the copy that survives the app restarting.",
+    )
+
+    if st.button(
+        f"Save this session ({picked} object(s))",
+        key="session_save_select",
+        help="Writes the tenants, usernames and selection to out/sessions. "
+             "Passwords and approvals are never saved. Faster than the "
+             "download, but lost if the app restarts.",
+    ):
+        path = session_store.save_session(
+            state, directory=workspace.user_dir(session_store.SESSION_DIR)
+        )
+        theme.banner(
+            "success",
+            "Session saved",
+            f"Written to `{path}`. If this tab reloads, resume it from the "
+            "Connect step.",
+            remedy=(
+                "Keep this tab's URL. Saved sessions are private to the "
+                f"workspace in the address bar (`{workspace.shared_link()}`), "
+                "so a link without it — or somebody else's link — will not "
+                "find this session."
+            ),
+            remedy_label="Before you close the tab",
+        )
+
+
+def _catalog_headline(state: WizardState, specs: list[IndexSpec], *, running: bool) -> None:
+    """One line, above the pickers, standing in for thirteen status rows.
+
+    Select used to open with a status row per index — up to thirteen of them
+    across three sweep sections — before a single thing the user could click.
+    That reads as the app talking to itself. The rows still exist, in the
+    expander below the pickers, for when a sweep misbehaves; what belongs up
+    here is only whether the catalogs are usable yet.
+    """
+    built = [s for s in specs if getattr(state, s.index_attr) is not None]
+    skipped = [
+        s for s in specs if s.implementer_gated and state.implementer_required
+    ]
+    total = len(specs) - len(skipped)
+
+    if running:
+        st.caption(
+            f"Reading catalogs — {len(built)} of {total} ready. Start picking "
+            "now if what you want is already listed; Continue unlocks when "
+            "the rest land."
+        )
+    elif len(built) + len(skipped) >= len(specs):
+        st.caption(f"All {total} catalogs ready.")
+    else:
+        outstanding = total - len(built)
+        st.caption(
+            f"{outstanding} of {total} catalogs still to build — open "
+            "Catalog details below to start them."
+        )
 
 
 def _scope_caption(chosen: list[str]) -> str:
@@ -671,33 +826,77 @@ def render(state: WizardState) -> None:
 
     specs = _source_specs(chosen, connection)
     report_specs = _report_specs(connection) if "reports" in chosen else []
-    running = False
-    theme.section("Source indexes", eyebrow="Starts automatically")
-    running = bulk_build_indexes(
-        state,
-        specs,
-        job_attr="source_index_job",
-        button_label="Build source indexes",
-        auto_start=True,
-    ) or running
-    if report_specs:
-        theme.section("Report catalog", eyebrow="Background — does not block exact-name add")
+    dest_specs = (
+        _destination_specs(state.dest.connection)
+        if state.dest.connection is not None
+        else []
+    )
+    all_specs = specs + report_specs + dest_specs
+
+    # Read the disk caches before anything lays itself out. The pickers render
+    # above the sweep controls now, and ``bulk_build_indexes`` is what used to
+    # load the caches on its way past — running it second would make a picker
+    # claim its index was unbuilt while the cache sat on disk.
+    preload_cached_indexes(state, all_specs)
+    jobs_running = any(
+        getattr(state, attr) is not None
+        for attr in ("source_index_job", "report_index_job", "dest_index_job")
+    )
+
+    # Two reserved slots: the headline and the pickers are written last but
+    # appear first. Everything between here and there renders into the
+    # expander at the bottom of the page.
+    headline_slot = st.container()
+    picker_slot = st.container()
+
+    with st.expander(
+        "Catalog details",
+        expanded=bool(pending_specs(state, all_specs)) and not jobs_running,
+    ):
+        theme.section("Source indexes", eyebrow="Starts automatically")
         running = bulk_build_indexes(
             state,
-            report_specs,
-            job_attr="report_index_job",
-            button_label="Build report index",
+            specs,
+            job_attr="source_index_job",
+            button_label="Build source indexes",
             auto_start=True,
-        ) or running
-    running = _render_destination_matching(state, auto_start=True) or running
+        )
+        if report_specs:
+            theme.section(
+                "Report catalog", eyebrow="Background — does not block exact-name add"
+            )
+            running = bulk_build_indexes(
+                state,
+                report_specs,
+                job_attr="report_index_job",
+                button_label="Build report index",
+                auto_start=True,
+            ) or running
+        running = _render_destination_matching(state, auto_start=True) or running
 
-    st.divider()
-    # Pickers render while indexes are still sweeping: the dashboard catalog
-    # is the first source stage, so it can be selected before the calculated
-    # field sweep (~25s) finishes. Continue stays gated on the rest.
-    _render_pickers(state, chosen)
+    with headline_slot:
+        _catalog_headline(state, all_specs, running=running)
+        _render_save_session(state)
+    with picker_slot:
+        # Pickers render while indexes are still sweeping: the dashboard
+        # catalog is the first source stage, so it can be selected before the
+        # calculated field sweep (~25s) finishes. Continue stays gated on the
+        # rest.
+        _render_pickers(state, chosen)
+
     if running:
         st.rerun()
+
+
+def _sweeping(state: WizardState) -> bool:
+    """Whether the source sweep that fills these indexes is actually in flight.
+
+    This is the difference between "not built yet, sit tight" and "not built,
+    and nothing is going to build it" — a cancelled or failed job clears
+    ``source_index_job`` while leaving the indexes absent, and that case has
+    to keep reading as a real blocker with a rebuild remedy.
+    """
+    return state.source_index_job is not None
 
 
 def gate(state: WizardState) -> list[Blocker]:
@@ -705,6 +904,7 @@ def gate(state: WizardState) -> list[Blocker]:
     # Package is the source: selection is baked in, indexes are irrelevant.
     if state.package is not None:
         return blockers
+    waiting = _sweeping(state)
     if not state.object_kinds:
         blockers.append(
             Blocker(
@@ -762,8 +962,13 @@ def gate(state: WizardState) -> list[Blocker]:
                             "index is absent, so the gap surfaces as a live "
                             "write failure rather than a blocker here."
                         ),
-                        remedy="Enable Time calculations above — the tag and group "
-                               "indexes start with the source sweep.",
+                        remedy=(
+                            "Waiting for the source sweep to reach it."
+                            if waiting
+                            else "Rebuild the source indexes above — the tag and "
+                                 "group sweeps run with them."
+                        ),
+                        waiting=waiting,
                     )
                 )
     if state.selected_dashboards and state.prompt_set_index is None:
@@ -777,7 +982,12 @@ def gate(state: WizardState) -> list[Blocker]:
                     "on demand — the request criteria Workday exposes for them do "
                     "not filter — so the index is the only way to resolve them."
                 ),
-                remedy="Wait for the prompt set index (a few seconds), or rebuild it above.",
+                remedy=(
+                    "Waiting for the prompt set sweep (a few seconds)."
+                    if waiting
+                    else "Rebuild the source indexes above."
+                ),
+                waiting=waiting,
             )
         )
     if state.selected_dashboards and state.prompt_field_index is None:
@@ -792,7 +1002,12 @@ def gate(state: WizardState) -> list[Blocker]:
                     "the dependency never enters the closure and the prompt set "
                     "fails against the live tenant instead of here."
                 ),
-                remedy="Wait for the prompt field index (a few seconds), or rebuild it above.",
+                remedy=(
+                    "Waiting for the prompt field sweep (a few seconds)."
+                    if waiting
+                    else "Rebuild the source indexes above."
+                ),
+                waiting=waiting,
             )
         )
     # Both are dependencies of *reports*, and a dashboard drags its worklet
@@ -825,20 +1040,38 @@ def gate(state: WizardState) -> list[Blocker]:
                             "the index is absent, so the gap surfaces as a live "
                             "write failure rather than a blocker here."
                         ),
-                        remedy="Wait for it above (a few seconds), or rebuild.",
+                        remedy=(
+                            "Waiting for the source sweep to reach it "
+                            "(a few seconds)."
+                            if waiting
+                            else "Rebuild the source indexes above."
+                        ),
+                        waiting=waiting,
                     )
                 )
     if state.cf_index is None:
+        # The old copy said "even if you only selected reports" whatever the
+        # user had actually picked, which on the dashboard path read as the
+        # app having lost track of their answer. Name what they chose.
+        chosen_labels = [OBJECT_KINDS[k] for k in state.object_kinds if k in OBJECT_KINDS]
+        picked = (
+            chosen_labels[0].lower() if len(chosen_labels) == 1 else "these object types"
+        )
         blockers.append(
             Blocker(
                 node_id=None,
                 title="Calculated field index not built",
                 detail=(
-                    "Resolving dependencies needs the complete source calculated-field "
-                    "index, even if you only selected reports — every WID a report "
-                    "references has to be classified against it."
+                    "Resolving dependencies needs the complete source "
+                    f"calculated-field index, even when you only selected {picked} — "
+                    "every WID inside them has to be classified against it."
                 ),
-                remedy="Wait for the calculated field index above (~25s), or rebuild it.",
+                remedy=(
+                    "Waiting for the calculated field sweep (about 25s)."
+                    if waiting
+                    else "Rebuild the source indexes above."
+                ),
+                waiting=waiting,
             )
         )
     return blockers

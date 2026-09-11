@@ -84,6 +84,7 @@ from wdmigrator import DEFAULT_WSDL_PATH
 | `HANDOFF.md` | Session-by-session status log. What's done, what's next. |
 | `CLAUDE.md` | Deep reference: Workday domain knowledge, module interfaces, zeep patterns, the WID remapping algorithm. |
 | `docs/START_HERE.md` | The authoritative 6-step build plan, in order. |
+| `docs/HOSTING.md` | Running it as a shared app: memory, isolation, durability, rate limits. Read before deploying. |
 | `docs/WSDL_NOTES.md` | WSDL breakdown: operations, field lists, architectural notes. |
 | `docs/PROJECT_CHARTER.md` | Original charter. Historical — superseded by `CLAUDE.md`. |
 

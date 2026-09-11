@@ -25,6 +25,7 @@ import streamlit as st
 from wdmigrator.api import (
     Connection,
     IndexProgress,
+    PayloadStore,
     cache_path,
     calculated_field_match_index,
     calculated_measure_match_index,
@@ -33,18 +34,23 @@ from wdmigrator.api import (
     load_index,
     requires_implementer,
     save_index,
+    store_path_for,
 )
 from wdmigrator.ui import theme
 from wdmigrator.ui.components import render_job_progress
 from wdmigrator.ui.runner import READ_TIME_BUDGET, pump, start_job
 
-#: Measured live against commitconsulting_dpt1 (~9,650 fields / ~5,150 reports
-#: at Count=999). Shown up front so a first-time user knows what they're
-#: waiting on before clicking, not after. Everything not listed is a single
-#: page.
+#: Measured live against commitconsulting_dpt1 (8,981 fields / 4,515 reports).
+#: Shown up front so a first-time user knows what they're waiting on before
+#: clicking, not after. Everything not listed is a single page.
+#:
+#: The report figure covers 23 small pages rather than 6 large ones — see
+#: ``REPORT_PAGE_SIZE``. Small pages cost ~15% more time and a third of the
+#: peak memory, which is the right way round for a hosted app whose memory
+#: budget is shared with everyone else using it.
 BUILD_ESTIMATE = {
-    "calculated_field": "about 25 seconds",
-    "report": "about 2.5 minutes",
+    "calculated_field": "about 15 seconds",
+    "report": "about 80 seconds",
 }
 _DEFAULT_ESTIMATE = "a few seconds"
 
@@ -54,8 +60,8 @@ _DEFAULT_ESTIMATE = "a few seconds"
 #: instead (see :func:`_estimate_remaining_seconds`), so these numbers only
 #: ever matter for the *rest* of the queue.
 BUILD_ESTIMATE_SECONDS = {
-    "calculated_field": 25.0,
-    "report": 150.0,
+    "calculated_field": 15.0,
+    "report": 80.0,
 }
 _DEFAULT_ESTIMATE_SECONDS = 5.0
 
@@ -147,7 +153,7 @@ def age_label(seconds: float) -> str:
     return f"{int(hours / 24)}d ago"
 
 
-def _format_duration(seconds: float) -> str:
+def format_duration(seconds: float) -> str:
     """Render a countdown the way a user actually wants to read it.
 
     Coarse on purpose — a "remaining" estimate built from one in-flight page's
@@ -170,6 +176,10 @@ def _format_duration(seconds: float) -> str:
         return f"about {max(1, int(minutes + 0.5))} min"
     hours = minutes / 60
     return f"about {hours:.1f}h"
+
+
+#: Kept for the callers that predate Scope needing this. Same function.
+_format_duration = format_duration
 
 
 @dataclass
@@ -221,7 +231,14 @@ def _chained_build(state, specs: list[IndexSpec]) -> Iterator[_StageEvent]:
         if spec.implementer_gated and state.implementer_required:
             continue
         try:
-            for progress in spec.iterator_fn(spec.connection):
+            # Payloads stream straight to disk. Holding them in memory costs
+            # 585 MB for a single report index, which is most of a hosted
+            # app's entire budget — and that budget is shared with every other
+            # consultant using it, including any of them mid-write.
+            store = PayloadStore.create(
+                store_path_for(cache_path(spec.connection, spec.kind))
+            )
+            for progress in spec.iterator_fn(spec.connection, payload_store=store):
                 yield _StageEvent(
                     stage=stage,
                     total_stages=total,
@@ -274,6 +291,14 @@ def _missing(state, specs: list[IndexSpec]) -> list[IndexSpec]:
         if getattr(state, s.index_attr) is None
         and not (s.implementer_gated and state.implementer_required)
     ]
+
+
+#: Public aliases. Select needs to know what is already on disk and what is
+#: still outstanding *before* it lays the page out — it puts the pickers above
+#: the sweep controls now, and a picker that renders before the disk cache is
+#: loaded says "index not built" about an index that is sitting right there.
+preload_cached_indexes = _load_cached
+pending_specs = _missing
 
 
 def _estimate_remaining_seconds(
@@ -375,7 +400,7 @@ def bulk_build_indexes(
                     f"{button_label} ({len(missing)} to build: {estimates})",
                     key=f"{job_attr}_start",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                 )
                 if can_auto or clicked:
                     start_specs = missing
@@ -384,7 +409,7 @@ def bulk_build_indexes(
             if built and st.button(
                 "Rebuild all",
                 key=f"{job_attr}_rebuild",
-                use_container_width=True,
+                width="stretch",
             ):
                 for spec in built:
                     setattr(state, spec.index_attr, None)
@@ -411,7 +436,7 @@ def bulk_build_indexes(
             detail = _progress_detail(last, getattr(state, specs_attr, None))
         render_job_progress(job, label=label, fraction=fraction, detail=detail)
     with col2:
-        if st.button("Cancel", key=f"{job_attr}_cancel", use_container_width=True):
+        if st.button("Cancel", key=f"{job_attr}_cancel", width="stretch"):
             job.cancel()
             return True
 

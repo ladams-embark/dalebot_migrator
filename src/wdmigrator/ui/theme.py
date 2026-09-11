@@ -681,11 +681,15 @@ def section(title: str, caption: str | None = None, eyebrow: str | None = None) 
 
 
 def banner(kind: str, title: str, body: str | None = None, *,
-           remedy: str | None = None, where: str | None = None) -> None:
+           remedy: str | None = None, where: str | None = None,
+           remedy_label: str = "Fix") -> None:
     """A status banner. ``kind`` is one of success/info/warning/danger/neutral.
 
     Used in place of ``st.success``/``st.error``/``st.warning``, whose default
     icons are emoji.
+
+    ``remedy_label`` exists because "Fix:" is a lie on a banner that is only
+    reporting that something has not finished yet — see ``Blocker.waiting``.
     """
     parts = [f'<div class="cmt-banner cmt-banner--{kind}">', '<div class="cmt-banner__title">',
              _esc(title)]
@@ -695,7 +699,10 @@ def banner(kind: str, title: str, body: str | None = None, *,
     if body:
         parts.append(f'<div class="cmt-banner__body">{_esc(body)}</div>')
     if remedy:
-        parts.append(f'<div class="cmt-banner__remedy"><strong>Fix:</strong> {_esc(remedy)}</div>')
+        parts.append(
+            f'<div class="cmt-banner__remedy"><strong>{_esc(remedy_label)}:</strong> '
+            f'{_esc(remedy)}</div>'
+        )
     parts.append("</div>")
     st.markdown("".join(parts), unsafe_allow_html=True)
 

@@ -27,6 +27,7 @@ from wdmigrator.api import (
     TIME_TRACKING_KINDS,
     TIME_TRACKING_SERVICE_NAME,
     VerifyStatus,
+    WriteStatus,
     build_plan,
     find_nodes_using_reference_values,
     iter_check_existence,
@@ -108,6 +109,96 @@ def _write_run_log(state: WizardState, records) -> None:
     state.run_log_path = str(path)
 
 
+def _rollback_worksheet(state: WizardState, records) -> str:
+    """A list of everything this run created, for undoing it by hand.
+
+    This service has no delete operation, so there is no rollback to offer —
+    but "you cannot undo this" is not the same as "you have no idea what to
+    undo". Someone who has to reverse a migration has to do it object by
+    object in the Workday UI, and the only thing standing between them and
+    that job is the destination WID of each object, which lives in this run's
+    records and nowhere else once the tab is closed.
+
+    Only CREATEs are listed. A SKIP wrote nothing, and an UPDATE overwrote an
+    object that was already there — reversing that needs the previous
+    definition, which this tool never held and cannot reconstruct. Both are
+    said plainly rather than left for someone to infer from an absence.
+    """
+    tenant = state.dest.target.tenant if state.dest.target is not None else "(unknown)"
+    created = [
+        r
+        for r in records
+        if r.action is Action.CREATE
+        and r.status in (WriteStatus.SUCCESS, WriteStatus.INDETERMINATE)
+    ]
+    updated = [r for r in records if r.action is Action.UPDATE]
+    indeterminate = [r for r in records if r.status is WriteStatus.INDETERMINATE]
+
+    lines = [
+        f"Rollback worksheet — {tenant}",
+        f"Generated {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "This tool cannot undo anything it wrote: the Workday web service it",
+        "uses has no delete operation. Reversing this run means deleting or",
+        "disabling each object below by hand in the Workday UI.",
+        "",
+        f"{len(created)} object(s) were created by this run:",
+        "",
+    ]
+    for record in sorted(created, key=lambda r: (r.kind, r.name or "")):
+        flag = "  [INDETERMINATE - may or may not exist] " if record in indeterminate else "  "
+        lines.append(
+            f"{flag}{record.kind:24} {record.name or '(unnamed)'}\n"
+            f"      destination WID: {record.dest_wid or '(not returned)'}\n"
+            f"      source WID     : {record.node_id}"
+        )
+    if not created:
+        lines.append("  (none — every object already existed and was reused)")
+
+    lines += ["", "Not listed, and why:", ""]
+    lines.append(
+        "  SKIPPED objects wrote nothing. The destination already had them and"
+    )
+    lines.append("  they were reused unchanged, so there is nothing to reverse.")
+    if updated:
+        lines += [
+            "",
+            f"  {len(updated)} object(s) were UPDATED rather than created. Reversing an",
+            "  update needs the definition that was there before it, which this tool",
+            "  never held and cannot reconstruct. Recover those from a tenant backup",
+            "  or rebuild them by hand:",
+            "",
+        ]
+        for record in updated:
+            lines.append(f"    {record.kind:24} {record.name or '(unnamed)'}")
+    if indeterminate:
+        lines += [
+            "",
+            f"  {len(indeterminate)} object(s) ended INDETERMINATE: the request left this tool",
+            "  and no answer came back, so the destination may or may not hold them.",
+            "  Check each one in Workday before assuming either way.",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _render_rollback_worksheet(state: WizardState, records) -> None:
+    theme.section(
+        "If you need to undo this",
+        "There is no rollback. The web service this tool uses has no delete "
+        "operation, so reversing a run means doing it by hand in Workday — "
+        "and the destination WIDs you would need for that exist in this "
+        "session and nowhere else once the tab closes.",
+        eyebrow="No delete operation",
+    )
+    st.download_button(
+        "Download rollback worksheet (TXT)",
+        data=_rollback_worksheet(state, records).encode("utf-8"),
+        file_name="rollback_worksheet.txt",
+        mime="text/plain",
+        width="stretch",
+    )
+
+
 def render(state: WizardState) -> None:
     st.header("Results")
 
@@ -159,20 +250,20 @@ def render(state: WizardState) -> None:
         }
         for r in records
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, hide_index=True)
 
     col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
             "Download results (CSV)", data=_records_to_csv(records),
             file_name="migration_results.csv", mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
     with col2:
         st.download_button(
             "Download results (JSON)", data=_records_to_json(records),
             file_name="migration_results.json", mime="application/json",
-            use_container_width=True,
+            width="stretch",
         )
     wid_map = _wid_map_from(records)
     with col3:
@@ -181,13 +272,15 @@ def render(state: WizardState) -> None:
                 "Download WID map (JSON)",
                 data=json.dumps(wid_map, indent=2).encode("utf-8"),
                 file_name="wid_map.json", mime="application/json",
-                use_container_width=True,
+                width="stretch",
             )
 
     if state.run_log_path:
         st.caption(f"Run log written to `{state.run_log_path}`")
 
     if is_live:
+        st.divider()
+        _render_rollback_worksheet(state, records)
         st.divider()
         _render_restore(state)
         st.divider()
@@ -436,7 +529,7 @@ def _render_restore(state: WizardState) -> None:
             if r.action is Action.UPDATE or r.fault
         ]
         if touched:
-            st.dataframe(touched, use_container_width=True, hide_index=True)
+            st.dataframe(touched, hide_index=True)
         else:
             st.caption(
                 "No objects needed an UPDATE — either every row was left "
@@ -451,7 +544,6 @@ def _render_restore(state: WizardState) -> None:
     edited = st.data_editor(
         pd.DataFrame(rows).drop(columns=["_wid"]),
         hide_index=True,
-        use_container_width=True,
         disabled=["Object", "Element", "Source value", "Also on"],
         column_config={
             "Restore as (ID type)": st.column_config.TextColumn(
@@ -585,7 +677,6 @@ def _render_verify(state: WizardState) -> None:
                 }
                 for r in problems
             ],
-            use_container_width=True,
             hide_index=True,
         )
     else:

@@ -5,6 +5,11 @@ criteria at all, and report search is exact-match — so discovery means buildin
 a local index and searching that. See `inventory.py` for the details.
 """
 
+from wdmigrator.discovery.payload_store import (
+    PayloadStore,
+    PayloadUnavailable,
+    store_path_for,
+)
 from wdmigrator.discovery.inventory import (
     ALL_DASHBOARD_FLAVOURS,
     DASHBOARD_FLAVOURS,
@@ -29,6 +34,7 @@ from wdmigrator.discovery.inventory import (
     build_index,
     cache_path,
     CalculatedFieldMatchIndex,
+    Capabilities,
     calculated_field_data,
     calculated_field_shape,
     calculated_measure_data,
@@ -64,11 +70,15 @@ from wdmigrator.discovery.inventory import (
     lookup_time_calculation,
     lookup_time_calculation_group,
     lookup_time_calculation_tag,
+    probe_capabilities,
     requires_implementer,
     save_index,
 )
 
 __all__ = [
+    "PayloadStore",
+    "PayloadUnavailable",
+    "store_path_for",
     "ALL_DASHBOARD_FLAVOURS",
     "DASHBOARD_FLAVOURS",
     "DELIVERED_DASHBOARD_FLAVOURS",
@@ -127,6 +137,8 @@ __all__ = [
     "lookup_time_calculation",
     "lookup_time_calculation_group",
     "lookup_time_calculation_tag",
+    "Capabilities",
+    "probe_capabilities",
     "requires_implementer",
     "save_index",
 ]

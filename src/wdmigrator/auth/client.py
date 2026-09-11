@@ -36,7 +36,7 @@ from zeep.wsse import UsernameToken
 
 from wdmigrator import DEFAULT_WSDL_PATH
 from wdmigrator.config.targets import TenantTarget
-from wdmigrator.ratelimit import RateLimiter
+from wdmigrator.ratelimit import RateLimiter, shared_limiter
 from wdmigrator.secrets import Secret, redact
 
 #: Confirmed working service. `Report_Metadata` defines the same operations but
@@ -294,10 +294,10 @@ def make_client(
 
     service = _bind_to_endpoint(client, endpoint, target)
 
-    limiter = (
-        RateLimiter(calls_per_second=calls_per_second)
-        if calls_per_second is not None
-        else RateLimiter()
+    # Shared per tenant across the whole process, not per connection. Workday
+    # rate-limits the tenant, so two sessions pointed at it are one budget.
+    limiter = shared_limiter(
+        f"{target.services_host}|{target.tenant}", calls_per_second=calls_per_second
     )
 
     return Connection(
