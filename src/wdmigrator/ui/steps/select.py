@@ -167,6 +167,49 @@ def _report_specs(connection) -> list[IndexSpec]:
     ]
 
 
+def _render_selection(
+    state: WizardState,
+    *,
+    wids,
+    label_for,
+    noun: str,
+    key_prefix: str,
+    remove,
+    clear,
+) -> None:
+    """The running list of what is picked, with a way to drop one of them.
+
+    Selections bank additively — that is what stopped them vanishing when the
+    filter changed, and it has to stay — but for a long time the only inverse
+    was a Clear that dropped every pick of that kind. Noticing the seventh of
+    twelve reports was the wrong one then meant redoing all twelve. Each row
+    gets its own Remove; Clear stays for starting over deliberately.
+    """
+    wids = list(wids)
+    if not wids:
+        return
+    theme.figures([(f"{noun.capitalize()} selected", len(wids))])
+    with st.expander(f"Selected {noun} ({len(wids)})"):
+        for wid in wids:
+            row = st.columns([8, 1])
+            with row[0]:
+                st.write(label_for(wid))
+            with row[1]:
+                if st.button(
+                    "Remove",
+                    key=f"{key_prefix}_rm_{wid}",
+                    use_container_width=True,
+                    help=f"Drop this one. The other {len(wids) - 1} stay selected.",
+                ):
+                    remove(wid)
+                    reset_downstream(state, from_step="plan")
+                    st.rerun()
+    if st.button(f"Clear all {noun}", key=f"{key_prefix}_clear"):
+        clear()
+        reset_downstream(state, from_step="plan")
+        st.rerun()
+
+
 def _bank_payloads(rows, df, store: dict, payload_for) -> int:
     """Copy newly highlighted rows into a wid-to-payload map. Add-only."""
     added = 0
@@ -258,12 +301,19 @@ def _render_calculated_fields(state: WizardState) -> None:
                 reset_downstream(state, from_step="plan")
                 st.rerun()
 
-    if state.selected_field_wids:
-        theme.figures([("Fields selected", len(state.selected_field_wids))])
-        if st.button("Clear calculated field selections", key="cf_clear"):
-            state.selected_field_wids.clear()
-            reset_downstream(state, from_step="plan")
-            st.rerun()
+    def _field_label(wid: str) -> str:
+        summary = state.cf_index.summaries.get(wid) if state.cf_index else None
+        return getattr(summary, "name", None) or wid
+
+    _render_selection(
+        state,
+        wids=sorted(state.selected_field_wids),
+        label_for=_field_label,
+        noun="calculated fields",
+        key_prefix="cf",
+        remove=state.selected_field_wids.discard,
+        clear=state.selected_field_wids.clear,
+    )
 
 
 def _render_reports(state: WizardState) -> None:
@@ -362,21 +412,28 @@ def _render_reports(state: WizardState) -> None:
 
     state.selected_reports = dict(state.selected_reports_added)
 
-    if state.selected_reports:
-        theme.figures([("Reports selected", len(state.selected_reports))])
-        # Added reports are no longer visible as highlighted table rows once the
-        # filter moves on, so they are listed by name. Picking the wrong report
-        # cannot be undone in the destination, which makes "what exactly is in
-        # my selection" worth showing rather than just counting.
-        with st.expander(f"Selected reports ({len(state.selected_reports)})"):
-            for wid, payload in state.selected_reports.items():
-                data = payload.get("Tenanted_Report_Definition_Data") or {}
-                st.write(f"- {data.get('Name') or wid}")
-        if st.button("Clear report selections", key="report_clear"):
-            state.selected_reports_added = {}
-            state.selected_reports = {}
-            reset_downstream(state, from_step="plan")
-            st.rerun()
+    # Added reports are no longer visible as highlighted table rows once the
+    # filter moves on, so they are listed by name. Picking the wrong report
+    # cannot be undone in the destination, which makes "what exactly is in my
+    # selection" worth showing rather than just counting.
+    def _report_label(wid: str) -> str:
+        payload = state.selected_reports.get(wid) or {}
+        data = payload.get("Tenanted_Report_Definition_Data") or {}
+        return data.get("Name") or wid
+
+    def _clear_reports() -> None:
+        state.selected_reports_added = {}
+        state.selected_reports = {}
+
+    _render_selection(
+        state,
+        wids=list(state.selected_reports),
+        label_for=_report_label,
+        noun="reports",
+        key_prefix="report",
+        remove=lambda wid: state.selected_reports_added.pop(wid, None),
+        clear=_clear_reports,
+    )
 
 
 def _render_dashboards(state: WizardState) -> None:
@@ -448,17 +505,23 @@ def _render_dashboards(state: WizardState) -> None:
 
     state.selected_dashboards = dict(state.selected_dashboards_added)
 
-    if state.selected_dashboards:
-        theme.figures([("Dashboards selected", len(state.selected_dashboards))])
-        with st.expander(f"Selected dashboards ({len(state.selected_dashboards)})"):
-            for wid, payload in state.selected_dashboards.items():
-                summary = state.dashboard_index.summaries.get(wid)
-                st.write(f"- {getattr(summary, 'name', None) or wid}")
-        if st.button("Clear dashboard selections", key="dashboard_clear"):
-            state.selected_dashboards_added = {}
-            state.selected_dashboards = {}
-            reset_downstream(state, from_step="plan")
-            st.rerun()
+    def _dashboard_label(wid: str) -> str:
+        summary = state.dashboard_index.summaries.get(wid)
+        return getattr(summary, "name", None) or wid
+
+    def _clear_dashboards() -> None:
+        state.selected_dashboards_added = {}
+        state.selected_dashboards = {}
+
+    _render_selection(
+        state,
+        wids=list(state.selected_dashboards),
+        label_for=_dashboard_label,
+        noun="dashboards",
+        key_prefix="dashboard",
+        remove=lambda wid: state.selected_dashboards_added.pop(wid, None),
+        clear=_clear_dashboards,
+    )
 
 
 def _render_time_calculations(state: WizardState) -> None:
@@ -517,20 +580,21 @@ def _render_time_calculations(state: WizardState) -> None:
         reset_downstream(state, from_step="plan")
         st.rerun()
 
-    if state.selected_time_calculation_wids:
-        theme.figures(
-            [("Time calculations selected", len(state.selected_time_calculation_wids))]
-        )
-        with st.expander(
-            f"Selected time calculations ({len(state.selected_time_calculation_wids)})"
-        ):
-            for wid in sorted(state.selected_time_calculation_wids):
-                s = state.time_calculation_index.summaries.get(wid)
-                st.write(f"• {s.name if s else wid} — {s.reference_id if s else ''}")
-        if st.button("Clear selections", key="tc_clear"):
-            state.selected_time_calculation_wids = set()
-            reset_downstream(state, from_step="plan")
-            st.rerun()
+    def _tc_label(wid: str) -> str:
+        s = state.time_calculation_index.summaries.get(wid)
+        if s is None:
+            return wid
+        return f"{s.name or wid} — {s.reference_id or ''}".rstrip(" —")
+
+    _render_selection(
+        state,
+        wids=sorted(state.selected_time_calculation_wids),
+        label_for=_tc_label,
+        noun="time calculations",
+        key_prefix="tc",
+        remove=state.selected_time_calculation_wids.discard,
+        clear=state.selected_time_calculation_wids.clear,
+    )
 
 
 def _render_package_summary(state: WizardState) -> None:
