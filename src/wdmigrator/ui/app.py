@@ -107,6 +107,14 @@ def main() -> None:
     )
     theme.stepper(state.step, STEP_ORDER, STEP_TITLES, _unlocked_through(state))
     st.caption(_STEP_HINT[state.step])
+
+    # One-shot. Shown on the render *after* the change that caused it, which
+    # is the first render the user actually sees — the reset itself happens
+    # inside a callback that ends in st.rerun().
+    if state.discarded_notice:
+        theme.banner("warning", "Downstream work was cleared", state.discarded_notice)
+        state.discarded_notice = ""
+
     st.divider()
 
     module = _STEPS[state.step]
